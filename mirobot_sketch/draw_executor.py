@@ -93,7 +93,9 @@ class Planner:
         self.sy = cfg["paper_x_to_robot_y_sign"]
         self.sz = cfg["paper_y_to_robot_z_sign"]
         pen = cfg["pen"]
-        self.up_dx = pen["retract_x_sign"] * pen["up_clearance_mm"]
+        # 공중 경로는 미측정 영역도 지날 수 있으므로 실물 탐색에서 쓴 여유(8 mm)를 유지한다.
+        clearance = max(float(pen["up_clearance_mm"]), float(pen.get("air_clearance_mm", 8.0))) if air else float(pen["up_clearance_mm"])
+        self.up_dx = pen["retract_x_sign"] * clearance
         self.down_extra = -pen["retract_x_sign"] * pen["down_extra_mm"]  # 누르는 방향 = 후퇴의 반대
         pc = cfg["plane_compensation"]
         self.pa, self.pb = pc["a_per_mm_y"], pc["b_per_mm_z"]
@@ -133,13 +135,13 @@ class Planner:
         return cmds
 
 
-def estimate_time(strokes, cfg):
+def estimate_time(strokes, cfg, air=False):
     """그리기 시간 추정. CV(make_strokes, GUI)와 실행기가 같은 함수를 씁니다.
 
     반환 dict:
       draw_s       펜다운 이동 (길이 / draw 속도)
       travel_s     펜업 이동 (획 사이 거리 / travel 속도, 종이 중심 출발·복귀 포함)
-      pen_lift_s   획마다 펜 내림+올림 (up_clearance x 2 / approach 속도) — 획 수에 비례
+      pen_lift_s   일반: 획마다 펜 내림+올림. 공중: 시작점에서 후퇴하는 시간
       command_count, latency_s  명령마다 ok 응답을 기다리는 지연 (timing 설정의 가정값)
       motion_s     = draw + travel + pen_lift (가감속 제외 이론값)
       total_s      = motion + latency
@@ -156,7 +158,8 @@ def estimate_time(strokes, cfg):
     n = len(strokes)
     draw_s = down / f["draw"] * 60.0
     travel_s = up / f["travel"] * 60.0
-    pen_lift_s = clear * (2 * n + 1) / f["approach"] * 60.0
+    lift_mm = max(clear, float(cfg["pen"].get("air_clearance_mm", 8.0))) if air else clear * (2 * n + 1)
+    pen_lift_s = lift_mm / f["approach"] * 60.0
     command_count = 2 + sum(len(s) + 2 for s in strokes)  # Planner.plan과 같은 수
     latency = cfg.get("timing", {}).get("assumed_command_latency_s", 0.0)
     motion_s = draw_s + travel_s + pen_lift_s
@@ -307,7 +310,7 @@ def preflight(strokes, cfg, pending=False, air=False):
                 "그림 크기를 줄이거나, 실물 확인 전 넓은 범위를 쓰려면 '넓은 범위 허용'을 켜세요.")
         raise DrawError("preflight", f"종이 허용 범위를 벗어난 점 {len(bad)}개 (예: 획 {i}, x={x:.1f}, y={y:.1f} mm)", hint)
     planner = Planner(cfg, air=air)
-    return {"cmds": planner.plan(strokes), "timing": estimate_time(strokes, cfg), "planner": planner}
+    return {"cmds": planner.plan(strokes), "timing": estimate_time(strokes, cfg, air=air), "planner": planner}
 
 
 def open_link(cfg, virtual=False, virtual_speed=20.0, verbose=False):
@@ -408,6 +411,8 @@ def main():
     ap.add_argument("--air", action="store_true", help="펜을 대지 않고 펜업 높이로 경로만 따라감")
     ap.add_argument("--pending-limits", action="store_true",
                     help="실물 미확인 확장 범위(limits_pending_verification)로 검사 — 범위 확인 시험 전용")
+    ap.add_argument("--calibrate", action="store_true",
+                    help="그리기 전에 종이 캘리브레이션 실행 (종이·펜 위치를 바꿨을 때; 없으면 설정에 저장된 값으로 바로 그림)")
     ap.add_argument("--virtual", action="store_true", help="로봇 없이 가상 시뮬레이션으로 실행 (--execute와 함께)")
     ap.add_argument("--virtual-speed", type=float, default=20.0, help="가상 시뮬레이션 배속")
     args = ap.parse_args()
@@ -462,11 +467,38 @@ def main():
         return 3
     try:
         try:
-            tcp = connect_and_home(link, cfg)
+            from . import calibration
+            if args.calibrate and not args.virtual:
+                print("--calibrate: 종이 캘리브레이션을 시작합니다.")
+                try:
+                    measured = calibration.run_calibration(link, cfg)
+                except (calibration.CalibrationError, ValueError, KeyboardInterrupt) as e:
+                    record = {"result": "aborted", "reason": str(e), "samples": []}
+                    print(f"캘리브레이션 실패 기록: {calibration.save_report(record, args.config or paths.config_path())}")
+                    print(f"{e}. 설정은 갱신하지 않았습니다.")
+                    return 4
+                calibration_path = calibration.save_report(measured, args.config or paths.config_path())
+                if measured.get("result") != "ready":
+                    print(f"캘리브레이션을 완료하지 못했습니다. 설정은 유지했습니다. 기록: {calibration_path}")
+                    return 4
+                cfg = calibration.apply_calibration(
+                    cfg, measured["center_tcp_mm"], measured["plane_fit"],
+                    measured["selected_half_size_mm"], measured["max_residual_mm"])
+                calibration.save_config(args.config or paths.config_path(), cfg)
+                pre = preflight(strokes, cfg, args.pending_limits, args.air)
+                planner, cmds, timing = pre["planner"], pre["cmds"], pre["timing"]
+                tcp = tuple(measured["ready_tcp_mm"][axis] for axis in ("x", "y", "z"))
+                print(f"캘리브레이션 완료 ({2*measured['selected_half_size_mm']:g}×"
+                      f"{2*measured['selected_half_size_mm']:g} mm). 기록: {calibration_path}")
+            else:
+                tcp = connect_and_home(link, cfg)
             print(f"컨트롤러 상태: Idle, TCP: {tcp}")
             check_start(tcp, cfg)
         except DrawError as e:
             print(f"{e.message} 중단합니다." + (f" ({e.hint})" if e.hint else ""))
+            return 3
+        except (calibration.CalibrationError, ValueError, OSError) as e:
+            print(f"캘리브레이션/설정 오류로 중단했습니다: {e}. 자동 후퇴 없이 기존 설정을 유지합니다.")
             return 3
         if input("종이·펜·주변을 확인했으면 yes 입력: ").strip().lower() != "yes":
             print("취소했습니다.")

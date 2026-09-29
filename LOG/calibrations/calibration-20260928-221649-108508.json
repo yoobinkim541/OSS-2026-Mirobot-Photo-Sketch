@@ -1,0 +1,83 @@
+{
+  "created_local": "2026-09-28T22:16:49+09:00",
+  "config_path": "robot\\drawing_config.json",
+  "result": "ready",
+  "center_tcp_mm": {
+    "x": 196.057,
+    "y": 0.0,
+    "z": 229.653
+  },
+  "samples": [
+    {
+      "name": "bottom_left",
+      "paper_xy_mm": [
+        -40.0,
+        -40.0
+      ],
+      "tcp_mm": {
+        "x": 194.312,
+        "y": 40.035,
+        "z": 189.329
+      }
+    },
+    {
+      "name": "bottom_right",
+      "paper_xy_mm": [
+        40.0,
+        -40.0
+      ],
+      "tcp_mm": {
+        "x": 194.808,
+        "y": -40.045,
+        "z": 189.409
+      }
+    },
+    {
+      "name": "top_right",
+      "paper_xy_mm": [
+        40.0,
+        40.0
+      ],
+      "tcp_mm": {
+        "x": 196.32,
+        "y": -39.985,
+        "z": 269.346
+      }
+    },
+    {
+      "name": "top_left",
+      "paper_xy_mm": [
+        -40.0,
+        40.0
+      ],
+      "tcp_mm": {
+        "x": 197.795,
+        "y": 40.005,
+        "z": 269.349
+      }
+    }
+  ],
+  "plane_fit": {
+    "a_per_mm_y": 0.006123820734618639,
+    "b_per_mm_z": 0.031276437949508455,
+    "max_abs_residual_mm": 0.7335946794561079,
+    "rmse_mm": 0.5472170115824301,
+    "residuals_mm": {
+      "bottom_left": -0.7289760792344551,
+      "bottom_right": 0.25491737015782645,
+      "top_right": -0.7335946794561079,
+      "top_left": 0.2514670706678934,
+      "center": 0.0
+    }
+  },
+  "selected_half_size_mm": 40.0,
+  "tested_half_sizes_mm": [
+    40.0
+  ],
+  "ready_tcp_mm": {
+    "x": 191.046,
+    "y": 0.0,
+    "z": 229.369
+  },
+  "max_residual_mm": 1.0
+}

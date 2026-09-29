@@ -1,0 +1,18 @@
+{
+  "created_local": "2026-09-28T21:47:30+09:00",
+  "config_path": "robot\\drawing_config.json",
+  "result": "aborted",
+  "reason": "contact capture cancelled",
+  "samples": [],
+  "tested_half_sizes_mm": [
+    30.0,
+    35.0,
+    40.0
+  ],
+  "selected_half_size_mm": 40.0,
+  "center_tcp_mm": {
+    "x": 198.67,
+    "y": 0.0,
+    "z": 230.72
+  }
+}

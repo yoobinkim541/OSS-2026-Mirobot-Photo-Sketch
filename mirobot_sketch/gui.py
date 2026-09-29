@@ -35,7 +35,7 @@ except ImportError:  # 설치 안내 후 종료
     raise
 
 from . import draw_executor as de
-from . import limits
+from . import limits, robot_status
 from . import paper_mapping as pm
 from . import paths, presets, stages
 from . import sketch_pipeline as sp
@@ -99,6 +99,8 @@ class StatCard(ctk.CTkFrame):
 class SketchApp:
     def __init__(self, root):
         self.root = root
+        self._closing = False
+        self._ui_after = self._usb_after = self._icon_after = None
         self.root.title("Mirobot Sketch")
         self.root.geometry("1560x940")
         self.root.minsize(1200, 760)
@@ -106,6 +108,7 @@ class SketchApp:
         self._set_icon()
 
         self.cfg = de.load_config()
+        self._robot_usb_scan_busy = False
         # 이미지·설정·결과·편집 기록은 세션 하나에 둠 (화면 버튼과 에이전트 도구가 함께 사용)
         self.session = SketchSession(self.cfg)
         self.busy = False
@@ -125,6 +128,7 @@ class SketchApp:
         self.apply_type_preset()
         self._init_agent()
         self._poll_ui_queue()
+        self._usb_after = self.root.after(0, self._poll_robot_usb)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # 세션에서 읽는 값
@@ -149,13 +153,15 @@ class SketchApp:
         self._ui_queue.put((fn, args))
 
     def _poll_ui_queue(self):
+        if self._closing:
+            return
         try:
             while True:
                 fn, args = self._ui_queue.get_nowait()
                 fn(*args)
         except queue.Empty:
             pass
-        self.root.after(50, self._poll_ui_queue)
+        self._ui_after = self.root.after(50, self._poll_ui_queue)
 
     # ------------------------------------------------------------------ 창
     def _set_icon(self):
@@ -163,7 +169,8 @@ class SketchApp:
         try:
             if sys.platform.startswith("win") and paths.asset("app_icon.ico").exists():
                 # CustomTkinter가 시작 직후 자기 아이콘으로 덮어써서 조금 뒤에 다시 설정
-                self.root.after(250, lambda: self.root.iconbitmap(str(paths.asset("app_icon.ico"))))
+                self._icon_after = self.root.after(
+                    250, lambda: self.root.iconbitmap(str(paths.asset("app_icon.ico"))))
             if paths.asset("app_icon_256.png").exists():
                 self._icon_img = tk.PhotoImage(file=str(paths.asset("app_icon_256.png")))
                 self.root.iconphoto(True, self._icon_img)
@@ -194,6 +201,11 @@ class SketchApp:
                                        height=32, width=110, fg_color="transparent", border_width=1,
                                        text_color=TEXT)
         self.agent_btn.pack(side="right", padx=(0, 10))
+        self.robot_usb_status = ctk.CTkLabel(header, text="USB: 확인 중", font=font(11), text_color=MUTED)
+        self.robot_usb_status.pack(side="right", padx=(0, 12))
+        self.robot_controller_status = ctk.CTkLabel(header, text="제어기 상태: 미확인", font=font(11),
+                                                    text_color=MUTED)
+        self.robot_controller_status.pack(side="right", padx=(0, 10))
 
         # --- 왼쪽 설정 패널
         side = ctk.CTkScrollableFrame(self.root, width=340, fg_color="transparent")
@@ -690,6 +702,52 @@ class SketchApp:
     def _set_status(self, text):
         self._ui(lambda: self.status.configure(text=text))
 
+    def _poll_robot_usb(self):
+        """백그라운드에서 포트 목록만 확인합니다. 시리얼 포트는 열지 않습니다."""
+        if self._closing:
+            return
+        if not self._robot_usb_scan_busy:
+            self._robot_usb_scan_busy = True
+            threading.Thread(target=self._query_robot_usb, daemon=True).start()
+        self._usb_after = self.root.after(3000, self._poll_robot_usb)
+
+    def _query_robot_usb(self):
+        port = str(self.cfg.get("port") or "").strip()
+        if not port:
+            text, color = "USB: 포트 미설정", WARN
+        else:
+            try:
+                from serial.tools import list_ports
+                present = robot_status.port_is_present(port, list_ports.comports())
+            except Exception:
+                text, color = f"USB: {port} 확인 실패", WARN
+            else:
+                text = f"USB: {port} 감지" if present else f"USB: {port} 미감지"
+                color = OK if present else BAD
+        self._ui(self._show_robot_usb, text, color)
+        self._ui(self._finish_robot_usb_scan)
+
+    def _show_robot_usb(self, text, color):
+        self.robot_usb_status.configure(text=text, text_color=color)
+
+    def _finish_robot_usb_scan(self):
+        self._robot_usb_scan_busy = False
+
+    def set_robot_controller_status(self, state=None, recent=False):
+        """실제 드로잉에서 이미 열린 링크로 확인한 컨트롤러 상태를 표시합니다."""
+        text = robot_status.controller_status_text(state, recent=recent)
+        if not state:
+            color = MUTED
+        elif state == "Idle":
+            color = OK
+        elif state in ("Alarm", "연결 실패", "응답 없음"):
+            color = BAD
+        elif state in ("연결 중", "그리는 중"):
+            color = ACCENT
+        else:
+            color = WARN
+        self.robot_controller_status.configure(text=text, text_color=color)
+
     # ---------------------------------------------------------------- 에이전트
     def _init_agent(self):
         """오른쪽 에이전트 패널과 CLI용 로컬 브리지. 실패해도 앱의 나머지 기능은 그대로 동작."""
@@ -772,6 +830,13 @@ class SketchApp:
                 b.cancel()
         if self.bridge is not None:
             self.bridge.stop()
+        self._closing = True
+        for after_id in (self._ui_after, self._usb_after, self._icon_after, self._recompute_after):
+            if after_id is not None:
+                try:
+                    self.root.after_cancel(after_id)
+                except tk.TclError:
+                    pass
         self.root.destroy()
 
 

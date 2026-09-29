@@ -15,6 +15,7 @@
 
  "pen": {
   "up_clearance_mm": 2.5,
+  "air_clearance_mm": 8.0,
   "retract_x_sign": -1,
   "down_extra_mm": 0.0,
   "line_width_mm": 0.5
@@ -43,5 +44,8 @@
 
  "max_start_offset_mm": 5.0,
  "ack_timeout_s": 15.0,
- "idle_timeout_s": 180.0
+ "idle_timeout_s": 180.0,
+
+ "calibration": {"status": "pending_measurement", "half_size_mm": null, "max_residual_mm": null, "updated_local": null},
+ "_calibration_note": "mirobot-calibrate 또는 앱의 '다시 보정'을 실행하면 채워짐. 보정 없이도 저장된 값(plane_compensation, limits)으로 바로 그릴 수 있음."
 }

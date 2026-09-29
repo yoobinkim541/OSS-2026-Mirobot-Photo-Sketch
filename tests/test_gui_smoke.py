@@ -257,6 +257,42 @@ class GuiSmokeTest(unittest.TestCase):
         finally:
             app._on_close()
 
+    def test_draw_window_retries_after_start_position_failure(self):
+        from mirobot_sketch import draw_executor as de
+
+        root, app = make_app()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                p1, p2 = self._patched_dirs(d)
+                with p1, p2:
+                    p = Path(d) / "line.png"
+                    cv2.imwrite(str(p), golden.synthetic_images()["line"])
+                    app.load_image(p)
+                    self.assertTrue(pump(root, app, lambda: app.result is not None and app._workers == 0))
+                    app.session.update_params({"box_mm": 60, "epsilon_px": 4.0})
+                    app._schedule_recompute(0)
+                    self.assertTrue(pump(root, app, lambda: app._workers == 0 and
+                                         app.result["params"]["box_mm"] == 60))
+                    w = app.open_draw_window(launch_rviz=lambda *a, **k: None)
+                    w.virtual_var.set(True)
+                    with mock.patch.object(de, "check_start", side_effect=de.DrawError(
+                            "start", "시작점이 8.0 mm 떨어져 있습니다", "종이 중심을 확인하세요")):
+                        w.begin()
+                        self.assertTrue(pump(root, app, lambda: w.finished is not None))
+                    self.assertEqual(w.finished["result"]["result"], "not_started")
+                    self.assertEqual(str(w.begin_btn.cget("state")), "normal")
+                    self.assertIn("8.0 mm", w.todo.cget("text"))
+                    w.check_var.set(True)
+                    w.begin()
+                    self.assertIsNone(w.finished)
+                    self.assertFalse(w.check_var.get())
+                    self.assertTrue(pump(root, app, lambda: w.job.state == "confirm"))
+                    w.on_stop()
+                    self.assertTrue(pump(root, app, lambda: w.finished is not None))
+                    w.close()
+        finally:
+            close_quietly(app)
+
     def test_closing_app_while_drawing_stops_the_job(self):
         root, app = make_app()
         self.addCleanup(close_quietly, app)   # 실패해도 창을 닫아 다음 테스트에 안 번지게
@@ -267,6 +303,10 @@ class GuiSmokeTest(unittest.TestCase):
                 cv2.imwrite(str(p), golden.synthetic_images()["line"])
                 app.load_image(p)
                 self.assertTrue(pump(root, app, lambda: app.result is not None and app._workers == 0))
+                app.session.update_params({"box_mm": 60})
+                app._schedule_recompute(0)
+                self.assertTrue(pump(root, app, lambda: app._workers == 0 and
+                                     app.result["params"]["box_mm"] == 60))
                 w = app.open_draw_window(launch_rviz=lambda *a, **k: None)
                 w.virtual_var.set(True)
                 w.speed_var.set("1×")
@@ -294,6 +334,10 @@ class GuiSmokeTest(unittest.TestCase):
                 cv2.imwrite(str(p), golden.synthetic_images()["line"])
                 app.load_image(p)
                 self.assertTrue(pump(root, app, lambda: app.result is not None and app._workers == 0))
+                app.session.update_params({"box_mm": 60})
+                app._schedule_recompute(0)
+                self.assertTrue(pump(root, app, lambda: app._workers == 0 and
+                                     app.result["params"]["box_mm"] == 60))
                 w = app.open_draw_window(launch_rviz=lambda *a, **k: None)
                 w.begin()
                 self.assertTrue(app.drawing)                          # ①부터 잠금 (호밍 중 편집 금지)

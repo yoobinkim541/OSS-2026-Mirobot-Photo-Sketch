@@ -146,9 +146,9 @@ def pen_tip_offset(cfg):
 _GCODE_F = __import__("re").compile(r"F([\d.]+)")
 
 
-def plan_targets(strokes, cfg):
+def plan_targets(strokes, cfg, air=False):
     """실행기와 같은 계획 -> [(xyz_mm, 설명, pen_down, feed)]. 시작점은 종이 중심 펜다운(=사용자가 둔 위치)."""
-    planner = de.Planner(cfg)
+    planner = de.Planner(cfg, air=air)
     out = [(np.array(planner.pose(0, 0, True)), "start (pen at paper center)", False, 0.0)]
     for line, label in planner.plan(strokes):
         xyz = np.array([float(v) for v in _GCODE_XYZ.search(line).groups()])

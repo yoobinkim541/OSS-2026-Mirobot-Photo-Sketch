@@ -13,7 +13,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from mirobot_sketch import mirobot_sim as ms  # noqa: E402
 
-CFG = ms.de.load_config()
+import golden  # noqa: E402
+
+CFG = golden.default_cfg()
 
 
 class KinematicsTest(unittest.TestCase):

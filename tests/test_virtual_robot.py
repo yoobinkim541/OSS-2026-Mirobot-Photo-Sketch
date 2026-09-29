@@ -12,7 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from mirobot_sketch import draw_executor as de  # noqa: E402
 from mirobot_sketch.virtual_robot import VirtualMirobotLink  # noqa: E402
 
-CFG = de.load_config()
+import golden  # noqa: E402
+
+CFG = golden.default_cfg()
 SQUARE = [[(-10.0, -10.0), (10.0, -10.0), (10.0, 10.0), (-10.0, 10.0), (-10.0, -10.0)]]
 
 
