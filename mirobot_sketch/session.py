@@ -735,14 +735,65 @@ class SketchSession:
             self.sim = {"summary": summary, "raw": res}
         return summary
 
+    # ------------------------------------------------------------ 로봇 그리기 안내
+    ROBOT_STEPS = (
+        "종이를 고정하고, 로봇 펜 끝이 종이 가운데에 살짝 닿게 사람이 세팅한다 (앱은 시작 자세를 종이 중심으로 씀).",
+        "앱 왼쪽의 '로봇으로 그리기'를 열고 연결 방식을 '로봇'으로 고른 뒤 [연결 시작]. 컨트롤러가 Alarm이면 로봇 가운데 버튼을 2초 눌러 호밍 (이미 Idle이면 자동으로 넘어감).",
+        "처음이거나 큰 그림이면 '공중 모드'를 켜고 경로만 따라가 확인한다. 펜으로 그리려면 공중 모드를 끈다.",
+        "'종이·펜·주변 확인' 체크 후 [시작]. 멈추려면 [멈춤] 또는 로봇 비상 정지 (멈춘 뒤 자동 복구는 없음).",
+    )
+
+    def robot_guide(self):
+        """지금 그림이 로봇으로 갈 준비가 됐는지와 사람이 할 순서 (읽기 전용, 로봇은 앱 창에서 사람이 시작)."""
+        with self.lock:
+            cfg = self.cfg
+            pen, wide = limits.executor_region(cfg), limits.pending_region(cfg)
+            plane = cfg.get("plane_compensation", {}).get("status")
+            g = {"drawing_now": bool(self.drawing_lock),
+                 "pen_down_area_mm": {"x": [-pen.x_max, pen.x_max], "y": [pen.y_min, pen.top(0)],
+                                      "outline": [list(p) for p in pen.outline()]},
+                 "air_area_mm": {"x": [-wide.x_max, wide.x_max], "y": [wide.y_min, wide.top(0)]},
+                 "plane_status": plane,
+                 "paper_calibrated": plane == "verified",
+                 "steps_for_the_person": list(self.ROBOT_STEPS),
+                 "agent_cannot": "로봇 연결·호밍·시작·멈춤은 에이전트가 할 수 없다. 사람이 '로봇으로 그리기' 창에서 한다."}
+            r = self.result
+            if r is None:
+                g.update(ready=False, next="이미지를 열고 처리하세요.")
+                return g
+            t, pl = r["timing"], r["placement"]
+            g["drawing"] = {"strokes": t["stroke_count"], "estimated_minutes": round(t["total_s"] / 60, 1),
+                            "size_mm": [pl["drawing_width_mm"], pl["drawing_height_mm"]]}
+            sim = self.sim["summary"] if self.sim else None
+            g["simulation"] = sim
+            issues, notes = [], []
+            if sim is None:
+                issues.append("로봇 시뮬레이션이 아직 없다: simulate 도구로 관절 한계를 먼저 확인하세요.")
+            elif sim["verdict"].startswith("FAIL"):
+                issues.append(f"시뮬레이션 FAIL({sim['verdict']}): 그림 크기를 줄이세요.")
+            if r["out_of_pending"]:
+                issues.append(f"공중 확인용 넓은 범위 밖의 점이 {r['out_of_pending']}개: 그림 크기를 줄이세요.")
+            g["pen_down_possible"] = r["out_of_limits"] == 0 and not issues
+            if r["out_of_limits"] and not r["out_of_pending"]:
+                notes.append(f"펜으로 그릴 수 있는 범위 밖의 점이 {r['out_of_limits']}개: 공중 모드(+'넓은 범위')로 경로를 확인하거나, "
+                             "그림을 줄이거나, '종이·펜 위치 변경: 다시 보정'으로 접촉 영역을 측정한 뒤 펜으로 그린다.")
+            if plane != "verified":
+                notes.append("종이 평면 보정이 없다: 저장된 보정값을 쓴다. 모서리에서 펜이 안 닿거나 세게 눌릴 수 있으니 "
+                             "처음에는 공중 모드로 확인하세요.")
+            g.update(ready=not issues, issues=issues, notes=notes)
+            return g
+
     # ------------------------------------------------------------ 상태·그림
     def state(self):
         with self.lock:
             s = {"image": self.image_path, "image_type": self.image_type, "detail": self.detail,
                  "params": dict(self.params),
                  "executor_limit_mm": limits.executor_region(self.cfg).x_max * 2,
+                 "executor_limit_outline_mm": [list(p) for p in limits.executor_region(self.cfg).outline()],
                  "pending_limit_mm": limits.pending_region(self.cfg).x_max * 2,
-                 "pending_limit_outline_mm": [list(p) for p in limits.pending_region(self.cfg).outline()]}
+                 "pending_limit_outline_mm": [list(p) for p in limits.pending_region(self.cfg).outline()],
+                 "plane_status": self.cfg.get("plane_compensation", {}).get("status"),
+                 "drawing": bool(self.drawing_lock)}
             s["stages"] = [{"id": st.id, "label": st.label, "params": {p.key: self.params[p.key] for p in st.params}}
                            for st in stages.ALL_STAGES]
             if self.result:

@@ -22,7 +22,7 @@ def keys(d, prefix=""):
         if k.startswith("_"):
             continue  # 설명용 항목
         out.add(prefix + k)
-        if isinstance(v, dict):
+        if isinstance(v, dict) and k != "limits":     # limits는 대칭 사각형과 영역 형식이 모두 유효 (보정·수동 확대로 바뀜)
             out |= keys(v, prefix + k + ".")
     return out
 

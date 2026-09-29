@@ -579,6 +579,65 @@ class ToolboxTest(SessionTestBase):
         tb.call("set_params", {"detail": "low"})
         self.assertEqual(changes, ["result"])
 
+    def guide(self, tb):
+        parts, err = tb.call("robot_guide", {})
+        self.assertFalse(err, parts)
+        return json.loads(parts[0]["text"])
+
+    def test_robot_guide_without_image_says_to_open_one(self):
+        g = self.guide(AgentToolbox(SketchSession(golden.default_cfg())))
+        self.assertFalse(g["ready"])
+        self.assertIn("이미지", g["next"])
+        self.assertIn("로봇으로 그리기", g["agent_cannot"])
+        self.assertEqual(len(g["steps_for_the_person"]), 4)
+
+    def test_robot_guide_asks_for_simulation_then_reports_pen_down_readiness(self):
+        s = self.new_session()                         # 기본 100 mm = 펜으로 그릴 수 있는 범위(±50 mm)
+        tb = AgentToolbox(s)
+        g = self.guide(tb)
+        self.assertFalse(g["ready"])
+        self.assertTrue(any("simulate" in i for i in g["issues"]))
+        self.assertFalse(g["pen_down_possible"])
+        tb.call("simulate", {})
+        g = self.guide(tb)
+        self.assertTrue(g["ready"], g)
+        self.assertTrue(g["pen_down_possible"])
+        self.assertEqual(g["issues"], [])
+        self.assertFalse(g["paper_calibrated"])        # 기본 설정은 종이 보정 전
+        self.assertTrue(any("보정" in n for n in g["notes"]))
+        self.assertEqual(g["pen_down_area_mm"]["x"], [-50.0, 50.0])
+        self.assertGreater(g["drawing"]["strokes"], 0)
+
+    def test_robot_guide_says_air_mode_when_drawing_is_outside_pen_down_range(self):
+        s = self.new_session()
+        tb = AgentToolbox(s)
+        tb.call("set_params", {"box_mm": 110})         # ±55 mm: 펜 범위(±50) 밖, 넓은 범위 안
+        tb.call("simulate", {})
+        g = self.guide(tb)
+        self.assertFalse(g["pen_down_possible"])
+        self.assertTrue(g["ready"], g)                 # 공중 확인은 가능
+        self.assertTrue(any("공중 모드" in n for n in g["notes"]))
+
+    def test_robot_guide_and_state_are_readable_while_robot_draws(self):
+        s = self.new_session()
+        tb = AgentToolbox(s)
+        s.drawing_lock = True
+        self.assertTrue(self.guide(tb)["drawing_now"])
+        st = json.loads(tb.call("get_state", {})[0][0]["text"])
+        self.assertTrue(st["drawing"])
+        self.assertIn("plane_status", st)
+        self.assertEqual(st["executor_limit_outline_mm"][0], [-50.0, -50.0])
+        s.drawing_lock = False
+
+    def test_system_prompt_describes_the_real_robot_flow(self):
+        from mirobot_sketch.agent.tools import SYSTEM_PROMPT, TOOL_NAMES, READ_ONLY_TOOLS
+        self.assertIn("'로봇으로 그리기' 창", SYSTEM_PROMPT)
+        self.assertNotIn("내보내기 후 실행기에서 직접 시작합니다", SYSTEM_PROMPT)
+        for name in ("get_state", "view", "simulate", "robot_guide"):      # 프롬프트가 이름으로 부르는 도구는 실제로 있어야 함
+            self.assertIn(name, SYSTEM_PROMPT)
+            self.assertIn(name, TOOL_NAMES)
+        self.assertIn("robot_guide", READ_ONLY_TOOLS)
+
 
 class BridgeAndMcpTest(SessionTestBase):
     def test_bridge_requires_token(self):

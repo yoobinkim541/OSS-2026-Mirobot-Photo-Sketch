@@ -44,6 +44,51 @@ def pump(root, app, until, timeout=60):
     return False
 
 
+class GuiResponsivenessTest(unittest.TestCase):
+    def test_window_keeps_updating_while_robot_simulation_runs_in_a_thread(self):
+        """시뮬레이션(작은 numpy 연산의 긴 반복)이 다른 스레드에서 도는 동안 화면 스레드가 오래 멈추지 않아야 한다."""
+        import threading
+
+        import numpy as np
+
+        from mirobot_sketch import mirobot_sim as ms
+
+        root, app = make_app()
+        try:
+            targets = [(np.array([198.668, 0.0, 230.477]), "start", False, 0.0)]
+            for i in range(1, 60):     # 1 mm 간격 IK 약 2400회: 화면을 붙잡기에 충분한 CPU 작업
+                targets.append((np.array([198.668, 0.0 + 2.0 * (i % 2) * 20.0, 230.477 + 40.0 * (i % 3)]),
+                                f"move {i}", True, 300.0))
+            done = threading.Event()
+            worker = threading.Thread(target=lambda: (ms.simulate(targets), done.set()), daemon=True)
+            gaps, last = [], time.perf_counter()
+            worker.start()
+            t0 = time.perf_counter()
+            while not done.is_set() and time.perf_counter() - t0 < 120:
+                root.update()
+                now = time.perf_counter()
+                gaps.append(now - last)
+                last = now
+                time.sleep(0.005)
+            worker.join(5)
+            self.assertTrue(done.is_set(), "시뮬레이션이 끝나지 않음")
+            self.assertGreater(len(gaps), 10)
+            self.assertLess(max(gaps), 1.0, f"화면이 {max(gaps):.1f}초 멈춤 ({len(gaps)}회 갱신)")
+        finally:
+            close_quietly(app)
+
+    def test_app_shortens_the_thread_switch_interval(self):
+        from mirobot_sketch import gui
+
+        before = sys.getswitchinterval()
+        root, app = make_app()
+        try:
+            self.assertLessEqual(sys.getswitchinterval(), gui.GIL_SWITCH_INTERVAL_S + 1e-9)
+        finally:
+            close_quietly(app)
+            sys.setswitchinterval(before)
+
+
 class GuiSmokeTest(unittest.TestCase):
     def test_open_change_param_recomputes(self):
         root, app = make_app()
