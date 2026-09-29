@@ -1,9 +1,9 @@
 """
 에이전트 도구 — OpenRouter(앱 안에서 직접)와 MCP(Claude Code / Codex)가 같은 정의를 씀
 ======================================================================================
-도구는 SketchSession의 설정·획만 바꿉니다. 로봇을 움직이거나 파일을 쓰는 도구는
-없습니다 (설계 문서: 모델은 관절각이나 G-code를 직접 실행하지 않음). 실제 드로잉은
-사람이 실행기에서 확인(yes)해야만 시작됩니다.
+도구는 SketchSession의 설정·획을 바꾸고 로봇 준비 상태를 읽기만 합니다. 로봇을 움직이거나 파일을 쓰는
+도구는 없습니다 (설계 문서: 모델은 관절각이나 G-code를 직접 실행하지 않음). 실제 드로잉은
+사람이 앱의 '로봇으로 그리기' 창에서 확인해야만 시작됩니다.
 
 도구 결과는 부분(part)의 목록입니다:
   {"type": "text", "text": ...}
@@ -34,7 +34,10 @@ SYSTEM_PROMPT = """당신은 사진을 로봇 팔(WLKATA Mirobot)이 펜으로 �
 - 점 편집(move_point 등)은 get_stroke로 점 번호와 좌표를 확인한 뒤에 하세요.
 - 설정을 바꿔 다시 계산하면 번호가 새로 매겨지고 적용 전 제안은 취소됩니다(적용한 편집은 유지).
   설정을 먼저 정하고 편집은 마지막에 하세요.
-- 좌표는 종이 중심이 원점인 mm이며 x는 오른쪽, y는 위쪽이 +입니다. 허용 범위(state의 pending_limit_outline_mm) 밖은 거부됩니다.
+- 좌표는 종이 중심이 원점인 mm이며 x는 오른쪽, y는 위쪽이 +입니다. 허용 범위는 두 가지입니다.
+  펜으로 그릴 수 있는 범위(state의 executor_limit_outline_mm)와 공중 확인용 넓은 범위(pending_limit_outline_mm)이며,
+  넓은 범위 밖 좌표는 거부됩니다. 큰 그림은 위쪽 도달 한계 때문에 종이 중심보다 아래로 배치됩니다
+  (120mm 정사각형은 y −65 ~ +55).
 
 처리 단계 (view의 kind로 각 단계 결과를 볼 수 있음)
 - source 원본: rembg(배경 제거), frame(구도: auto 자동 / full 전체 / bust 상반신 / face 얼굴.
@@ -51,7 +54,16 @@ SYSTEM_PROMPT = """당신은 사진을 로봇 팔(WLKATA Mirobot)이 펜으로 �
 - image_type(photo/illustration/manga)과 detail(low/medium/high)은 여러 값을 한꺼번에 채우는 프리셋
 - 선이 빠졌으면 어느 단계에서 빠졌는지 view로 단계를 차례로 보고, 그 단계의 값을 바꾸세요.
 
-로봇을 직접 움직이는 기능은 없습니다. 드로잉은 사용자가 내보내기 후 실행기에서 직접 시작합니다.
+로봇으로 그리기까지 (사용자가 "로봇으로 그려줘", "이제 어떻게 해?"라고 하면)
+- 편집을 마치면 simulate로 관절 한계를 확인하고, robot_guide로 이 그림이 펜으로 그릴 수 있는 범위인지·시뮬레이션이
+  통과했는지·종이 보정이 있는지 확인해 결과를 쉬운 말로 알려 주세요. issues가 있으면 원인과 해결(그림 크기 줄이기 등)을,
+  notes가 있으면 주의점을 전하세요. steps_for_the_person의 순서로 사람이 할 일을 안내하세요.
+- 로봇 연결·호밍·시작·멈춤은 할 수 없습니다. 사람이 앱의 '로봇으로 그리기' 창에서 직접 합니다. 안내할 때 이렇게 말하세요.
+- 펜으로 그릴 수 있는 범위 밖이면 그 그림은 펜 대신 공중 모드(펜을 대지 않고 경로만)로만 확인할 수 있습니다.
+  펜으로 그리려면 크기를 줄이거나 '종이·펜 위치 변경: 다시 보정'으로 접촉 영역을 측정해야 합니다.
+- 사람이 종이 가운데에 펜 끝을 닿게 세팅하고 시작하면 앱이 그 자세를 종이 중심으로 씁니다. 세팅을 잊으면 그림이 어긋납니다.
+- 그리는 동안에는 설정·편집을 바꿀 수 없고 읽기만 됩니다. 진행 상황과 로봇 상태는 앱 창에서 사람이 봅니다.
+- '내보내기'(JSON)는 명령줄 실행기(mirobot-draw)에 넘길 때만 쓰는 별도 경로입니다.
 답변은 한국어로 짧고 분명하게 하세요."""
 
 VIEW_KINDS = ["original", *stages.PIPELINE_IDS, "edit", "lines", "strokes", "paper"]
@@ -175,9 +187,17 @@ TOOLS = [
         "description": "로봇 기구학 시뮬레이션으로 관절 한계(Soft limit)를 검사합니다. 수십 초 걸릴 수 있습니다.",
         "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
     },
+    {
+        "name": "robot_guide",
+        "description": (
+            "이 그림을 로봇으로 그릴 준비가 됐는지 읽기 전용으로 알려 줍니다: 펜으로 그릴 수 있는 범위와 공중 확인용 "
+            "범위, 그림이 그 범위 안인지, 시뮬레이션·종이 보정 상태, 문제(issues)와 주의(notes), 사람이 '로봇으로 그리기' "
+            "창에서 할 순서. 로봇을 움직이지는 않습니다."),
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
 ]
 TOOL_NAMES = {t["name"] for t in TOOLS}
-READ_ONLY_TOOLS = {"get_state", "view", "list_strokes", "get_stroke", "simulate"}   # 그리는 중에도 쓸 수 있는 도구
+READ_ONLY_TOOLS = {"get_state", "view", "list_strokes", "get_stroke", "simulate", "robot_guide"}   # 그리는 중에도 쓸 수 있는 도구
 
 
 def image_part(img_bgr, max_side=1024):
@@ -276,3 +296,6 @@ class AgentToolbox:
         summary = self.session.simulate()
         self.on_change("sim")
         return [text_part(summary)]
+
+    def _robot_guide(self):
+        return [text_part(self.session.robot_guide())]

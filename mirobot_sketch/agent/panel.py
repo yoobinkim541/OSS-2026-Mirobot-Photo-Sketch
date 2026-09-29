@@ -31,6 +31,7 @@ QUICK_PROMPTS = [
     "주요 윤곽은 유지하면서 15분 안에 그릴 수 있게 줄여줘",
     "얼굴 디테일을 더 살려줘",
     "로봇 시뮬레이션으로 관절 한계를 확인해줘",
+    "이 그림을 로봇으로 그릴 준비가 됐는지 확인하고 순서를 알려줘",
 ]
 
 
@@ -110,7 +111,7 @@ class AgentPanel(ctk.CTkFrame):
         ctk.CTkLabel(box, text="무엇을 도와드릴까요?", font=self.font(16, "bold")).pack(pady=(10, 4))
         ctk.CTkLabel(box, text="대화로 처리 설정을 바꾸고 획을 정리합니다.\n예: “배경 잡음을 지워줘”, “10분 안에 끝나게 해줘”",
                      font=self.font(12), text_color=MUTED, justify="center").pack()
-        ctk.CTkLabel(box, text="로봇을 직접 움직이지는 않습니다.", font=self.font(11), text_color=MUTED).pack(pady=(8, 0))
+        ctk.CTkLabel(box, text="로봇 연결·시작은 사용자가 '로봇으로 그리기' 창에서 직접 합니다.", font=self.font(11), text_color=MUTED).pack(pady=(8, 0))
         self._empty = True
 
     def _row(self):
