@@ -37,6 +37,15 @@ def contact_points(half_size_mm, half_height_mm=None):
             ("bottom_right", hx, -hy), ("top_right", hx, hy), ("top_left", -hx, hy)]
 
 
+def contact_points_rect(x0, y0, x1, y1):
+    """센터(종이 중심)와 종이 좌표 직사각형 네 모서리 접촉 샘플을 (이름, 종이 x, 종이 y) 순서로 반환."""
+    x0, y0, x1, y1 = (_finite(v, n) for v, n in zip((x0, y0, x1, y1), ("x0", "y0", "x1", "y1")))
+    if not (x0 < x1 and y0 < y1):
+        raise ValueError("직사각형은 x0 < x1, y0 < y1 이어야 합니다.")
+    return [("center", 0.0, 0.0), ("bottom_left", x0, y0), ("bottom_right", x1, y0),
+            ("top_right", x1, y1), ("top_left", x0, y1)]
+
+
 def square_outline(half_size_mm, segment_mm=10.0):
     """펜업 경로 점들. 각 변을 segment_mm 이하 길이로 나누고 끝에서 닫음."""
     h = _positive_finite(half_size_mm, "half_size_mm")
@@ -126,7 +135,18 @@ def fit_contact_plane(center_tcp_mm, corner_samples):
 def apply_calibration(cfg, center_tcp_mm, plane_fit, half_size_mm, max_residual_mm=1.0):
     """품질 기준을 통과한 보정만 설정에 반영한 새 사본으로 반환."""
     rectangular = isinstance(half_size_mm, (tuple, list))
-    if rectangular:
+    rect = None
+    if rectangular and len(half_size_mm) == 4:
+        # 종이 좌표 직사각형 (x0, y0, x1, y1): 중심이 종이 중심과 달라도 됨. 실행기 한계는 좌우 대칭 + 평평한 위쪽 영역.
+        from . import limits
+        points = contact_points_rect(*half_size_mm)[1:]
+        xm = max(abs(points[0][1]), abs(points[1][1]))
+        y_lo, y_hi = points[0][2], points[2][2]
+        region = limits.pending_region(cfg)
+        if not all(region.contains(x, y) for x in (-xm, xm) for y in (y_lo, y_hi)):
+            raise ValueError("측정 직사각형이 확장 허용 영역을 넘습니다.")
+        rect = (xm, y_lo, y_hi)
+    elif rectangular:
         if len(half_size_mm) != 2:
             raise ValueError("접촉 영역은 가로·세로 반폭 두 값이 필요합니다.")
         hx = _positive_finite(half_size_mm[0], "half_width_mm")
@@ -157,18 +177,35 @@ def apply_calibration(cfg, center_tcp_mm, plane_fit, half_size_mm, max_residual_
         "중심과 네 모서리의 사람 확인 접촉 샘플로 계산. "
         f"최대 X 잔차 {plane_fit['max_abs_residual_mm']:.3f} mm."
     )
-    updated["limits"] = {"max_abs_paper_x_mm": float(hx), "max_abs_paper_y_mm": float(hy)}
-    updated["_limits_note"] = (
-        f"캘리브레이션 중 펜업 경로와 네 모서리 접촉을 확인한 ±{hx:g} × ±{hy:g} mm 영역. "
-        "설치/종이/펜이 바뀌면 다시 캘리브레이션할 것."
-    )
+    if rect is not None:
+        xm, y_lo, y_hi = rect
+        updated["limits"] = {"x_max_mm": float(xm), "y_min_mm": float(y_lo),
+                             "roof_mm": [[0.0, float(y_hi)], [float(xm), float(y_hi)]]}
+        updated["_limits_note"] = (
+            f"캘리브레이션 중 펜업 경로와 네 모서리 접촉을 확인한 영역: 좌우 ±{xm:g}, 세로 {y_lo:g} ~ {y_hi:g} mm "
+            "(종이 중심 기준). 설치/종이/펜이 바뀌면 다시 캘리브레이션할 것."
+        )
+    else:
+        updated["limits"] = {"max_abs_paper_x_mm": float(hx), "max_abs_paper_y_mm": float(hy)}
+        updated["_limits_note"] = (
+            f"캘리브레이션 중 펜업 경로와 네 모서리 접촉을 확인한 ±{hx:g} × ±{hy:g} mm 영역. "
+            "설치/종이/펜이 바뀌면 다시 캘리브레이션할 것."
+        )
     updated["calibration"] = {
         "status": "verified",
-        **({"half_extents_mm": [hx, hy]} if rectangular else {"half_size_mm": hx}),
+        **({"rect_mm": [float(v) for v in half_size_mm]} if rect is not None else
+           {"half_extents_mm": [hx, hy]} if rectangular else {"half_size_mm": hx}),
         "max_residual_mm": float(plane_fit["max_abs_residual_mm"]),
         "updated_local": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
     return updated
+
+
+def _finite(value, name):
+    value = float(value)
+    if not math.isfinite(value):
+        raise ValueError(f"{name}은 유한한 수여야 합니다.")
+    return value
 
 
 def _positive_finite(value, name, allow_zero=False):
@@ -246,16 +283,32 @@ def _ask(input_fn, output_fn, message):
 
 def run_calibration(link, cfg, start_mm=30, step_mm=5, max_mm=None,
                     max_residual_mm=1.0, input_fn=input, output_fn=print,
-                    target_half_extents_mm=None):
+                    target_half_extents_mm=None, target_rect_mm=None):
     """연결된 로봇으로 측정을 수행하고, 품질 검사 전 결과 자료를 반환.
 
     입력 흐름은 (1) 종이 중심 고정, (2) 펜업 외곽 승인/선택,
     (3) 네 모서리에서 0.25 mm 수동 키 조그 후 접촉 승인입니다.
     함수는 config 파일을 쓰지 않습니다. 결과가 완전하고 평면 잔차 기준을
     통과한 뒤 호출자가 apply_calibration/save_config를 실행해야 합니다.
+
+    측정 영역: 기본은 30 mm부터 늘려 가는 종이 중심 정사각형, target_half_extents_mm=(가로, 세로 반폭)은
+    종이 중심 직사각형 하나, target_rect_mm=(x0, y0, x1, y1)은 종이 좌표 직사각형 하나입니다
+    (그림이 위쪽 한계 때문에 아래로 내려가 배치되는 큰 그림처럼 중심이 종이 중심과 다른 영역).
     """
-    rectangular = target_half_extents_mm is not None
-    if rectangular:
+    rect_mode = target_rect_mm is not None
+    rectangular = rect_mode or target_half_extents_mm is not None
+    if rect_mode:
+        if len(target_rect_mm) != 4:
+            raise ValueError("목표 영역은 x0, y0, x1, y1 네 값이 필요합니다.")
+        x0, y0, x1, y1 = (_finite(v, name) for v, name in zip(target_rect_mm, ("x0", "y0", "x1", "y1")))
+        if not (x0 < x1 and y0 < y1):
+            raise ValueError("목표 영역은 x0 < x1, y0 < y1 이어야 합니다.")
+        from . import limits
+        region = limits.pending_region(cfg)
+        if not all(region.contains(x, y) for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))):
+            raise ValueError("목표 접촉 영역이 확장 허용 영역을 넘습니다.")
+        sizes = [(x0, y0, x1, y1)]
+    elif rectangular:
         if len(target_half_extents_mm) != 2:
             raise ValueError("목표 영역은 가로·세로 반폭 두 값이 필요합니다.")
         hx = _positive_finite(target_half_extents_mm[0], "target_half_width_mm")
@@ -264,10 +317,19 @@ def run_calibration(link, cfg, start_mm=30, step_mm=5, max_mm=None,
         if not all(limits.pending_region(cfg).contains(x, y)
                    for _, x, y in contact_points(hx, hy)[1:]):
             raise ValueError("목표 접촉 영역이 확장 허용 영역을 넘습니다.")
-        sizes = [(hx, hy)]
+        sizes = [(-hx, -hy, hx, hy)]
     else:
-        sizes = [(h, h) for h in staged_half_sizes(cfg, start_mm=start_mm,
-                                                   step_mm=step_mm, max_mm=max_mm)]
+        sizes = [(-h, -h, h, h) for h in staged_half_sizes(cfg, start_mm=start_mm,
+                                                           step_mm=step_mm, max_mm=max_mm)]
+
+    def report(rect):
+        """보고서에 쓰는 크기 표현: 정사각형 반폭 / [가로, 세로 반폭] / [x0, y0, x1, y1]."""
+        if rect_mode:
+            return [float(v) for v in rect]
+        if rectangular:
+            return [float(rect[2]), float(rect[3])]
+        return float(rect[2])
+
     try:
         state, home_tcp = link.wait_for_homing(cfg["idle_timeout_s"], progress=output_fn)
     except Exception as e:
@@ -290,31 +352,34 @@ def run_calibration(link, cfg, start_mm=30, step_mm=5, max_mm=None,
     exploration_clear = max(8.0 if rectangular else 5.0, 2.0 * clear)
     exploration_x = center["x"] + retract_sign * exploration_clear
     y0, z0 = center["y"], center["z"]
+    first, last_size = sizes[0], sizes[-1]
     output_fn("\n2/3 펜업 접촉 영역 탐색")
-    output_fn(f"접촉 영역 탐색: {sizes} mm (가로 {2*sizes[0][0]:g}–{2*sizes[-1][0]:g}, "
-              f"세로 {2*sizes[0][1]:g}–{2*sizes[-1][1]:g} mm), "
+    output_fn(f"접촉 영역 탐색: {[report(r) for r in sizes]} mm "
+              f"(가로 {first[2] - first[0]:g}–{last_size[2] - last_size[0]:g}, "
+              f"세로 {first[3] - first[1]:g}–{last_size[3] - last_size[1]:g} mm), "
               f"벽에서 약 {exploration_clear:g} mm 후퇴")
     _move_tcp(link, cfg, exploration_x, y0, z0, cfg["feeds_mm_per_min"]["approach"])
-    tested, selected = [], None
+    tested, tested_rects, selected = [], [], None
     choose_previous = False
-    for hx, hy in sizes:
+    for rect in sizes:
+        rx0, ry0, rx1, ry1 = rect
+        width, height = rx1 - rx0, ry1 - ry0
         # 한 변씩 이동하고 각 모서리에서 사람 확인을 받습니다. 짧은 세그먼트마다
         # 정지하면 감속/재가속이 잦아 펜 홀더가 흔들릴 수 있습니다.
-        outline = [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy), (-hx, -hy)]
+        outline = [(rx0, ry0), (rx1, ry0), (rx1, ry1), (rx0, ry1), (rx0, ry0)]
         for i, (px, py) in enumerate(outline):
             ry, rz = _paper_to_robot(cfg, center, px, py)
             measured = _move_tcp(link, cfg, exploration_x, ry, rz,
                                  cfg["feeds_mm_per_min"]["travel"])
-            output_fn(f"  pen-up {hx*2:g}×{hy*2:g} mm, 모서리 {i+1}/{len(outline)}: "
+            output_fn(f"  pen-up {width:g}×{height:g} mm, 모서리 {i+1}/{len(outline)}: "
                       f"Y={measured['y']:.1f}, Z={measured['z']:.1f} mm")
             action = _ask(input_fn, output_fn,
                           "안전하면 Enter, 이전에 통과한 크기로 선택은 c, 완전 취소는 q: ")
             if action == "c":
-                if not tested:
+                if not tested_rects:
                     output_fn("아직 확인된 작은 크기가 없습니다. 이 사각형을 끝까지 확인하거나 취소하세요.")
                     continue
-                last = tested[-1]
-                selected = (last, last) if not rectangular else tuple(last)
+                selected = tested_rects[-1]
                 choose_previous = True
                 break
             if action == "q":
@@ -322,15 +387,16 @@ def run_calibration(link, cfg, start_mm=30, step_mm=5, max_mm=None,
                         "samples": [], "tested_half_sizes_mm": tested}
         if choose_previous:
             break
-        tested.append([float(hx), float(hy)] if rectangular else float(hx))
-        if (hx, hy) == sizes[-1]:
-            selected = (float(hx), float(hy))
+        tested.append(report(rect))
+        tested_rects.append(rect)
+        if rect == last_size:
+            selected = rect
             break
         action = _ask(input_fn, output_fn,
-                      f"현재 {2*hx:g}×{2*hy:g} mm 경로가 안전합니다. [Enter] 다음 단계, "
+                      f"현재 {width:g}×{height:g} mm 경로가 안전합니다. [Enter] 다음 단계, "
                       "[c] 이 크기로 접촉 측정, [q] 취소: ")
         if action == "c":
-            selected = (float(hx), float(hy))
+            selected = rect
             break
         if action == "q":
             return {"result": "aborted", "reason": "user stopped rectangle expansion",
@@ -338,15 +404,14 @@ def run_calibration(link, cfg, start_mm=30, step_mm=5, max_mm=None,
         if action not in ("", "y", "yes"):
             raise CalibrationError("다음 단계, c(현재 크기 선택), q 중 하나를 입력하세요.")
     if selected is None:
-        last = tested[-1]
-        selected = (last, last) if not rectangular else tuple(last)
+        selected = tested_rects[-1]
 
-    selected_report = list(selected) if rectangular else float(selected[0])
+    selected_report = report(selected)
 
     # 중심에서 펜을 충분히 떼고 각 모서리로 이동합니다.
     _move_tcp(link, cfg, exploration_x, y0, z0, cfg["feeds_mm_per_min"]["travel"])
     samples = []
-    corners = contact_points(*selected)[1:]
+    corners = contact_points_rect(*selected)[1:]
     approach_step = 0.25
     max_extra_touch_mm = 0.5  # 예측 접촉보다 벽 쪽으로 더 누르지 않음
     travel_x = exploration_x  # 미측정 모서리로 갈 때는 확인된 접촉점보다 멀리 물린다.
@@ -403,6 +468,7 @@ def run_calibration(link, cfg, start_mm=30, step_mm=5, max_mm=None,
     result = "ready" if fit["max_abs_residual_mm"] <= max_residual_mm else "needs_paper_adjustment"
     return {"result": result, "center_tcp_mm": center, "samples": samples,
             "plane_fit": fit, "selected_half_size_mm": selected_report,
+            "selected_rect_mm": [float(v) for v in selected],
             "tested_half_sizes_mm": tested,
             "ready_tcp_mm": ready_tcp,
             "max_residual_mm": float(max_residual_mm)}

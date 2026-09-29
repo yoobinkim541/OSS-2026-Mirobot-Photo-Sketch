@@ -1,5 +1,6 @@
 """실행 작업(가상 시뮬레이션): 단계 순서, 확인 전 대기, 멈춤, 기록, 진행 파일."""
 
+import re
 import sys
 import tempfile
 import threading
@@ -13,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from mirobot_sketch import draw_executor as de  # noqa: E402
 from mirobot_sketch import live_progress as lp  # noqa: E402
-from mirobot_sketch.draw_job import DrawJob, target_contact_extents  # noqa: E402
+from mirobot_sketch.draw_job import DrawJob, target_contact_rect  # noqa: E402
 from mirobot_sketch.session import SketchSession  # noqa: E402
 
 import golden  # noqa: E402
@@ -234,9 +235,8 @@ class DrawJobTest(unittest.TestCase):
         self.assertEqual(fin["result"]["result"], "completed")
         self.assertTrue(link.closed)
 
-    def _offset_run(self, answer, dx=-18.0):
-        """실물 연결에서 호밍 자세가 종이 중심 설정에서 dx mm 벗어난 상황에서 사람이 answer로 답한다."""
-        import time
+    def _start_pose_run(self, dx, air=True):
+        """실물 연결(보정 안 함)에서 호밍 자세가 설정 파일의 종이 중심에서 X로 dx mm 벗어난 상황."""
         from mirobot_sketch import calibration
 
         cfg = golden.default_cfg()
@@ -251,57 +251,59 @@ class DrawJobTest(unittest.TestCase):
         c = dict(cfg["paper_center_tcp_mm"])
         tcp = (c["x"] + dx, c["y"], c["z"])
         link = PhysicalLinkStub()
-        with mock.patch.object(de, "open_link", return_value=link), \
-             mock.patch.object(de, "connect_and_home", return_value=tcp), \
-             mock.patch.object(calibration, "save_config") as save:
+        with mock.patch.object(de, "open_link", return_value=link),              mock.patch.object(de, "connect_and_home", return_value=tcp),              mock.patch.object(calibration, "save_config") as save,              mock.patch.object(de, "execute", return_value={"result": "completed", "commands_sent": 1,
+                                                            "elapsed_s": 0.1}) as execute:
             job.start(virtual=False)
-            deadline = time.monotonic() + 15
-            while not any(k == "start_offset" for k, _ in rec.events) and time.monotonic() < deadline:
-                time.sleep(0.02)
-            offer = next(d for k, d in rec.events if k == "start_offset")
-            self.assertEqual(job.state, "start")                 # 답하기 전에는 다음 단계로 가지 않음
-            job.answer_start_offset(answer)
-            if answer:
-                self.assertTrue(rec.ready.wait(20), rec.events[-5:])
-                job.cancel()
+            self.assertTrue(rec.ready.wait(20), rec.events[-5:])
+            job.confirm(air=air, pending=False, checked=True)
             self.assertTrue(rec.done.wait(10), rec.events[-5:])
-        return cfg, c, tcp, save, offer, rec, link
+        return cfg, c, tcp, save, execute, job, rec, link
 
-    def test_start_offset_can_become_paper_center_after_human_confirms_pen_contact(self):
-        cfg, before, tcp, save, offer, rec, link = self._offset_run(True)
-        self.assertEqual(offer["tcp"], {"x": tcp[0], "y": tcp[1], "z": tcp[2]})
-        self.assertEqual(offer["previous"], before)
-        save.assert_called_once()
-        self.assertEqual(save.call_args.args[1]["paper_center_tcp_mm"], offer["tcp"])
-        self.assertEqual(cfg["paper_center_tcp_mm"], offer["tcp"])       # 이어지는 계획도 새 중심을 씀
-        done = [i for i, st in rec.steps() if st == "done"]
-        self.assertIn("start", done)
-        self.assertIn("confirm", [i for i, st in rec.steps() if st == "active"])
-        self.assertTrue(link.closed)
-
-    def test_declining_start_offset_keeps_config_and_does_not_start(self):
-        cfg, before, tcp, save, offer, rec, link = self._offset_run(False)
-        save.assert_not_called()
-        self.assertEqual(cfg["paper_center_tcp_mm"], before)
+    def test_real_start_pose_is_used_as_paper_center_without_asking(self):
+        cfg, before, tcp, save, execute, job, rec, link = self._start_pose_run(-18.0)
+        self.assertEqual(cfg["paper_center_tcp_mm"], {"x": tcp[0], "y": tcp[1], "z": tcp[2]})
+        self.assertAlmostEqual(job.summary["start_center_shift_mm"], 18.0, places=1)
+        self.assertFalse(any(k == "start_offset" for k, _ in rec.events))       # 확인 대화상자는 없음
+        save.assert_not_called()                                                # 설정 파일은 바꾸지 않음
+        execute.assert_called_once()
+        sent_first = execute.call_args.args[1][0][0]                            # 첫 명령이 새 종이 중심(펜업)을 향함
+        x = float(re.search(r"X([-\d.]+)", sent_first).group(1))
+        self.assertAlmostEqual(x, tcp[0] + cfg["pen"]["retract_x_sign"] * cfg["pen"]["air_clearance_mm"], places=2)
         fin = next(d for k, d in rec.events if k == "finished")
-        self.assertEqual(fin["result"]["result"], "not_started")
-        self.assertIn("떨어져 있습니다", fin["result"]["error"])
+        self.assertEqual(fin["result"]["result"], "completed")
         self.assertTrue(link.closed)
 
-    def test_virtual_run_never_offers_to_move_paper_center(self):
+    def test_real_start_pose_matching_config_reports_no_shift(self):
+        cfg, before, tcp, save, execute, job, rec, link = self._start_pose_run(0.0)
+        self.assertEqual(job.summary["start_center_shift_mm"], 0.0)
+        self.assertEqual(cfg["paper_center_tcp_mm"], before)
+
+    def test_virtual_run_keeps_configured_paper_center(self):
         rec = Recorder()
         job = self.job(rec)
+        before = dict(job.cfg["paper_center_tcp_mm"])
         job.start(virtual=True, virtual_speed=500)
         self.assertTrue(rec.ready.wait(10))
         job.cancel()
         self.assertTrue(rec.done.wait(5))
-        self.assertFalse(any(k == "start_offset" for k, _ in rec.events))
+        self.assertEqual(job.cfg["paper_center_tcp_mm"], before)
+        self.assertNotIn("start_center_shift_mm", job.summary)
 
     def test_photo_sized_rectangle_can_be_selected_for_contact_calibration(self):
+        cfg = golden.default_cfg()
         outline = [[(-60, -35.4), (60, -35.4), (60, 35.4), (-60, 35.4)]]
-        self.assertEqual(target_contact_extents(outline, golden.default_cfg()), (61, 37))
-        square = [[(-60, -60), (60, -60), (60, 60), (-60, 60)]]
-        self.assertIsNone(target_contact_extents(square, golden.default_cfg()))
+        self.assertEqual(target_contact_rect(outline, cfg), (-61.0, -36.4, 61.0, 36.4))
+        centered_square = [[(-60, -60), (60, -60), (60, 60), (-60, 60)]]
+        self.assertIsNone(target_contact_rect(centered_square, cfg))      # 위쪽 한계(55~57.5) 때문에 중심에 둘 수 없음
+
+    def test_120mm_square_is_placed_lower_and_can_be_selected_for_contact_calibration(self):
+        from mirobot_sketch import limits
+        cfg = golden.default_cfg()
+        self.assertEqual(limits.pending_region(cfg).fit(120, 120), (0.0, -5.0))   # 앱이 그림을 5 mm 아래로 배치
+        placed = [[(-60, -65), (60, -65), (60, 55), (-60, 55)]]
+        self.assertEqual(target_contact_rect(placed, cfg), (-60.0, -65.0, 60.0, 55.0))   # 가장자리 여유 없이 정확히 그림 범위
+        self.assertEqual(target_contact_rect([[(-30, -40), (30, -40), (30, 20), (-30, 20)]], cfg),
+                         (-31.0, -41.0, 31.0, 21.0))
 
     def test_rectangular_calibration_reaches_app_command_execution(self):
         from mirobot_sketch import calibration
@@ -322,7 +324,7 @@ class DrawJobTest(unittest.TestCase):
         ready = dict(center)
         ready["x"] -= 9.0                        # 사각형 보정은 펜을 벽에서 8 mm 이상 뺀 자세로 끝남 (기존 5 mm 검사에 걸리던 값)
         measurement = {"result": "ready", "center_tcp_mm": center, "ready_tcp_mm": ready,
-                       "samples": [], "selected_half_size_mm": [61.0, 37.0],
+                       "samples": [], "selected_half_size_mm": [-61.0, -36.4, 61.0, 36.4],
                        "max_residual_mm": 1.0,
                        "plane_fit": {"a_per_mm_y": cfg["plane_compensation"]["a_per_mm_y"],
                                      "b_per_mm_z": cfg["plane_compensation"]["b_per_mm_z"],
@@ -336,9 +338,9 @@ class DrawJobTest(unittest.TestCase):
                                                             "elapsed_s": 0.1}) as execute:
             job.start(virtual=False, pending=True, recalibrate=True)
             self.assertTrue(rec.ready.wait(25), rec.events[-5:])
-            self.assertEqual(run.call_args.kwargs["target_half_extents_mm"], (61, 37))
-            self.assertEqual(cfg["limits"], {"max_abs_paper_x_mm": 61.0,
-                                              "max_abs_paper_y_mm": 37.0})
+            self.assertEqual(run.call_args.kwargs["target_rect_mm"], (-61.0, -36.4, 61.0, 36.4))
+            self.assertEqual(cfg["limits"], {"x_max_mm": 61.0, "y_min_mm": -36.4,
+                                              "roof_mm": [[0.0, 36.4], [61.0, 36.4]]})
             job.confirm(air=False, pending=True, checked=True)
             self.assertTrue(rec.done.wait(10), rec.events[-5:])
             execute.assert_called_once()

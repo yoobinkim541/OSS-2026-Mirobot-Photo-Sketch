@@ -1,0 +1,151 @@
+{
+ "started_local": "20260929-185448",
+ "strokes_json": "C:\\Users\\asus\\Desktop\\Mirobot\\out\\run_strokes_20260929-184218.json",
+ "stroke_count": 421,
+ "command_count": 3712,
+ "air_mode": false,
+ "pending_limits": false,
+ "estimated_time": {
+  "pen_down_mm": 1853.5,
+  "pen_up_mm": 804.5,
+  "stroke_count": 421,
+  "draw_s": 370.7,
+  "travel_s": 80.4,
+  "pen_lift_s": 632.2,
+  "command_count": 3712,
+  "latency_s": 371.2,
+  "motion_s": 1083.4,
+  "total_s": 1454.6
+ },
+ "source": {
+  "image": "C:/Users/asus/Desktop/Mirobot/input/illust2_color.jpg",
+  "params": {
+   "rembg": true,
+   "frame": "auto",
+   "median_ksize": 0,
+   "blur_ksize": 5,
+   "edge_mode": "luma",
+   "canny_low": 30,
+   "canny_high": 100,
+   "min_length_px": 8,
+   "spur_px": 6,
+   "dedupe_px": 4,
+   "merge_join_px": 4.0,
+   "face_detail": true,
+   "face_sensitivity": 0.6,
+   "pen_mm": 0.5,
+   "smooth_sigma_px": 2.0,
+   "epsilon_px": 1.0,
+   "round_iters": 1,
+   "box_mm": 80
+  }
+ },
+ "virtual": false,
+ "virtual_speed": null,
+ "run_id": "20260929-184218",
+ "trajectory": "C:\\Users\\asus\\Desktop\\Mirobot\\out\\live_traj_20260929-184218.json",
+ "config_snapshot": {
+  "_about": "robot/draw_executor.py 설정. 값을 바꾸면 LOG에 이유와 결과를 기록할 것.",
+  "port": "COM9",
+  "baud": 115200,
+  "paper_center_tcp_mm": {
+   "x": 167.546,
+   "y": 0.0,
+   "z": 228.545
+  },
+  "_paper_center_tcp_note": "호밍(영점) 직후의 TCP = 종이 중심. 설치 규칙(2026-09-24 사용자 확정): A4를 가로로 벽에 붙이고, 호밍 직후 펜 끝이 종이 한가운데에 닿도록 종이 위치를 맞춘다. 값은 하트 테스트 때 컨트롤러가 보고한 홈 TCP. 종이/로봇을 옮기면 다시 맞출 것.",
+  "orientation_deg": {
+   "a": 0.0,
+   "b": 0.0,
+   "c": 0.0
+  },
+  "paper_x_to_robot_y_sign": -1,
+  "paper_y_to_robot_z_sign": 1,
+  "_axis_sign_note": "미검증. 로봇이 +X(벽) 방향을 바라보는 오른손 좌표계라면, 종이를 정면에서 볼 때 오른쪽은 로봇 -Y. 원·하트는 좌우 대칭이라 이 부호를 확인하지 못했음. trajectories/orientation-test-F.json을 그려 F가 거울상이 아닌지 확인한 뒤 _axis_sign_status를 verified로 바꿀 것.",
+  "_axis_sign_status": "unverified",
+  "pen": {
+   "up_clearance_mm": 2.5,
+   "air_clearance_mm": 8.0,
+   "retract_x_sign": -1,
+   "down_extra_mm": 0.0,
+   "line_width_mm": 0.5
+  },
+  "_pen_width_note": "line_width_mm: 펜 선 굵기 추정값(GUI 종이 미리보기용). 실제 펜으로 그은 선을 재서 고칠 것.",
+  "_pen_note": "하트 테스트 기록: 접촉 X=198.668, 접근 전 X=196.678 -> 벽에서 떨어지는 방향은 -X. down_extra_mm는 접촉 기준보다 더 누르는 양(+이면 벽 쪽). 1mm 이하로만 조정.",
+  "pen_tip_offset_mm": {
+   "x": 100.0,
+   "y": 0.0,
+   "z": 0.0
+  },
+  "_pen_tip_note": "플랜지(TCP) -> 펜 끝, 로봇 좌표계(A,B,C=0 자세 기준). 사용자 어림값(펜이 벽 쪽 수평, 약 100mm). sim 시각화에만 사용하고 실행기 명령에는 쓰지 않음.",
+  "plane_compensation": {
+   "a_per_mm_y": 0.006123820734618639,
+   "b_per_mm_z": 0.031276437949508455,
+   "status": "needs_recalibration"
+  },
+  "_plane_note": "2026-09-28 중심과 네 모서리의 사람 확인 접촉 샘플로 계산했으나, 이후 종이·펜 위치를 조정했으므로 재보정 전 실물 펜다운에 사용하지 않는다.",
+  "feeds_mm_per_min": {
+   "draw": 300,
+   "travel": 600,
+   "approach": 200
+  },
+  "limits": {
+   "max_abs_paper_x_mm": 40.0,
+   "max_abs_paper_y_mm": 40.0
+  },
+  "_limits_note": "2026-09-28 보정에서 ±40 mm 정사각형을 확인했으나 이후 종이·펜을 조정했다. 현재 값은 재보정 전 참고용이며 실물 펜다운에 사용하지 않는다.",
+  "limits_pending_verification": {
+   "x_max_mm": 125.0,
+   "y_min_mm": -85.0,
+   "roof_mm": [
+    [
+     0,
+     57.5
+    ],
+    [
+     60,
+     55.0
+    ],
+    [
+     90,
+     52.5
+    ],
+    [
+     100,
+     50.0
+    ],
+    [
+     110,
+     47.5
+    ],
+    [
+     120,
+     45.0
+    ],
+    [
+     125,
+     42.5
+    ]
+   ],
+   "status": "시뮬레이션 PASS(영역 테두리·내부, 최소 여유 5° 이상 — tests/test_limits.py), 실물 미확인"
+  },
+  "_limits_pending_note": "넓은 범위(실물 미확인): 도달 지도(관절 여유 7° 이상, 2.5mm 격자)에서 가로 위치별 위쪽 한계에 2.5mm 여유를 두고, 종이 안전 여백 20mm 안(x ≤ 128.5, y ≥ -85)으로 자른 지붕 모양 영역. roof_mm = [|x|, 위쪽 y], 점 사이는 직선. 실행기가 꼭짓점만 검사하므로 지붕은 볼록(기울기가 점점 가파름)하게 잡아 두 꼭짓점 사이 선분도 영역 안에 있게 함. 좌우·아래로는 여유가 크고 위쪽은 B(J5) 한계. 가로 그림 약 250x127mm, 정사각형 약 140mm. 실물 확인 절차: F 시험 -> 영역 테두리 경로를 --air --pending-limits로 -> 펜 대고 --pending-limits로 -> 고르면 limits를 넓히고 status 갱신.",
+  "timing": {
+   "assumed_command_latency_s": 0.1,
+   "status": "가정값. 명령마다 ok 응답을 기다리는 시간. LOG/runs의 실제 elapsed_s와 estimated_time을 비교해 보정할 것"
+  },
+  "max_start_offset_mm": 5.0,
+  "ack_timeout_s": 15.0,
+  "idle_timeout_s": 180.0,
+  "calibration": {
+   "status": "needs_recalibration",
+   "half_size_mm": 40.0,
+   "max_residual_mm": 0.7335946794561079,
+   "updated_local": "2026-09-28T22:16:49+09:00"
+  }
+ },
+ "result": "completed",
+ "commands_sent": 3712,
+ "elapsed_s": 700.6,
+ "visual_verification": "pending"
+}

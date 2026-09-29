@@ -103,6 +103,28 @@ class PlaneFitTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             calibration.apply_calibration(CFG, self.center, fit, 30, max_residual_mm=1.0)
 
+    def test_contact_points_rect_lists_center_and_four_paper_corners(self):
+        pts = calibration.contact_points_rect(-60, -65, 60, 55)
+        self.assertEqual([p[0] for p in pts], ["center", "bottom_left", "bottom_right", "top_right", "top_left"])
+        self.assertEqual([(p[1], p[2]) for p in pts[1:]], [(-60, -65), (60, -65), (60, 55), (-60, 55)])
+        with self.assertRaises(ValueError):
+            calibration.contact_points_rect(60, -65, -60, 55)
+
+    def test_apply_accepts_off_center_120mm_square_and_stores_asymmetric_limits(self):
+        fit = calibration.fit_contact_plane(self.center, self.samples)
+        updated = calibration.apply_calibration(CFG, self.center, fit, [-60, -65, 60, 55])
+        self.assertEqual(updated["limits"], {"x_max_mm": 60.0, "y_min_mm": -65.0,
+                                              "roof_mm": [[0.0, 55.0], [60.0, 55.0]]})
+        self.assertEqual(updated["calibration"]["rect_mm"], [-60.0, -65.0, 60.0, 55.0])
+        from mirobot_sketch import limits
+        region = limits.executor_region(updated)
+        for x, y in ((-60, -65), (60, -65), (60, 55), (-60, 55), (0, 0)):
+            self.assertTrue(region.contains(x, y), (x, y))
+        self.assertFalse(region.contains(0, 56))                       # 위쪽 한계를 넘으면 밖
+        self.assertFalse(region.contains(61, 0))
+        with self.assertRaises(ValueError):
+            calibration.apply_calibration(CFG, self.center, fit, [-60, -65, 60, 60])   # 도달 영역(위쪽 55~57.5) 밖
+
     def test_apply_accepts_measured_rectangular_region(self):
         fit = calibration.fit_contact_plane(self.center, self.samples)
         updated = calibration.apply_calibration(CFG, self.center, fit, [60, 37])
@@ -148,6 +170,27 @@ class CalibrationWorkflowTest(unittest.TestCase):
         self.assertEqual(result["selected_half_size_mm"], [60.0, 37.0])
         self.assertEqual(len(result["samples"]), 4)
         self.assertEqual(result["tested_half_sizes_mm"], [[60.0, 37.0]])
+
+    def test_off_center_rect_checks_air_path_and_four_contacts(self):
+        link = FakeCalibrationLink((198.668, 0.0, 230.477))
+        answers = ["yes", "", "", "", "", ""]
+        for _ in range(4):
+            answers.extend(["+" * 32, ""])
+        result = calibration.run_calibration(
+            link, copy.deepcopy(CFG), target_rect_mm=(-60, -65, 60, 55),
+            input_fn=lambda _: answers.pop(0), output_fn=lambda _: None)
+        self.assertEqual(result["result"], "ready")
+        self.assertEqual(result["selected_half_size_mm"], [-60.0, -65.0, 60.0, 55.0])
+        self.assertEqual(result["selected_rect_mm"], [-60.0, -65.0, 60.0, 55.0])
+        self.assertEqual([s["paper_xy_mm"] for s in result["samples"]],
+                         [[-60.0, -65.0], [60.0, -65.0], [60.0, 55.0], [-60.0, 55.0]])
+        # 펜업 탐색이 실제로 y=-65 ~ 55 (로봇 Z = 중심 + y) 전체를 돌았는지
+        zs = [float(re.search(r"Z([-\d.]+)", c).group(1)) for c in link.commands]
+        self.assertAlmostEqual(min(zs), 230.477 - 65.0, places=2)
+        self.assertAlmostEqual(max(zs), 230.477 + 55.0, places=2)
+        with self.assertRaises(ValueError):
+            calibration.run_calibration(link, copy.deepcopy(CFG), target_rect_mm=(-60, -65, 60, 70),
+                                        input_fn=lambda _: "q", output_fn=lambda _: None)
 
     def test_contact_travel_stays_retracted_after_early_contact(self):
         link = FakeCalibrationLink((198.668, 0.0, 230.477))
