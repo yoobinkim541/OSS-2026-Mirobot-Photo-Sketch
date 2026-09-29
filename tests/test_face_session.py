@@ -16,6 +16,8 @@ from mirobot_sketch import session as session_mod  # noqa: E402
 from mirobot_sketch import sketch_pipeline as sp  # noqa: E402
 from mirobot_sketch.session import SketchSession  # noqa: E402
 
+import golden  # noqa: E402
+
 W, H = 1156, 1440
 
 
@@ -52,7 +54,7 @@ class FaceSessionTest(unittest.TestCase):
         p = mock.patch.object(session_mod.faces, "detect_faces", lambda img, **kw: list(found))
         p.start()
         self.addCleanup(p.stop)
-        s = SketchSession()
+        s = SketchSession(golden.default_cfg())
         s.set_image(self.path)
         return s
 

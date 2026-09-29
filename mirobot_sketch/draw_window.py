@@ -4,7 +4,7 @@
 실행은 DrawJob(작업 스레드)이 하고, 이 창은 events를 app.ui()로 받아 표시만 합니다.
 """
 
-from tkinter import messagebox
+from tkinter import messagebox, simpledialog
 
 import customtkinter as ctk
 
@@ -27,6 +27,7 @@ class DrawWindow(ctk.CTkToplevel):
         super().__init__(app.root)
         self.app, self.session, self.cfg, self.font = app, session, cfg, font
         self.launch_rviz, self.job, self.finished = launch_rviz, None, None
+        self.failure_message = ""
         # 닫을 때 작업이 끝나길 기다리는 시간: 로봇이 명령 응답을 기다리는 최대 시간 + 여유
         self.close_timeout = float(cfg.get("ack_timeout_s", 15)) + 5
         self.title("로봇으로 그리기")
@@ -62,12 +63,15 @@ class DrawWindow(ctk.CTkToplevel):
         ctk.CTkCheckBox(opts, text="공중 모드 (펜을 대지 않고 경로만)", variable=self.air_var, font=font(12)
                         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=4)
         self.pending_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(opts, text="넓은 범위(실물 미확인) 허용", variable=self.pending_var, font=font(12)
+        ctk.CTkCheckBox(opts, text="넓은 범위(공중 확인용)", variable=self.pending_var, font=font(12)
                         ).grid(row=1, column=2, sticky="w", pady=4)
+        self.recalibrate_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(opts, text="종이·펜 위치 변경: 다시 보정", variable=self.recalibrate_var,
+                        font=font(12)).grid(row=2, column=0, columnspan=3, sticky="w", pady=4)
         self.check_var = ctk.BooleanVar(value=False)
         self.check_box = ctk.CTkCheckBox(opts, text="종이·펜·주변을 확인했습니다", variable=self.check_var,
                                          font=font(12, "bold"), command=self._on_check, state="disabled")
-        self.check_box.grid(row=2, column=0, columnspan=3, sticky="w", pady=4)
+        self.check_box.grid(row=3, column=0, columnspan=3, sticky="w", pady=4)
 
         self.progress = ctk.CTkProgressBar(self, height=10)
         self.progress.pack(fill="x", padx=16, pady=(8, 2))
@@ -92,6 +96,18 @@ class DrawWindow(ctk.CTkToplevel):
     # ---------------------------------------------------------------- 버튼
     def begin(self):
         """①~④: 사전 검사 → 연결·호밍 → 시작 위치 → 최종 확인에서 멈춰 기다림."""
+        self.finished = None
+        self.failure_message = ""
+        self.check_var.set(False)
+        self.check_box.configure(state="disabled")
+        self.start_btn.configure(state="disabled")
+        self.rviz_btn.configure(state="disabled")
+        self.rviz_note = ""
+        self.progress.set(0)
+        self.prog_text.configure(text="")
+        self.detail.configure(text="")
+        for k, (sid, name, _who) in enumerate(de.DRAW_STEPS):
+            self.steps[sid].configure(text=f"○ {NUMS[k]} {name}", text_color=IDLE_C)
         self.begin_btn.configure(state="disabled")
         self.app.set_drawing(True)          # ①부터 잠금: 호밍 중 편집·이미지 열기로 그릴 그림이 바뀌지 않게
         speed = float(self.speed_var.get().rstrip("×"))
@@ -99,7 +115,8 @@ class DrawWindow(ctk.CTkToplevel):
                            launch_rviz=self.launch_rviz)
         self.stop_btn.configure(state="normal", text="취소")
         self.job.start(virtual=bool(self.virtual_var.get()), virtual_speed=speed,
-                       pending=bool(self.pending_var.get()))
+                       pending=bool(self.pending_var.get()),
+                       recalibrate=bool(self.recalibrate_var.get()))
 
     def _on_check(self):
         ready = self.job is not None and self.job.state == "confirm" and self.check_var.get()
@@ -154,15 +171,28 @@ class DrawWindow(ctk.CTkToplevel):
             if d["status"] == "active" and d["message"]:
                 self.todo.configure(text=d["message"])
             elif d["status"] == "failed":
-                self.todo.configure(text=f"{name}: {d['message']}")
+                self.failure_message = f"{name}: {d['message']}"
+                self.todo.configure(text=self.failure_message)
                 self.detail.configure(text=d.get("hint", ""))
             if d["id"] == "confirm" and d["status"] == "active":
                 s = self.job.summary
                 self.detail.configure(text=f"획 {s['stroke_count']} · 명령 {s['command_count']:,}줄 · "
                                            f"예상 {s['estimated_s'] / 60:.1f}분 · {s['drawing_mm'][0]:.0f}×"
-                                           f"{s['drawing_mm'][1]:.0f}mm · {s['port']}")
+                                           f"{s['drawing_mm'][1]:.0f}mm · {s['port']}"
+                                           + ("" if s["virtual"] or s["plane_verified"] else
+                                              " · 종이 보정 없음(설정에 저장된 값 사용)"))
                 self.check_box.configure(state="normal")
                 self._on_check()
+        elif kind == "robot_status":
+            self.app.set_robot_controller_status(d.get("state"), recent=d.get("recent", False))
+        elif kind == "calibration_status":
+            self.todo.configure(text="종이 캘리브레이션")
+            self.detail.configure(text=d.get("message", ""))
+        elif kind == "calibration_input":
+            answer = simpledialog.askstring("종이 캘리브레이션", d.get("prompt", "응답을 입력하세요"),
+                                            parent=self)
+            if self.job:
+                self.job.answer_calibration_input("q" if answer is None else answer)
         elif kind == "progress":
             self.progress.set(d["acked"] / max(d["total"], 1))
             self.prog_text.configure(text=f"명령 {d['acked']:,}/{d['total']:,} ({100 * d['acked'] // d['total']}%) · "
@@ -178,7 +208,8 @@ class DrawWindow(ctk.CTkToplevel):
             self.finished = d
             self.stop_btn.configure(state="disabled")
             r = d["result"]["result"]
-            self.todo.configure(text={"completed": "완료했습니다", "stopped_by_user": "멈췄습니다 (자동 복구 없음)",
+            self.todo.configure(text=self.failure_message if r in ("not_started", "error") and self.failure_message
+                                else {"completed": "완료했습니다", "stopped_by_user": "멈췄습니다 (자동 복구 없음)",
                                       "cancelled": "취소했습니다"}.get(r, f"끝: {r}"))
             note = getattr(self, "rviz_note", "")
             if d.get("record_path"):
@@ -186,3 +217,4 @@ class DrawWindow(ctk.CTkToplevel):
             self.start_btn.configure(state="disabled")
             self.check_box.configure(state="disabled")
             self.app.set_drawing(False)
+            self.begin_btn.configure(state="normal")

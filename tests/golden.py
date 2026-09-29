@@ -21,6 +21,15 @@ from mirobot_sketch import presets  # noqa: E402
 from mirobot_sketch import sketch_pipeline as sp  # noqa: E402
 
 GOLDEN = ROOT / "tests" / "data" / "pipeline_golden.json"
+
+
+def default_cfg():
+    """패키지 기본 설정의 사본. 실제 로봇 보정이 robot/drawing_config.json을 바꿔도 테스트 기준이 흔들리지 않게 한다."""
+    import copy
+
+    from mirobot_sketch import draw_executor as de, paths
+
+    return copy.deepcopy(de.load_config(paths.asset("drawing_config.json")))
 SAMPLE_TYPES = {"illust1_color.jpg": "illustration", "illust2_color.jpg": "illustration",
                 "illust3_manga.jpg": "manga", "photo1_mic.webp": "photo",
                 "photo2_stage.jpg": "photo", "photo3_chair.jpg": "photo"}

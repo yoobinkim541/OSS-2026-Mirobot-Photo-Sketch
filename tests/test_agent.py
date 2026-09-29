@@ -28,6 +28,8 @@ from mirobot_sketch.agent.bridge import BridgeClient, BridgeServer  # noqa: E402
 from mirobot_sketch.agent.tools import TOOLS, AgentToolbox  # noqa: E402
 from mirobot_sketch.session import SessionError, SketchSession  # noqa: E402
 
+import golden  # noqa: E402
+
 
 def make_image(path):
     """테스트용 선화: 큰 사각형 + 원 + 왼쪽 위 작은 잡음 점들."""
@@ -53,7 +55,7 @@ class SessionTestBase(unittest.TestCase):
         cls.tmp.cleanup()
 
     def new_session(self):
-        s = SketchSession()
+        s = SketchSession(golden.default_cfg())
         s.set_image(self.img)
         s.apply_preset("illustration", "medium")
         s.run()
@@ -127,7 +129,7 @@ class SessionTest(SessionTestBase):
             img = np.zeros((60, 90, 4), np.uint8)
             cv2.circle(img, (45, 30), 20, (0, 0, 0, 255), 2)   # 투명 바탕 위 검은 원
             cv2.imwrite(str(p), img)
-            s = SketchSession()
+            s = SketchSession(golden.default_cfg())
             s.set_image(p)
             s.run_current()
             h, w = s.result["base"].shape

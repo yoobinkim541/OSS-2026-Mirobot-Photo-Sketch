@@ -6,7 +6,9 @@
 import copy
 import json
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 from pathlib import Path
@@ -14,7 +16,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from mirobot_sketch import draw_executor as de  # noqa: E402
 
-CFG = de.load_config()
+import golden  # noqa: E402
+
+CFG = golden.default_cfg()
 
 
 class FakeSerial:
@@ -110,9 +114,11 @@ class TimingTest(unittest.TestCase):
 class SafetyOptionTest(unittest.TestCase):
     def test_air_mode_never_touches_paper(self):
         planner = de.Planner(CFG, air=True)
-        contact = CFG["paper_center_tcp_mm"]["x"]
-        xs = [float(line.split(" X")[1].split(" ")[0]) for line, _ in planner.plan(SQUARE)]
-        self.assertTrue(all(abs(x - contact) >= CFG["pen"]["up_clearance_mm"] - 1e-6 for x in xs))
+        for line, _ in planner.plan(SQUARE):
+            parts = {part[0]: float(part[1:]) for part in line.split() if part[0] in "XYZ"}
+            contact = planner.contact_x(parts["Y"], parts["Z"])
+            self.assertGreaterEqual(abs(parts["X"] - contact),
+                                    max(8.0, CFG["pen"]["up_clearance_mm"]) - 0.001)
 
     def test_pending_limits_only_with_flag(self):
         wide = [[(-120.0, -80.0), (120.0, -80.0), (120.0, 44.0), (0.0, 57.0), (-120.0, 44.0), (-120.0, -80.0)]]
@@ -132,6 +138,64 @@ class SafetyOptionTest(unittest.TestCase):
         self.assertAlmostEqual(pts[:, 0].max(), r.x_max)               # 테두리를 실제로 따라감
         self.assertAlmostEqual(pts[:, 1].min(), r.y_min)
         self.assertAlmostEqual(pts[:, 1].max(), r.top(0))
+
+
+class GuidedCalibrationCLITest(unittest.TestCase):
+    def test_physical_cli_run_calibrates_only_with_flag(self):
+        from mirobot_sketch import calibration
+
+        cfg = copy.deepcopy(CFG)
+        center = dict(cfg["paper_center_tcp_mm"])
+        ready = dict(center)
+        ready["x"] += cfg["pen"]["retract_x_sign"] * cfg["pen"]["up_clearance_mm"]
+        measured = {"result": "ready", "center_tcp_mm": center, "ready_tcp_mm": ready,
+                    "selected_half_size_mm": 30.0, "max_residual_mm": 1.0,
+                    "plane_fit": {"a_per_mm_y": 0.0, "b_per_mm_z": 0.0,
+                                  "max_abs_residual_mm": 0.0}}
+        with tempfile.TemporaryDirectory() as tmp:
+            strokes_path = Path(tmp) / "line.json"
+            strokes_path.write_text(json.dumps({"kind": "sketch_strokes", "units": "mm",
+                                                "strokes": [{"points_xy_mm": [[-5, 0], [5, 0]]}]}),
+                                    encoding="utf-8")
+            link = mock.Mock()
+            with mock.patch.object(sys, "argv", ["mirobot-draw", str(strokes_path), "--execute", "--calibrate"]), \
+                 mock.patch.object(de, "load_config", return_value=cfg), \
+                 mock.patch.object(de, "open_link", return_value=link), \
+                 mock.patch.object(calibration, "run_calibration", return_value=measured) as run_cal, \
+                 mock.patch.object(calibration, "save_report", return_value=Path(tmp) / "calibration.json"), \
+                 mock.patch.object(calibration, "save_config") as save_cfg, \
+                 mock.patch.object(de, "execute", return_value={"result": "completed"}) as execute, \
+                 mock.patch.object(de, "write_run_record", return_value=Path(tmp) / "run.json"), \
+                 mock.patch("builtins.input", return_value="yes"):
+                self.assertEqual(de.main(), 0)
+            run_cal.assert_called_once()
+            save_cfg.assert_called_once()
+            execute.assert_called_once()
+            self.assertEqual(save_cfg.call_args.args[1]["plane_compensation"]["status"], "verified")
+
+    def test_physical_cli_run_without_flag_skips_calibration_and_draws(self):
+        from mirobot_sketch import calibration
+
+        cfg = copy.deepcopy(CFG)
+        c = cfg["paper_center_tcp_mm"]
+        with tempfile.TemporaryDirectory() as tmp:
+            strokes_path = Path(tmp) / "line.json"
+            strokes_path.write_text(json.dumps({"kind": "sketch_strokes", "units": "mm",
+                                                "strokes": [{"points_xy_mm": [[-5, 0], [5, 0]]}]}),
+                                    encoding="utf-8")
+            with mock.patch.object(sys, "argv", ["mirobot-draw", str(strokes_path), "--execute"]), \
+                 mock.patch.object(de, "load_config", return_value=cfg), \
+                 mock.patch.object(de, "open_link", return_value=mock.Mock()), \
+                 mock.patch.object(de, "connect_and_home", return_value=(c["x"], c["y"], c["z"])), \
+                 mock.patch.object(calibration, "run_calibration") as run_cal, \
+                 mock.patch.object(calibration, "save_config") as save_cfg, \
+                 mock.patch.object(de, "execute", return_value={"result": "completed"}) as execute, \
+                 mock.patch.object(de, "write_run_record", return_value=Path(tmp) / "run.json"), \
+                 mock.patch("builtins.input", return_value="yes"):
+                self.assertEqual(de.main(), 0)
+            run_cal.assert_not_called()
+            save_cfg.assert_not_called()
+            execute.assert_called_once()
 
 
 class ExecuteTest(unittest.TestCase):

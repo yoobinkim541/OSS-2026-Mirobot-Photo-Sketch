@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from mirobot_sketch import draw_executor as de  # noqa: E402
 from mirobot_sketch import live_progress as lp  # noqa: E402
-from mirobot_sketch.draw_job import DrawJob  # noqa: E402
+from mirobot_sketch.draw_job import DrawJob, target_contact_extents  # noqa: E402
 from mirobot_sketch.session import SketchSession  # noqa: E402
 
 import golden  # noqa: E402
@@ -37,13 +37,21 @@ class Recorder:
         return [(d["id"], d["status"]) for k, d in self.events if k == "step"]
 
 
+class PhysicalLinkStub:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
 class DrawJobTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
         p = Path(cls.tmp.name) / "line.png"
         cv2.imwrite(str(p), golden.synthetic_images()["line"])
-        cls.session = SketchSession()
+        cls.session = SketchSession(golden.default_cfg())
         cls.session.set_image(p)
         cls.session.update_params({"box_mm": 60, "epsilon_px": 4.0})
         cls.session.run_current()
@@ -77,11 +85,52 @@ class DrawJobTest(unittest.TestCase):
         fin = next(d for k, d in rec.events if k == "finished")
         self.assertEqual(fin["result"]["result"], "completed")
         self.assertTrue(Path(fin["record_path"]).exists())
+        import json
+        run = json.loads(Path(fin["record_path"]).read_text(encoding="utf-8"))
+        strokes_file = Path(run["strokes_json"])
+        self.assertTrue(strokes_file.exists())
+        doc, saved_strokes = de.load_strokes(strokes_file)
+        self.assertEqual(doc["source"]["image"], str(self.session.image_path))
+        self.assertEqual(saved_strokes[0], [tuple(pt) for pt in self.session.result["strokes_mm"][0]])
         prog = [d for k, d in rec.events if k == "progress"]
         self.assertEqual(prog[-1]["acked"], prog[-1]["total"])
         live = lp.read_progress(Path(self.tmp.name) / "live.json")
         self.assertEqual((live["state"], live["acked"]), ("done", live["total"]))
         self.assertTrue(Path(lp.to_local_path(live["trajectory"])).exists())
+
+    def test_recalibrate_choice_runs_guided_calibration_before_drawing(self):
+        from mirobot_sketch import calibration
+
+        cfg = golden.default_cfg()
+        session = SketchSession(cfg)
+        session.set_image(Path(self.tmp.name) / "line.png")
+        session.update_params({"box_mm": 40, "epsilon_px": 4.0})
+        session.run_current()
+        session.simulate()
+        rec = Recorder()
+        job = self.job(rec)
+        job.session, job.cfg = session, cfg
+        center = dict(cfg["paper_center_tcp_mm"])
+        ready = dict(center)
+        ready["x"] -= cfg["pen"]["up_clearance_mm"]
+        measurement = {"result": "ready", "center_tcp_mm": center, "ready_tcp_mm": ready,
+                       "samples": [], "selected_half_size_mm": 30.0,
+                       "max_residual_mm": 1.0,
+                       "plane_fit": {"a_per_mm_y": 0.0, "b_per_mm_z": 0.0,
+                                     "max_abs_residual_mm": 0.0}}
+        link = PhysicalLinkStub()
+        with mock.patch.object(de, "open_link", return_value=link), \
+             mock.patch.object(calibration, "run_calibration", return_value=measurement) as run, \
+             mock.patch.object(calibration, "save_report", return_value=Path("calibration.json")), \
+             mock.patch.object(calibration, "save_config") as save:
+            job.start(virtual=False, recalibrate=True)
+            self.assertTrue(rec.ready.wait(15), rec.events[-5:])
+            run.assert_called_once()
+            save.assert_called_once()
+            self.assertEqual(cfg["plane_compensation"]["status"], "verified")
+            job.cancel()
+            self.assertTrue(rec.done.wait(5))
+        self.assertTrue(link.closed)
 
     def test_stop_during_drawing(self):
         rec = Recorder()
@@ -109,7 +158,7 @@ class DrawJobTest(unittest.TestCase):
         self.assertEqual(job.link.state, "closed")
 
     def test_wide_range_choice_applies_to_preflight(self):
-        big = SketchSession()
+        big = SketchSession(golden.default_cfg())
         big.set_image(Path(self.tmp.name) / "line.png")
         big.update_params({"box_mm": 110, "epsilon_px": 4.0})       # ±55mm: 실행기 허용(±50) 밖, 넓은 범위(±60) 안
         big.run_current()
@@ -125,6 +174,113 @@ class DrawJobTest(unittest.TestCase):
             self.assertTrue(rec.done.wait(20))
             pre = [st for i, st in rec.steps() if i == "preflight"]
             self.assertEqual(pre[-1], "failed" if expect == "failed" else "done", pending)
+
+    def test_real_pen_down_rejects_unmeasured_area_after_confirmation(self):
+        cfg = golden.default_cfg()
+        cfg["plane_compensation"]["status"] = "verified"
+        big = SketchSession(cfg)
+        big.set_image(Path(self.tmp.name) / "line.png")
+        big.update_params({"box_mm": 110, "epsilon_px": 4.0})
+        big.run_current()
+        big.simulate()
+        self.assertTrue(de.check_limits(big.result["strokes_mm"], big.cfg))
+        rec = Recorder()
+        job = self.job(rec)
+        job.session, job.cfg = big, big.cfg
+        link = PhysicalLinkStub()
+        center = dict(cfg["paper_center_tcp_mm"])
+        with mock.patch.object(de, "open_link", return_value=link), \
+             mock.patch.object(de, "connect_and_home", return_value=tuple(center[k]
+                                                                         for k in ("x", "y", "z"))):
+            job.start(virtual=False, pending=True)
+            self.assertTrue(rec.ready.wait(15), rec.events[-5:])
+            job.confirm(air=False, pending=True, checked=True)
+            self.assertTrue(rec.done.wait(5))
+        fin = next(d for k, d in rec.events if k == "finished")
+        self.assertEqual(fin["result"]["result"], "not_started")
+        self.assertIn("설정된 펜 접촉 영역", fin["result"]["error"])
+        self.assertTrue(link.closed)
+
+    def test_physical_run_without_recalibrate_skips_calibration_and_draws_pen_down(self):
+        from mirobot_sketch import calibration
+
+        cfg = golden.default_cfg()
+        self.assertNotEqual(cfg["plane_compensation"]["status"], "verified")   # 보정 안 된 설정
+        session = SketchSession(cfg)
+        session.set_image(Path(self.tmp.name) / "line.png")
+        session.update_params({"box_mm": 40, "epsilon_px": 4.0})
+        session.run_current()
+        session.simulate()
+        rec = Recorder()
+        job = self.job(rec)
+        job.session, job.cfg = session, cfg
+        c = cfg["paper_center_tcp_mm"]
+        link = PhysicalLinkStub()
+        with mock.patch.object(de, "open_link", return_value=link), \
+             mock.patch.object(de, "connect_and_home", return_value=(c["x"], c["y"], c["z"])), \
+             mock.patch.object(calibration, "run_calibration") as run, \
+             mock.patch.object(calibration, "save_config") as save, \
+             mock.patch.object(de, "execute", return_value={"result": "completed", "commands_sent": 1,
+                                                            "elapsed_s": 0.1}) as execute:
+            job.start(virtual=False)
+            self.assertTrue(rec.ready.wait(15), rec.events[-5:])
+            self.assertFalse(job.summary["plane_verified"])
+            job.confirm(air=False, pending=False, checked=True)
+            self.assertTrue(rec.done.wait(10), rec.events[-5:])
+            run.assert_not_called()
+            save.assert_not_called()
+            execute.assert_called_once()
+        fin = next(d for k, d in rec.events if k == "finished")
+        self.assertEqual(fin["result"]["result"], "completed")
+        self.assertTrue(link.closed)
+
+    def test_photo_sized_rectangle_can_be_selected_for_contact_calibration(self):
+        outline = [[(-60, -35.4), (60, -35.4), (60, 35.4), (-60, 35.4)]]
+        self.assertEqual(target_contact_extents(outline, golden.default_cfg()), (61, 37))
+        square = [[(-60, -60), (60, -60), (60, 60), (-60, 60)]]
+        self.assertIsNone(target_contact_extents(square, golden.default_cfg()))
+
+    def test_rectangular_calibration_reaches_app_command_execution(self):
+        from mirobot_sketch import calibration
+
+        cfg = golden.default_cfg()
+        session = SketchSession(cfg)
+        session.set_image(Path(self.tmp.name) / "line.png")
+        session.update_params({"box_mm": 60, "epsilon_px": 4.0})
+        session.run_current()
+        session.result["strokes_mm"] = [[(-60.0, -35.4), (60.0, -35.4),
+                                         (60.0, 35.4), (-60.0, 35.4)]]
+        session.simulate()
+        rec = Recorder()
+        job = self.job(rec)
+        job.session, job.cfg = session, cfg
+        center = dict(cfg["paper_center_tcp_mm"])
+        ready = dict(center)
+        ready["x"] -= cfg["pen"]["up_clearance_mm"]
+        measurement = {"result": "ready", "center_tcp_mm": center, "ready_tcp_mm": ready,
+                       "samples": [], "selected_half_size_mm": [61.0, 37.0],
+                       "max_residual_mm": 1.0,
+                       "plane_fit": {"a_per_mm_y": cfg["plane_compensation"]["a_per_mm_y"],
+                                     "b_per_mm_z": cfg["plane_compensation"]["b_per_mm_z"],
+                                     "max_abs_residual_mm": 0.0}}
+        link = PhysicalLinkStub()
+        with mock.patch.object(de, "open_link", return_value=link), \
+             mock.patch.object(calibration, "run_calibration", return_value=measurement) as run, \
+             mock.patch.object(calibration, "save_report", return_value=Path("calibration.json")), \
+             mock.patch.object(calibration, "save_config"), \
+             mock.patch.object(de, "execute", return_value={"result": "completed", "commands_sent": 7,
+                                                            "elapsed_s": 0.1}) as execute:
+            job.start(virtual=False, pending=True, recalibrate=True)
+            self.assertTrue(rec.ready.wait(25), rec.events[-5:])
+            self.assertEqual(run.call_args.kwargs["target_half_extents_mm"], (61, 37))
+            self.assertEqual(cfg["limits"], {"max_abs_paper_x_mm": 61.0,
+                                              "max_abs_paper_y_mm": 37.0})
+            job.confirm(air=False, pending=True, checked=True)
+            self.assertTrue(rec.done.wait(10), rec.events[-5:])
+            execute.assert_called_once()
+        fin = next(d for k, d in rec.events if k == "finished")
+        self.assertEqual(fin["result"]["result"], "completed")
+        self.assertTrue(link.closed)
 
     def test_slow_rviz_launch_does_not_delay_drawing(self):
         import time
@@ -173,7 +329,9 @@ class DrawJobTest(unittest.TestCase):
         self.assertEqual(fin["result"]["result"], "completed")   # ①에서 찍어 둔 획으로 끝까지
         self.assertTrue(Path(fin["record_path"]).exists())
         import json
-        self.assertEqual(json.loads(Path(fin["record_path"]).read_text(encoding="utf-8"))["strokes_json"], path)
+        run = json.loads(Path(fin["record_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(run["source"]["image"], path)
+        self.assertTrue(Path(run["strokes_json"]).exists())
 
     def test_progress_file_failures_never_abort_drawing(self):
         rec = Recorder()

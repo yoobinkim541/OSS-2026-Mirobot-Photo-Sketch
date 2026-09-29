@@ -146,7 +146,7 @@ class PlacementTest(unittest.TestCase):
             cv2.rectangle(img, (20, 20), (780, 280), 0, 3)
             cv2.line(img, (20, 150), (780, 150), 0, 3)
             cv2.imwrite(str(p), img)
-            s = SketchSession()
+            s = SketchSession(de.load_config(ROOT / "mirobot_sketch" / "data" / "drawing_config.json"))
             s.set_image(p)
             s.update_params({"box_mm": 250})
             self.assertEqual(s.params["box_mm"], 250)                  # 상한 = 영역 폭

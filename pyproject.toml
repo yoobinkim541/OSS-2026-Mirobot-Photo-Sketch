@@ -48,6 +48,7 @@ mirobot-strokes = "mirobot_sketch.make_strokes:main"
 mirobot-draw = "mirobot_sketch.draw_executor:main"
 mirobot-sim = "mirobot_sketch.mirobot_sim:main"
 mirobot-setup-rviz = "mirobot_sketch.rviz_setup:main"
+mirobot-calibrate = "mirobot_sketch.calibration:main"
 
 [tool.setuptools]
 packages = ["mirobot_sketch", "mirobot_sketch.agent"]
