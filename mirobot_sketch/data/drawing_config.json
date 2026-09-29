@@ -15,6 +15,7 @@
 
  "pen": {
   "up_clearance_mm": 2.5,
+  "slow_zone_mm": 2.5,
   "air_clearance_mm": 8.0,
   "retract_x_sign": -1,
   "down_extra_mm": 0.0,

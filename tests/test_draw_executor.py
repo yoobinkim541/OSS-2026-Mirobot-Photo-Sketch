@@ -5,6 +5,7 @@
 
 import copy
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -70,6 +71,40 @@ class PlannerTest(unittest.TestCase):
         self.assertAlmostEqual(down_x, CFG["paper_center_tcp_mm"]["x"])
         self.assertAlmostEqual(down_x - up_x, CFG["pen"]["up_clearance_mm"])  # 펜업은 벽에서 멀어짐
 
+    def _high_pen_up_cfg(self, up=10.0):
+        cfg = copy.deepcopy(CFG)
+        cfg["pen"]["up_clearance_mm"] = up
+        return cfg
+
+    def test_high_pen_up_descends_fast_then_slow_only_near_paper(self):
+        cfg = self._high_pen_up_cfg(10.0)
+        f = cfg["feeds_mm_per_min"]
+        planner = de.Planner(cfg)
+        cmds = planner.plan(SQUARE)
+        labels = [label for _, label in cmds]
+        self.assertEqual(labels[1:4], ["stroke 0 travel", "stroke 0 descend", "stroke 0 pen-down"])
+        x_of = lambda line: float(re.search(r"X([-\d.]+)", line).group(1))
+        feed_of = lambda line: float(re.search(r"F([\d.]+)", line).group(1))
+        travel, descend, down = cmds[1][0], cmds[2][0], cmds[3][0]
+        sign = cfg["pen"]["retract_x_sign"]
+        contact = planner.pose(SQUARE[0][0][0], SQUARE[0][0][1], True)[0]
+        self.assertAlmostEqual(sign * (x_of(travel) - contact), 10.0, places=2)           # 펜업은 10 mm 위
+        self.assertAlmostEqual(sign * (x_of(descend) - contact), cfg["pen"]["slow_zone_mm"], places=2)
+        self.assertEqual([feed_of(travel), feed_of(descend), feed_of(down)], [f["travel"], f["travel"], f["approach"]])
+        up = next(line for line, label in cmds if label == "stroke 0 pen-up")
+        self.assertEqual(feed_of(up), f["travel"])                                         # 올리는 건 빠르게
+        self.assertAlmostEqual(sign * (x_of(up) - planner.pose(*SQUARE[0][-1], True)[0]), 10.0, places=2)
+
+    def test_pen_up_within_slow_zone_keeps_single_slow_approach(self):
+        planner = de.Planner(CFG)                                   # 기본 설정: 펜업 2.5 mm = 느린 구간
+        labels = [label for _, label in planner.plan(SQUARE)]
+        self.assertNotIn("stroke 0 descend", labels)
+        self.assertEqual(planner.plan(SQUARE)[-2][0].split(" F")[1], str(int(CFG["feeds_mm_per_min"]["approach"])))
+
+    def test_air_mode_has_no_descent_waypoint_even_with_high_pen_up(self):
+        planner = de.Planner(self._high_pen_up_cfg(10.0), air=True)
+        self.assertNotIn("stroke 0 descend", [label for _, label in planner.plan(SQUARE)])
+
     def test_axis_signs(self):
         planner = de.Planner(CFG)
         c = CFG["paper_center_tcp_mm"]
@@ -99,6 +134,20 @@ class TimingTest(unittest.TestCase):
         strokes = SQUARE + [[(0.0, 0.0), (5.0, 5.0)]]
         t = de.estimate_time(strokes, CFG)
         self.assertEqual(t["command_count"], len(de.Planner(CFG).plan(strokes)))
+
+    def test_command_count_and_lift_time_match_plan_for_high_pen_up(self):
+        cfg = copy.deepcopy(CFG)
+        cfg["pen"]["up_clearance_mm"] = 10.0
+        strokes = SQUARE + [[(0.0, 0.0), (5.0, 5.0)]]
+        t = de.estimate_time(strokes, cfg)
+        self.assertEqual(t["command_count"], len(de.Planner(cfg).plan(strokes)))
+        f, n = cfg["feeds_mm_per_min"], len(strokes)
+        expected = (10.0 / f["approach"] + n * (7.5 / f["travel"] + 2.5 / f["approach"] + 10.0 / f["travel"])) * 60
+        self.assertAlmostEqual(t["pen_lift_s"], expected, places=1)
+        slow_all = 10.0 * (2 * n + 1) / f["approach"] * 60                   # 전 구간 느린 속도였다면
+        self.assertLess(t["pen_lift_s"], slow_all * 0.6)                    # 처음 중심 펜업은 느려서 획이 적으면 절반까지는 안 줄어듦
+        air = de.estimate_time(strokes, cfg, air=True)
+        self.assertEqual(air["command_count"], len(de.Planner(cfg, air=True).plan(strokes)))
 
     def test_pen_lift_grows_with_stroke_count(self):
         # 같은 길이를 1획으로 그릴 때와 10획으로 쪼갤 때: 펜 올림·내림 시간만 늘어남
