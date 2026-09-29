@@ -18,13 +18,14 @@
  "_axis_sign_note": "미검증. 로봇이 +X(벽) 방향을 바라보는 오른손 좌표계라면, 종이를 정면에서 볼 때 오른쪽은 로봇 -Y. 원·하트는 좌우 대칭이라 이 부호를 확인하지 못했음. trajectories/orientation-test-F.json을 그려 F가 거울상이 아닌지 확인한 뒤 _axis_sign_status를 verified로 바꿀 것.",
  "_axis_sign_status": "unverified",
  "pen": {
-  "up_clearance_mm": 5.0,
+  "up_clearance_mm": 10.0,
+  "slow_zone_mm": 2.5,
   "air_clearance_mm": 8.0,
   "retract_x_sign": -1,
   "down_extra_mm": 0.0,
   "line_width_mm": 0.5
  },
- "_pen_clearance_note": "2026-09-29 up_clearance_mm 2.5 -> 5.0: 획 사이 펜올림이 너무 살짝이라 확실히 떼도록 늘림. 시간이 늘어난다(펜 올림·내림은 approach 속도). 실물 선질 확인 필요.",
+ "_pen_clearance_note": "2026-09-29 up_clearance_mm 2.5 -> 10.0: 획 사이 펜올림이 너무 살짝이라 확실히 떼도록 늘림. slow_zone_mm(2.5)보다 높으면 종이에 닿기 직전 slow_zone_mm만 approach 속도로 내리고 그 위는 travel 속도로 이동·올림(획마다 명령 1개 추가). 실물 선질 확인 필요.",
  "_pen_width_note": "line_width_mm: 펜 선 굵기 추정값(GUI 종이 미리보기용). 실제 펜으로 그은 선을 재서 고칠 것.",
  "_pen_note": "하트 테스트 기록: 접촉 X=198.668, 접근 전 X=196.678 -> 벽에서 떨어지는 방향은 -X. down_extra_mm는 접촉 기준보다 더 누르는 양(+이면 벽 쪽). 1mm 이하로만 조정.",
  "pen_tip_offset_mm": {

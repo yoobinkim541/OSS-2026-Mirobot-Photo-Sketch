@@ -96,6 +96,11 @@ class Planner:
         # 공중 경로는 미측정 영역도 지날 수 있으므로 실물 탐색에서 쓴 여유(8 mm)를 유지한다.
         clearance = max(float(pen["up_clearance_mm"]), float(pen.get("air_clearance_mm", 8.0))) if air else float(pen["up_clearance_mm"])
         self.up_dx = pen["retract_x_sign"] * clearance
+        # 펜업 높이가 slow_zone_mm보다 높으면 종이에 닿기 직전 slow_zone_mm만 느리게(approach) 내리고 그 위는 빠르게(travel).
+        # 공중 모드는 종이에 닿지 않으므로 해당 없음. slow_zone_mm 이하로 띄우면 예전처럼 한 번에 approach 속도.
+        self.slow_zone = float(pen.get("slow_zone_mm", 2.5))
+        self.two_stage = (not air) and clearance > self.slow_zone + 1e-9
+        self.slow_dx = pen["retract_x_sign"] * self.slow_zone
         self.down_extra = -pen["retract_x_sign"] * pen["down_extra_mm"]  # 누르는 방향 = 후퇴의 반대
         pc = cfg["plane_compensation"]
         self.pa, self.pb = pc["a_per_mm_y"], pc["b_per_mm_z"]
@@ -114,6 +119,11 @@ class Planner:
             x += self.up_dx
         return x, ry, rz
 
+    def pose_slow_zone(self, px, py):
+        """종이에 닿기 직전 느린 구간이 시작되는 높이(접촉면에서 slow_zone_mm 위)."""
+        ry, rz = self.robot_yz(px, py)
+        return self.contact_x(ry, rz) + self.slow_dx, ry, rz
+
     def gcode(self, pose, feed):
         x, y, z = pose
         a, b, c = self.abc
@@ -126,11 +136,14 @@ class Planner:
         for i, s in enumerate(strokes):
             x0, y0 = s[0]
             cmds.append((self.gcode(self.pose(x0, y0, False), f["travel"]), f"stroke {i} travel"))
+            if self.two_stage:   # 높이 띄운 곳에서 빠르게 내려오다 접촉 직전부터 천천히
+                cmds.append((self.gcode(self.pose_slow_zone(x0, y0), f["travel"]), f"stroke {i} descend"))
             cmds.append((self.gcode(self.pose(x0, y0, True), f["approach"]), f"stroke {i} pen-down"))
             for x, y in s[1:]:
                 cmds.append((self.gcode(self.pose(x, y, True), f["draw"]), f"stroke {i} draw"))
             x1, y1 = s[-1]
-            cmds.append((self.gcode(self.pose(x1, y1, False), f["approach"]), f"stroke {i} pen-up"))
+            cmds.append((self.gcode(self.pose(x1, y1, False), f["travel"] if self.two_stage else f["approach"]),
+                         f"stroke {i} pen-up"))
         cmds.append((self.gcode(self.pose(0, 0, False), f["travel"]), "return center pen-up"))
         return cmds
 
@@ -158,9 +171,16 @@ def estimate_time(strokes, cfg, air=False):
     n = len(strokes)
     draw_s = down / f["draw"] * 60.0
     travel_s = up / f["travel"] * 60.0
-    lift_mm = max(clear, float(cfg["pen"].get("air_clearance_mm", 8.0))) if air else clear * (2 * n + 1)
-    pen_lift_s = lift_mm / f["approach"] * 60.0
-    command_count = 2 + sum(len(s) + 2 for s in strokes)  # Planner.plan과 같은 수
+    slow = float(cfg["pen"].get("slow_zone_mm", 2.5))
+    two_stage = (not air) and clear > slow + 1e-9        # Planner.two_stage와 같은 조건
+    if air:
+        pen_lift_s = max(clear, float(cfg["pen"].get("air_clearance_mm", 8.0))) / f["approach"] * 60.0
+    elif two_stage:   # 처음 중심 펜업(approach) + 획마다 [빠른 하강 + 느린 접촉 구간 + 빠른 올림(travel)]
+        pen_lift_s = (clear / f["approach"] + n * ((clear - slow) / f["travel"] + slow / f["approach"]
+                                                   + clear / f["travel"])) * 60.0
+    else:
+        pen_lift_s = clear * (2 * n + 1) / f["approach"] * 60.0
+    command_count = 2 + sum(len(s) + 2 for s in strokes) + (n if two_stage else 0)  # Planner.plan과 같은 수
     latency = cfg.get("timing", {}).get("assumed_command_latency_s", 0.0)
     motion_s = draw_s + travel_s + pen_lift_s
     return {
