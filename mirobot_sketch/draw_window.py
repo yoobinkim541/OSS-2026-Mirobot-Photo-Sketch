@@ -69,7 +69,7 @@ class DrawWindow(ctk.CTkToplevel):
         ctk.CTkCheckBox(opts, text="종이·펜 위치 변경: 다시 보정", variable=self.recalibrate_var,
                         font=font(12)).grid(row=2, column=0, columnspan=3, sticky="w", pady=4)
         self.check_var = ctk.BooleanVar(value=False)
-        self.check_box = ctk.CTkCheckBox(opts, text="종이·펜·주변을 확인했습니다", variable=self.check_var,
+        self.check_box = ctk.CTkCheckBox(opts, text="펜 끝이 종이 가운데에 닿아 있고 주변을 확인했습니다", variable=self.check_var,
                                          font=font(12, "bold"), command=self._on_check, state="disabled")
         self.check_box.grid(row=3, column=0, columnspan=3, sticky="w", pady=4)
 
@@ -180,7 +180,9 @@ class DrawWindow(ctk.CTkToplevel):
                                            f"예상 {s['estimated_s'] / 60:.1f}분 · {s['drawing_mm'][0]:.0f}×"
                                            f"{s['drawing_mm'][1]:.0f}mm · {s['port']}"
                                            + ("" if s["virtual"] or s["plane_verified"] else
-                                              " · 종이 보정 없음(설정에 저장된 값 사용)"))
+                                              " · 종이 보정 없음(설정에 저장된 값 사용)")
+                                           + ("" if s["virtual"] or s.get("start_center_shift_mm", 0) < 0.05 else
+                                              f" · 시작 자세를 종이 중심으로 사용(설정 파일 값과 {s['start_center_shift_mm']:g} mm 차이)"))
                 self.check_box.configure(state="normal")
                 self._on_check()
         elif kind == "robot_status":

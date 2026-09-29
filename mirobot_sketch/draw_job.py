@@ -11,6 +11,7 @@ events(kind, **data):
   finished  result, record_path
 """
 
+import copy
 import json
 import math
 import queue
@@ -25,15 +26,35 @@ from . import paths
 CANCELLED = "취소했습니다."
 
 
-def target_contact_extents(strokes, cfg):
-    """확장 그림을 둘러싼 중심 정렬 접촉 직사각형의 반폭. 불가능하면 None."""
+def _floor_tenth(v):
+    return math.floor(v * 10 + 1e-9) / 10
+
+
+def _ceil_tenth(v):
+    return math.ceil(v * 10 - 1e-9) / 10
+
+
+def target_contact_rect(strokes, cfg):
+    """확장 그림을 둘러싼 접촉 직사각형 (x0, y0, x1, y1), 종이 중심 기준 mm. 좌우는 대칭.
+
+    위쪽 한계 때문에 큰 그림은 종이 중심보다 아래로 배치되므로 세로 범위는 그림의 실제 범위를 따른다.
+    가장자리 여유는 1 mm를 먼저 시도하고 허용 영역 밖이면 0.5 mm, 그래도 밖이면 그림 범위 그대로(여유 없음).
+    그것도 영역 밖이면 None."""
     from . import limits
 
-    hx = math.ceil(max(abs(x) for st in strokes for x, _ in st)) + 1
-    hy = math.ceil(max(abs(y) for st in strokes for _, y in st)) + 1
-    if all(limits.pending_region(cfg).contains(x, y)
-           for x in (-hx, hx) for y in (-hy, hy)):
-        return hx, hy
+    region = limits.pending_region(cfg)
+    xs = [x for st in strokes for x, _ in st]
+    ys = [y for st in strokes for _, y in st]
+    half_x = max(abs(min(xs)), abs(max(xs)))
+    for margin in (1.0, 0.5):
+        hx = _ceil_tenth(half_x + margin)
+        y0, y1 = _floor_tenth(min(ys) - margin), _ceil_tenth(max(ys) + margin)
+        if all(region.contains(x, y) for x in (-hx, hx) for y in (y0, y1)):
+            return (float(-hx), float(y0), float(hx), float(y1))
+    # 여유 없이 그림 범위 그대로 (앱이 위쪽 한계에 딱 맞춰 배치한 큰 그림은 반올림만으로도 영역을 넘음)
+    exact = tuple(float(v) for v in (-half_x, min(ys), half_x, max(ys)))
+    if all(region.contains(x, y) for x in (exact[0], exact[2]) for y in (exact[1], exact[3])):
+        return exact
     return None
 
 
@@ -110,6 +131,29 @@ class DrawJob:
             except queue.Full:
                 pass
 
+    def _use_start_pose_as_paper_center(self, tcp):
+        """실물 연결(보정 안 함)의 ③: 사람이 펜 끝을 종이 가운데에 닿게 세팅하고 시작하므로, 시작 자세가 곧 종이 중심.
+        설정 파일 값은 바꾸지 않고 이번 실행에서만 종이 중심으로 쓴다(실행 기록의 설정 사본에 남음).
+        반환: 설정 파일의 종이 중심과 시작 자세의 거리(mm)."""
+        s = self.session
+        previous = self.cfg["paper_center_tcp_mm"]
+        moved = math.dist((tcp[0], tcp[1], tcp[2]), (previous["x"], previous["y"], previous["z"]))
+        if moved < 1e-6:
+            return 0.0
+        updated = copy.deepcopy(self.cfg)
+        updated["paper_center_tcp_mm"] = {"x": float(tcp[0]), "y": float(tcp[1]), "z": float(tcp[2])}
+        for c in {id(self.cfg): self.cfg, id(s.cfg): s.cfg}.values():
+            c.clear()
+            c.update(updated)
+        # 종이 중심이 바뀌면 로봇 좌표가 바뀌므로 관절 시뮬레이션을 다시 검사
+        sim = s.simulate()
+        if sim["verdict"].startswith("FAIL"):
+            raise de.DrawError("start", f"시작 자세를 종이 중심으로 쓰면 로봇 시뮬레이션이 FAIL입니다: {sim['verdict']}",
+                               "종이와 펜 위치를 확인하거나 그림 크기를 줄인 뒤 다시 시작하세요.")
+        with s.lock:
+            self._snap["sim_raw"] = s.sim["raw"]
+        return moved
+
     def _calibration_input(self, prompt):
         reply = queue.Queue(maxsize=1)
         with self._calibration_reply_lock:
@@ -172,10 +216,11 @@ class DrawJob:
                          speed=self._speed if self._virtual else 1.0, trajectory=None, message="호밍 대기")
             from . import calibration
             calibration_path = None
-            target_extents = None
+            calibrated = False
+            target_rect = None
             # 캘리브레이션은 사람이 '다시 보정'을 골랐을 때만: 아니면 바로 호밍 → 그리기 (범위·시작 위치 검사는 그대로)
             if self._recalibrate and not self._virtual and self._pending and de.check_limits(strokes, self.cfg):
-                target_extents = target_contact_extents(strokes, self.cfg)
+                target_rect = target_contact_rect(strokes, self.cfg)
             if self._recalibrate and not self._virtual:
                 self._step("connect", "active", "종이 캘리브레이션을 시작합니다")
                 def calibration_progress(message):
@@ -184,7 +229,7 @@ class DrawJob:
                         controller.progress(message)
 
                 try:
-                    kw = {"target_half_extents_mm": target_extents} if target_extents else {}
+                    kw = {"target_rect_mm": target_rect} if target_rect else {}
                     measured = calibration.run_calibration(
                         self.link, self.cfg, input_fn=self._calibration_input,
                         output_fn=calibration_progress, **kw)
@@ -212,6 +257,7 @@ class DrawJob:
                 with s.lock:
                     self._snap["sim_raw"] = s.sim["raw"]
                 tcp = tuple(measured["ready_tcp_mm"][axis] for axis in ("x", "y", "z"))
+                calibrated = True
                 self.summary.update(command_count=len(pre["cmds"]), estimated_s=pre["timing"]["total_s"])
             else:
                 tcp = de.connect_and_home(self.link, self.cfg,
@@ -221,12 +267,20 @@ class DrawJob:
                        if calibration_path is not None and measured.get("result") == "ready" else "Idle")
             # ③ 시작 위치
             self._step("start", "active", "펜 끝 위치를 확인합니다")
-            off = de.check_start(tcp, self.cfg)
+            if self._virtual or calibrated:
+                # 방금 캘리브레이션했다면 로봇은 펜을 벽에서 뺀 자세로 끝났으므로 그 자세를 허용해서 검사
+                off = de.check_start(tcp, self.cfg, retracted=calibrated)
+                start_note = f"종이 중심에서 {off:.1f} mm"
+            else:
+                moved = self._use_start_pose_as_paper_center(tcp)
+                self.summary["start_center_shift_mm"] = round(moved, 1)
+                start_note = ("시작 자세를 종이 중심으로 사용" +
+                              (f" (설정 파일 값과 {moved:.1f} mm 차이)" if moved >= 0.05 else ""))
             from . import mirobot_sim as ms
             self._step("start", "active", "공중 경로의 관절 움직임을 확인합니다")
             self._air_sim = ms.simulate(ms.plan_targets(strokes, self.cfg, air=True))
             self._air_verdict = ms.verdict(self._air_sim)
-            self._step("start", "done", f"종이 중심에서 {off:.1f} mm")
+            self._step("start", "done", start_note)
             # ④ 최종 확인 (사람)
             self._step("confirm", "active", "종이·펜·주변을 확인하고 시작하세요")
             self._confirm.wait()

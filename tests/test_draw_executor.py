@@ -286,6 +286,20 @@ class StepFunctionsTest(unittest.TestCase):
                                 should_cancel=lambda: True)
         self.assertEqual(cm.exception.step, "connect")
 
+    def test_check_start_after_calibration_accepts_pen_up_retract_only_away_from_wall(self):
+        c = CFG["paper_center_tcp_mm"]
+        sign = CFG["pen"]["retract_x_sign"]
+        at = lambda back, dy=0.0, dz=0.0: (c["x"] + sign * back, c["y"] + dy, c["z"] + dz)
+        self.assertGreater(8.0, CFG["max_start_offset_mm"])            # 보정 후 후퇴 자세는 일반 5 mm 기준을 넘는다
+        with self.assertRaises(de.DrawError):
+            de.check_start(at(8.0), CFG)                                # 일반 검사는 막지만
+        self.assertAlmostEqual(de.check_start(at(8.0), CFG, retracted=True), 8.0)   # 보정 직후에는 통과
+        de.check_start(at(0.0), CFG, retracted=True)
+        for bad in (at(25.0), at(-5.0), at(5.0, dy=7.0), at(5.0, dz=-6.0)):        # 너무 멀리 물러남 / 벽 쪽 / 옆으로 어긋남
+            with self.assertRaises(de.DrawError) as cm:
+                de.check_start(bad, CFG, retracted=True)
+            self.assertEqual(cm.exception.step, "start")
+
     def test_cli_virtual_run_writes_record(self):
         import tempfile
         from unittest import mock
