@@ -96,8 +96,15 @@ class StatCard(ctk.CTkFrame):
         self.sub.configure(text=sub)
 
 
+# 파이썬이 스레드를 바꾸는 간격. 로봇 시뮬레이션(역기구학)처럼 작은 numpy 연산을 끝없이 반복하는 작업 스레드가
+# 기본 간격(5 ms)에서는 화면(메인) 스레드에 잠금(GIL)을 거의 넘기지 않아 창이 몇 초씩 멈췄다
+# (120 mm 그림 시뮬레이션 38초 동안 화면 갱신 1,900회 중 33회, 최대 6.2초 멈춤 -> 0.5 ms에서 1,330회, 최대 1초 미만).
+GIL_SWITCH_INTERVAL_S = 0.0005
+
+
 class SketchApp:
     def __init__(self, root):
+        sys.setswitchinterval(GIL_SWITCH_INTERVAL_S)
         self.root = root
         self._closing = False
         self._ui_after = self._usb_after = self._icon_after = None
