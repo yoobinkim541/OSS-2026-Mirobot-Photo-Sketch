@@ -1,0 +1,89 @@
+{
+  "created_local": "2026-09-29T18:08:58+09:00",
+  "config_path": "C:\\Users\\asus\\Desktop\\Mirobot\\robot\\drawing_config.json",
+  "result": "needs_paper_adjustment",
+  "center_tcp_mm": {
+    "x": 183.05,
+    "y": 0.0,
+    "z": 228.802
+  },
+  "samples": [
+    {
+      "name": "bottom_left",
+      "paper_xy_mm": [
+        -50.0,
+        -51.0
+      ],
+      "tcp_mm": {
+        "x": 175.055,
+        "y": 49.964,
+        "z": 177.488
+      }
+    },
+    {
+      "name": "bottom_right",
+      "paper_xy_mm": [
+        50.0,
+        -51.0
+      ],
+      "tcp_mm": {
+        "x": 172.54,
+        "y": -50.009,
+        "z": 177.487
+      }
+    },
+    {
+      "name": "top_right",
+      "paper_xy_mm": [
+        50.0,
+        51.0
+      ],
+      "tcp_mm": {
+        "x": 180.939,
+        "y": -49.961,
+        "z": 279.544
+      }
+    },
+    {
+      "name": "top_left",
+      "paper_xy_mm": [
+        -50.0,
+        51.0
+      ],
+      "tcp_mm": {
+        "x": 170.046,
+        "y": 50.039,
+        "z": 279.482
+      }
+    }
+  ],
+  "plane_fit": {
+    "a_per_mm_y": -0.04192767773947467,
+    "b_per_mm_z": 0.0176329858016378,
+    "max_abs_residual_mm": 11.79962065402145,
+    "rmse_mm": 9.043424217346466,
+    "residuals_mm": {
+      "bottom_left": -4.99530647599965,
+      "bottom_right": -11.701924569662363,
+      "top_right": -5.100481673088618,
+      "top_left": -11.79962065402145,
+      "center": 0.0
+    }
+  },
+  "selected_half_size_mm": [
+    50.0,
+    51.0
+  ],
+  "tested_half_sizes_mm": [
+    [
+      50.0,
+      51.0
+    ]
+  ],
+  "ready_tcp_mm": {
+    "x": 167.546,
+    "y": 0.0,
+    "z": 228.545
+  },
+  "max_residual_mm": 1.0
+}

@@ -193,6 +193,16 @@ class DrawWindow(ctk.CTkToplevel):
                                             parent=self)
             if self.job:
                 self.job.answer_calibration_input("q" if answer is None else answer)
+        elif kind == "start_offset":
+            p, n = d["previous"], d["tcp"]
+            ok = messagebox.askyesno(
+                "시작 위치 확인",
+                f"{d['prompt']}\n\n지금 자세에서 펜 끝이 종이 가운데에 살짝 닿아 있습니까?\n"
+                f"[예] 현재 위치 (X {n['x']:.2f}, Y {n['y']:.2f}, Z {n['z']:.2f})를 종이 중심으로 저장하고 계속합니다.\n"
+                f"      (이전 설정: X {p['x']:.2f}, Y {p['y']:.2f}, Z {p['z']:.2f})\n"
+                "[아니오] 시작하지 않고 끝냅니다.", parent=self, default="no")
+            if self.job:
+                self.job.answer_start_offset(ok)
         elif kind == "progress":
             self.progress.set(d["acked"] / max(d["total"], 1))
             self.prog_text.configure(text=f"명령 {d['acked']:,}/{d['total']:,} ({100 * d['acked'] // d['total']}%) · "

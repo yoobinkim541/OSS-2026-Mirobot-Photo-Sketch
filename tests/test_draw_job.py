@@ -234,6 +234,69 @@ class DrawJobTest(unittest.TestCase):
         self.assertEqual(fin["result"]["result"], "completed")
         self.assertTrue(link.closed)
 
+    def _offset_run(self, answer, dx=-18.0):
+        """실물 연결에서 호밍 자세가 종이 중심 설정에서 dx mm 벗어난 상황에서 사람이 answer로 답한다."""
+        import time
+        from mirobot_sketch import calibration
+
+        cfg = golden.default_cfg()
+        session = SketchSession(cfg)
+        session.set_image(Path(self.tmp.name) / "line.png")
+        session.update_params({"box_mm": 40, "epsilon_px": 4.0})
+        session.run_current()
+        session.simulate()
+        rec = Recorder()
+        job = self.job(rec)
+        job.session, job.cfg = session, cfg
+        c = dict(cfg["paper_center_tcp_mm"])
+        tcp = (c["x"] + dx, c["y"], c["z"])
+        link = PhysicalLinkStub()
+        with mock.patch.object(de, "open_link", return_value=link), \
+             mock.patch.object(de, "connect_and_home", return_value=tcp), \
+             mock.patch.object(calibration, "save_config") as save:
+            job.start(virtual=False)
+            deadline = time.monotonic() + 15
+            while not any(k == "start_offset" for k, _ in rec.events) and time.monotonic() < deadline:
+                time.sleep(0.02)
+            offer = next(d for k, d in rec.events if k == "start_offset")
+            self.assertEqual(job.state, "start")                 # 답하기 전에는 다음 단계로 가지 않음
+            job.answer_start_offset(answer)
+            if answer:
+                self.assertTrue(rec.ready.wait(20), rec.events[-5:])
+                job.cancel()
+            self.assertTrue(rec.done.wait(10), rec.events[-5:])
+        return cfg, c, tcp, save, offer, rec, link
+
+    def test_start_offset_can_become_paper_center_after_human_confirms_pen_contact(self):
+        cfg, before, tcp, save, offer, rec, link = self._offset_run(True)
+        self.assertEqual(offer["tcp"], {"x": tcp[0], "y": tcp[1], "z": tcp[2]})
+        self.assertEqual(offer["previous"], before)
+        save.assert_called_once()
+        self.assertEqual(save.call_args.args[1]["paper_center_tcp_mm"], offer["tcp"])
+        self.assertEqual(cfg["paper_center_tcp_mm"], offer["tcp"])       # 이어지는 계획도 새 중심을 씀
+        done = [i for i, st in rec.steps() if st == "done"]
+        self.assertIn("start", done)
+        self.assertIn("confirm", [i for i, st in rec.steps() if st == "active"])
+        self.assertTrue(link.closed)
+
+    def test_declining_start_offset_keeps_config_and_does_not_start(self):
+        cfg, before, tcp, save, offer, rec, link = self._offset_run(False)
+        save.assert_not_called()
+        self.assertEqual(cfg["paper_center_tcp_mm"], before)
+        fin = next(d for k, d in rec.events if k == "finished")
+        self.assertEqual(fin["result"]["result"], "not_started")
+        self.assertIn("떨어져 있습니다", fin["result"]["error"])
+        self.assertTrue(link.closed)
+
+    def test_virtual_run_never_offers_to_move_paper_center(self):
+        rec = Recorder()
+        job = self.job(rec)
+        job.start(virtual=True, virtual_speed=500)
+        self.assertTrue(rec.ready.wait(10))
+        job.cancel()
+        self.assertTrue(rec.done.wait(5))
+        self.assertFalse(any(k == "start_offset" for k, _ in rec.events))
+
     def test_photo_sized_rectangle_can_be_selected_for_contact_calibration(self):
         outline = [[(-60, -35.4), (60, -35.4), (60, 35.4), (-60, 35.4)]]
         self.assertEqual(target_contact_extents(outline, golden.default_cfg()), (61, 37))
@@ -255,8 +318,9 @@ class DrawJobTest(unittest.TestCase):
         job = self.job(rec)
         job.session, job.cfg = session, cfg
         center = dict(cfg["paper_center_tcp_mm"])
+        center["x"] -= 3.0                       # 보정한 종이 중심이 기존 설정과 다름
         ready = dict(center)
-        ready["x"] -= cfg["pen"]["up_clearance_mm"]
+        ready["x"] -= 9.0                        # 사각형 보정은 펜을 벽에서 8 mm 이상 뺀 자세로 끝남 (기존 5 mm 검사에 걸리던 값)
         measurement = {"result": "ready", "center_tcp_mm": center, "ready_tcp_mm": ready,
                        "samples": [], "selected_half_size_mm": [61.0, 37.0],
                        "max_residual_mm": 1.0,

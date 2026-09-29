@@ -338,10 +338,26 @@ def connect_and_home(link, cfg, progress=print, should_cancel=None):
     return tcp
 
 
-def check_start(tcp, cfg):
-    """③ 현재 펜 끝이 설정된 종이 중심 근처인지. 반환: 떨어진 거리(mm)."""
+RETRACTED_START_MAX_MM = 20.0   # 캘리브레이션 직후 펜을 벽에서 뺀 자세로 허용하는 최대 후퇴 거리
+
+
+def check_start(tcp, cfg, retracted=False):
+    """③ 현재 펜 끝이 설정된 종이 중심 근처인지. 반환: 떨어진 거리(mm).
+
+    retracted=True: 캘리브레이션이 끝난 직후. 그 절차는 펜을 벽에서 뺀(펜업) 자세로 끝나므로, Y·Z는 종이 중심과
+    max_start_offset_mm 안에서 같아야 하고 X는 벽 반대 방향으로 RETRACTED_START_MAX_MM까지만 물러난 것을 허용한다
+    (벽 쪽으로 들어가 있으면 허용하지 않음)."""
     c = cfg["paper_center_tcp_mm"]
     off = ((tcp[0] - c["x"]) ** 2 + (tcp[1] - c["y"]) ** 2 + (tcp[2] - c["z"]) ** 2) ** 0.5
+    if retracted:
+        back = (tcp[0] - c["x"]) * float(cfg["pen"]["retract_x_sign"])     # +: 벽에서 물러난 양
+        lateral = ((tcp[1] - c["y"]) ** 2 + (tcp[2] - c["z"]) ** 2) ** 0.5
+        if lateral > cfg["max_start_offset_mm"] or not -1.0 <= back <= RETRACTED_START_MAX_MM:
+            raise DrawError("start", f"보정 뒤 펜 끝이 종이 중심에서 벗어났습니다 (옆으로 {lateral:.1f} mm, "
+                                     f"벽에서 물러난 양 {back:.1f} mm; 허용 옆 {cfg['max_start_offset_mm']} mm, "
+                                     f"뒤로 {RETRACTED_START_MAX_MM:g} mm).",
+                            "종이와 로봇을 확인하고 다시 보정하세요.")
+        return off
     if off > cfg["max_start_offset_mm"]:
         raise DrawError("start", f"펜 끝이 종이 중심 설정에서 {off:.1f} mm 떨어져 있습니다 "
                                  f"(허용 {cfg['max_start_offset_mm']} mm).",
@@ -493,7 +509,7 @@ def main():
             else:
                 tcp = connect_and_home(link, cfg)
             print(f"컨트롤러 상태: Idle, TCP: {tcp}")
-            check_start(tcp, cfg)
+            check_start(tcp, cfg, retracted=bool(args.calibrate and not args.virtual))
         except DrawError as e:
             print(f"{e.message} 중단합니다." + (f" ({e.hint})" if e.hint else ""))
             return 3

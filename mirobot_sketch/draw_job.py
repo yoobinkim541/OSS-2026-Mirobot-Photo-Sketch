@@ -11,6 +11,7 @@ events(kind, **data):
   finished  result, record_path
 """
 
+import copy
 import json
 import math
 import queue
@@ -110,11 +111,49 @@ class DrawJob:
             except queue.Full:
                 pass
 
-    def _calibration_input(self, prompt):
+    def answer_start_offset(self, accept):
+        """③에서 시작 위치가 어긋났을 때 사람의 답: True면 '펜이 종이 가운데에 닿아 있음'을 확인한 것."""
+        self.answer_calibration_input("yes" if accept else None)
+
+    def _adopt_current_center(self, tcp, err):
+        """③ 시작 위치가 종이 중심 설정에서 벗어났을 때, 사람이 펜 접촉을 확인하면 현재 자세를 종이 중심으로 저장.
+        저장했으면 True, 사람이 거절했으면 False. 취소(멈춤)는 취소 오류로 끝냄."""
+        s = self.session
+        new = {"x": float(tcp[0]), "y": float(tcp[1]), "z": float(tcp[2])}
+        self._step("start", "active", "시작 위치가 종이 중심 설정과 다릅니다. 현재 위치를 종이 중심으로 쓸지 확인하세요")
+        answer = self._calibration_input(err.message, event="start_offset", tcp=new,
+                                         previous=dict(self.cfg["paper_center_tcp_mm"]))
+        if self._stop.is_set():
+            raise de.DrawError("start", CANCELLED)
+        if answer.strip().lower() != "yes":
+            return False
+        from . import calibration
+        updated = copy.deepcopy(self.cfg)
+        updated["paper_center_tcp_mm"] = new
+        updated["_paper_center_updated_local"] = (
+            datetime.now().astimezone().isoformat(timespec="seconds") + " — 앱에서 사람이 펜 접촉을 확인해 현재 자세를 종이 중심으로 저장")
+        try:
+            calibration.save_config(paths.config_path(), updated)
+        except OSError as e:
+            raise de.DrawError("start", f"종이 중심 설정을 저장하지 못했습니다: {e}",
+                               "설정 파일 권한을 확인하고 다시 시작하세요.") from e
+        for c in {id(self.cfg): self.cfg, id(s.cfg): s.cfg}.values():
+            c.clear()
+            c.update(updated)
+        # 종이 중심이 바뀌면 로봇 좌표가 바뀌므로 관절 시뮬레이션을 다시 검사
+        sim = s.simulate()
+        if sim["verdict"].startswith("FAIL"):
+            raise de.DrawError("start", f"새 종이 중심에서 로봇 시뮬레이션이 FAIL입니다: {sim['verdict']}",
+                               "그림 크기를 줄인 뒤 다시 시뮬레이션하세요.")
+        with s.lock:
+            self._snap["sim_raw"] = s.sim["raw"]
+        return True
+
+    def _calibration_input(self, prompt, event="calibration_input", **extra):
         reply = queue.Queue(maxsize=1)
         with self._calibration_reply_lock:
             self._calibration_reply = reply
-        self.events("calibration_input", prompt=prompt)
+        self.events(event, prompt=prompt, **extra)
         try:
             while not self._stop.is_set():
                 try:
@@ -172,6 +211,7 @@ class DrawJob:
                          speed=self._speed if self._virtual else 1.0, trajectory=None, message="호밍 대기")
             from . import calibration
             calibration_path = None
+            calibrated = False
             target_extents = None
             # 캘리브레이션은 사람이 '다시 보정'을 골랐을 때만: 아니면 바로 호밍 → 그리기 (범위·시작 위치 검사는 그대로)
             if self._recalibrate and not self._virtual and self._pending and de.check_limits(strokes, self.cfg):
@@ -212,6 +252,7 @@ class DrawJob:
                 with s.lock:
                     self._snap["sim_raw"] = s.sim["raw"]
                 tcp = tuple(measured["ready_tcp_mm"][axis] for axis in ("x", "y", "z"))
+                calibrated = True
                 self.summary.update(command_count=len(pre["cmds"]), estimated_s=pre["timing"]["total_s"])
             else:
                 tcp = de.connect_and_home(self.link, self.cfg,
@@ -221,7 +262,14 @@ class DrawJob:
                        if calibration_path is not None and measured.get("result") == "ready" else "Idle")
             # ③ 시작 위치
             self._step("start", "active", "펜 끝 위치를 확인합니다")
-            off = de.check_start(tcp, self.cfg)
+            try:
+                # 방금 캘리브레이션했다면 로봇은 펜을 벽에서 뺀 자세로 끝났으므로 그 자세를 허용해서 검사
+                off = de.check_start(tcp, self.cfg, retracted=calibrated)
+            except de.DrawError as e:
+                # 실물에서만: 사람이 '펜이 종이 가운데에 닿아 있음'을 확인하면 현재 자세를 종이 중심으로 저장하고 계속
+                if self._virtual or calibrated or not self._adopt_current_center(tcp, e):
+                    raise
+                off = 0.0
             from . import mirobot_sim as ms
             self._step("start", "active", "공중 경로의 관절 움직임을 확인합니다")
             self._air_sim = ms.simulate(ms.plan_targets(strokes, self.cfg, air=True))
