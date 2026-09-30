@@ -70,6 +70,10 @@ class DrawJob:
         self._snap = None
         self._air_sim = None
         self._air_verdict = None
+        self._air_thread = None
+        self._air_error = None
+        self._air_cancel = threading.Event()      # 작업이 끝나면 백그라운드 시뮬레이션도 멈춤
+        self._return_origin = True
         self._confirm = threading.Event()
         self._stop = threading.Event()
         self._choice = {}
@@ -78,10 +82,12 @@ class DrawJob:
         self._calibration_reply_lock = threading.Lock()
 
     # ---------------------------------------------------------------- 사람이 누르는 것
-    def start(self, virtual=True, virtual_speed=20.0, pending=False, recalibrate=False):
-        """pending: 실물 확인 전 넓은 범위(limits_pending_verification) 허용 — ① 사전 검사부터 적용 (④에서 바꿀 수도 있음)."""
+    def start(self, virtual=True, virtual_speed=20.0, pending=False, recalibrate=False, return_to_origin=True):
+        """pending: 실물 확인 전 넓은 범위(limits_pending_verification) 허용 — ① 사전 검사부터 적용 (④에서 바꿀 수도 있음).
+        return_to_origin: 그림이 끝까지 그려지면 펜을 처음 상태(종이 중심에 살짝 닿은 시작 자세)로 되돌림 (공중 모드는 해당 없음)."""
         self._virtual, self._speed, self._pending = bool(virtual), float(virtual_speed), bool(pending)
         self._recalibrate = bool(recalibrate)
+        self._return_origin = bool(return_to_origin)
         self.state = "preflight"      # 첫 이벤트 전에 창을 닫아도 '진행 중'으로 보이게 (스레드 시작 전에)
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -276,10 +282,8 @@ class DrawJob:
                 self.summary["start_center_shift_mm"] = round(moved, 1)
                 start_note = ("시작 자세를 종이 중심으로 사용" +
                               (f" (설정 파일 값과 {moved:.1f} mm 차이)" if moved >= 0.05 else ""))
-            from . import mirobot_sim as ms
-            self._step("start", "active", "공중 경로의 관절 움직임을 확인합니다")
-            self._air_sim = ms.simulate(ms.plan_targets(strokes, self.cfg, air=True))
-            self._air_verdict = ms.verdict(self._air_sim)
+            # 공중 경로의 관절 시뮬레이션은 사람이 ④에서 확인하는 동안 백그라운드에서 돌리고, 공중 모드를 고른 때만 기다린다
+            self._start_air_simulation(strokes)
             self._step("start", "done", start_note)
             # ④ 최종 확인 (사람)
             self._step("confirm", "active", "종이·펜·주변을 확인하고 시작하세요")
@@ -295,6 +299,7 @@ class DrawJob:
                         "confirm", "설정된 펜 접촉 영역 밖에서는 그림을 시작할 수 없습니다.",
                         "공중 모드로 확인하거나, '종이·펜 위치 변경: 다시 보정'을 켜고 다시 시작해 접촉 영역을 측정하세요.")
             if ch["air"]:
+                self._wait_air_simulation()
                 if self._air_verdict.startswith("FAIL"):
                     raise de.DrawError("confirm", f"공중 경로 시뮬레이션이 FAIL입니다: {self._air_verdict}",
                                        "그림 크기를 줄인 뒤 다시 시도하세요.")
@@ -329,16 +334,24 @@ class DrawJob:
 
             result = de.execute(self.link, pre["cmds"], self.cfg, progress=lambda *_: None,
                                 on_ack=on_ack, should_stop=self._stop.is_set)
+            if result["result"] == "completed" and self._return_origin and not ch["air"]:
+                ok, why = self._return_to_origin(pre["planner"])
+                result = {**result, "returned_to_origin": ok, **({"return_error": why} if why else {})}
             final = {"completed": "done", "stopped_by_user": "stopped"}.get(result["result"], "error")
             writer.write(state=final, message=result.get("error", result["result"]))
             if final == "done":
-                self._step("drawing", "done", "완료")
+                if result.get("returned_to_origin") is False:
+                    self._step("drawing", "done", "완료 (펜이 시작 위치로 돌아가지 못했습니다)",
+                               f"{result.get('return_error', '')} 다음 그림 전에 호밍하거나 펜 위치를 확인하세요.")
+                else:
+                    self._step("drawing", "done", "완료")
             else:
                 self._step("drawing", "failed", "사용자 멈춤" if final == "stopped" else result.get("error", ""),
                            "자동 복구를 하지 않았습니다. 펜과 로봇 상태를 확인하세요.")
             record = de.write_run_record({
                 "strokes_json": str(strokes_path), "stroke_count": len(strokes), "command_count": total,
                 "air_mode": ch["air"], "pending_limits": ch["pending"], "estimated_time": pre["timing"],
+                "return_to_origin": self._return_origin,
                 "source": {"image": snap["path"], "params": snap["params"]},
                 "virtual": self._virtual, "virtual_speed": self._speed if self._virtual else None,
                 "run_id": run_id, "trajectory": str(traj)}, result, self.cfg)
@@ -352,6 +365,7 @@ class DrawJob:
             result = {"result": "error", "error": str(e)}
             writer.write(state="error", message=str(e))
         finally:
+            self._air_cancel.set()          # 남은 공중 경로 계산이 CPU를 쓰지 않게
             if self.link is not None:
                 try:
                     self.link.close()
@@ -363,6 +377,62 @@ class DrawJob:
             self._step("done", "done", result["result"])
             self.state = "done"
             self.events("finished", result=result, record_path=str(record) if record else None)
+
+    def _return_to_origin(self, planner):
+        """완료 뒤 펜을 처음 상태로 되돌림. 반환: (성공 여부 또는 None(공중 모드라 해당 없음), 오류 문구).
+        자동 복구는 하지 않는다: 멈춤·오류가 나면 그 자리에서 멈추고 사람에게 알린다."""
+        cmds = planner.return_to_origin()
+        if not cmds:
+            return None, ""
+        self._step("drawing", "active", "그림 완료! 펜을 처음 위치(종이 중심)로 되돌리는 중입니다")
+        try:
+            for line, _label in cmds:
+                if self._stop.is_set():
+                    return False, "멈춤 요청으로 시작 위치로 돌아가지 않았습니다."
+                self.link.send_and_ack(line, self.cfg["ack_timeout_s"], should_stop=self._stop.is_set)
+            self.link.wait_idle(self.cfg["idle_timeout_s"])
+        except de.StopRequested:
+            return False, "멈춤 요청으로 시작 위치로 돌아가지 않았습니다."
+        except de.ControllerError as e:
+            return False, f"시작 위치로 돌아가는 중 오류: {e}"
+        except Exception as e:   # 이미 끝까지 그린 그림이 되돌리기의 예상 못 한 오류 때문에 실패로 바뀌지 않게
+            return False, f"시작 위치로 돌아가는 중 오류: {type(e).__name__}: {e}"
+        return True, ""
+
+    def _start_air_simulation(self, strokes):
+        """공중 경로 시뮬레이션을 백그라운드 스레드로 시작 (그림·설정은 이 시점의 사본을 씀)."""
+        from . import mirobot_sim as ms
+        cfg = copy.deepcopy(self.cfg)
+        pts = [[tuple(pt) for pt in st] for st in strokes]
+
+        def check_cancel(done, total):
+            if self._air_cancel.is_set():
+                raise ms.SimulationCancelled()
+
+        def work():
+            try:
+                self._air_sim = ms.simulate(ms.plan_targets(pts, cfg, air=True), progress=check_cancel)
+                self._air_verdict = ms.verdict(self._air_sim)
+            except ms.SimulationCancelled:
+                pass
+            except Exception as e:  # 공중 모드를 골랐을 때 오류로 보여 줌
+                self._air_error = e
+
+        self._air_thread = threading.Thread(target=work, daemon=True)
+        self._air_thread.start()
+
+    def _wait_air_simulation(self):
+        """공중 모드를 골랐을 때만: 백그라운드 시뮬레이션이 끝날 때까지 기다림 (멈춤·취소는 바로 반영)."""
+        thread = self._air_thread
+        if thread is not None and thread.is_alive():
+            self._step("confirm", "active", "공중 경로의 관절 움직임을 확인하는 중입니다 (잠시만요)")
+            while thread.is_alive():
+                if self._stop.is_set():
+                    raise de.DrawError("confirm", CANCELLED)
+                thread.join(0.1)
+        if self._air_error is not None or self._air_verdict is None:
+            raise de.DrawError("confirm", f"공중 경로 시뮬레이션에 실패했습니다: {self._air_error or '결과 없음'}",
+                               "그림을 다시 처리한 뒤 시도하세요.")
 
     def _write_trajectory(self, run_id):
         from . import mirobot_sim as ms

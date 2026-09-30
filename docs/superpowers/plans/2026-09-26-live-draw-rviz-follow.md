@@ -1320,7 +1320,7 @@ datas += [(str(ROOT / "mirobot_sketch" / "__init__.py"), "sim/mirobot_sketch"),
           (str(ROOT / "mirobot_sketch" / "live_progress.py"), "sim/mirobot_sketch")]
 ```
 
-- [ ] **Step 4: 통과 확인** — `python -m unittest discover -s tests` → OK. WSL에서 문법을 확인한다: `wsl.exe -d Ubuntu-22.04 -- python3 -m py_compile /mnt/c/Users/asus/Desktop/Mirobot/sim/rviz_playback.py` → 출력 없음
+- [ ] **Step 4: 통과 확인** — `python -m unittest discover -s tests` → OK. WSL에서 문법을 확인한다: `wsl.exe -d Ubuntu-22.04 -- python3 -m py_compile /mnt/c/<사용자>/Desktop/Mirobot/sim/rviz_playback.py` → 출력 없음
 
 - [ ] **Step 5: 커밋**
 

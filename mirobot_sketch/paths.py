@@ -10,6 +10,7 @@
 """
 
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -75,6 +76,36 @@ def input_dir():
 def trajectories_dir():
     root = repo_root()
     return root / "trajectories" if root else None
+
+
+_ABS_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|/(?:home|Users|mnt|root)/)")
+
+
+def portable_path(value):
+    """기록(LOG)에 남기는 경로에서 사용자 폴더 이름을 뺀다. 절대 경로가 아니면 그대로.
+    저장소 안이면 저장소 기준 상대 경로(슬래시), 밖이면 파일 이름만. (실행·보정 기록을 공개 저장소에 올려도
+    컴퓨터 사용자 이름이나 사진 폴더 이름이 남지 않게)"""
+    text = str(value)
+    if not _ABS_PATH.match(text):
+        return value
+    norm = text.replace("\\", "/")
+    root = repo_root()
+    if root is not None:
+        prefix = str(root).replace("\\", "/").rstrip("/") + "/"
+        if norm.lower().startswith(prefix.lower()):
+            return norm[len(prefix):]
+    return norm.rsplit("/", 1)[-1]
+
+
+def scrub_paths(obj):
+    """dict·list 안의 절대 경로 문자열을 모두 portable_path로 바꾼 사본."""
+    if isinstance(obj, dict):
+        return {k: scrub_paths(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [scrub_paths(v) for v in obj]
+    if isinstance(obj, str):
+        return portable_path(obj)
+    return obj
 
 
 def safe_console():

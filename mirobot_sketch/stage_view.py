@@ -49,6 +49,12 @@ class StageStrip(ctk.CTkScrollableFrame):
             line = summaries.get(sid, "")
             b.configure(text=self.titles[sid] + (f"\n{line}" if line else ""))
 
+    def clear(self):
+        """썸네일·결과 한 줄을 모두 지움 (새 그림을 시작하기 전 빈 상태)."""
+        self._imgs.clear()
+        for sid, b in self.buttons.items():
+            b.configure(image=None, text=self.titles[sid], text_color=TEXT)
+
     def select(self, stage_id):
         self.selected = stage_id
         for sid, b in self.buttons.items():
@@ -103,6 +109,16 @@ class BigView(ctk.CTkFrame):
         self.subtitle.configure(text=subtitle)
         self._compare = compare
         self.compare_btn.configure(state="normal" if compare else "disabled")
+
+    def clear(self):
+        """큰 보기를 빈 화면으로."""
+        self.image = self.original = self.draw_extra = self._held = self._compare = None
+        self.title.configure(text="")
+        self.subtitle.configure(text="")
+        self.compare_btn.configure(state="disabled")
+        self.ax.clear()
+        self.ax.axis("off")
+        self.canvas.draw_idle()
 
     def hold_compare(self, on):
         """누르고 있는 동안 이전 단계 그림 (같은 확대 위치), 떼면 원래대로."""

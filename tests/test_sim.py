@@ -71,5 +71,89 @@ class TrajectoryCmdTest(unittest.TestCase):
         self.assertEqual(doc["cmd_feed_mm_min"][0], CFG["feeds_mm_per_min"]["approach"])
 
 
+class FastSolverTest(unittest.TestCase):
+    """속도를 위해 바꾼 FK·IK가 예전(스칼라) 구현과 같은 결과를 내는지."""
+
+    @staticmethod
+    def reference_ik(target_mm, q0, r_goal=ms.HOME_ROT, iters=100, tol_mm=1e-3):
+        # 배치 이전의 구현 그대로 (기준값)
+        q = np.array(q0, float)
+        w_rot = 100.0
+        for _ in range(iters):
+            t, _ = ms.fk(q)
+            e = np.concatenate([target_mm - t[:3, 3], w_rot * ms._rot_error(t[:3, :3], r_goal)])
+            if np.linalg.norm(e[:3]) < tol_mm and np.linalg.norm(e[3:]) < w_rot * 1e-5:
+                break
+            jac = np.zeros((6, 6))
+            h = 1e-6
+            for i in range(6):
+                dq = q.copy()
+                dq[i] += h
+                td, _ = ms.fk(dq)
+                ed = np.concatenate([target_mm - td[:3, 3], w_rot * ms._rot_error(td[:3, :3], r_goal)])
+                jac[:, i] = (e - ed) / h
+            q = q + jac.T @ np.linalg.solve(jac @ jac.T + 0.5 ** 2 * np.eye(6), e)
+        t, _ = ms.fk(q)
+        return q, float(np.linalg.norm(target_mm - t[:3, 3]))
+
+    def test_batched_fk_matches_the_chain_fk(self):
+        rng = np.random.default_rng(3)
+        qs = rng.uniform(ms.JOINT_LIMITS_RAD[:, 0], ms.JOINT_LIMITS_RAD[:, 1], size=(25, 6))
+        batch = ms.fk_batch(qs)
+        for q, t in zip(qs, batch):
+            self.assertLess(np.abs(t - ms.fk(q)[0]).max(), 1e-9)
+
+    def test_batched_ik_matches_the_reference_solver_from_the_same_start(self):
+        q0 = np.zeros(6)
+        for target in (np.array([198.668, 0.0, 230.477]), np.array([190.0, -25.0, 240.0]),
+                       np.array([185.0, 30.0, 215.0])):
+            q, err, ok = ms.ik(target, q0)
+            ref_q, ref_err = self.reference_ik(target, q0)
+            self.assertLess(np.abs(q - ref_q).max(), 1e-8)
+            self.assertAlmostEqual(err, ref_err, places=8)
+            self.assertTrue(ok)
+
+    def test_simulate_with_extrapolated_start_gives_the_same_joint_path(self):
+        targets = [(np.array([198.668, 0.0, 230.477]), "start", False, 0.0)]
+        for i, (y, z) in enumerate([(0, 0), (25, 15), (-20, 30), (10, -25), (0, 0)], start=1):
+            targets.append((np.array([198.668, float(y), 230.477 + z]), f"move {i}", True, 300.0))
+        res = ms.simulate(targets)
+        q = np.zeros(6)
+        ref = []
+        prev = targets[0][0]
+        for xyz, *_ in targets:
+            n = max(1, int(np.ceil(np.linalg.norm(xyz - prev) / 1.0)))
+            for k in range(1, n + 1):
+                q, _ = self.reference_ik(prev + (xyz - prev) * (k / n), q)
+                ref.append(q)
+            prev = xyz
+        got = np.array([s[0] for s in res["samples"]])
+        self.assertEqual(len(got), len(ref))
+        self.assertLess(np.abs(got - np.array(ref)).max(), 1e-4)     # 해는 같고 시작 추정만 다름 (rad)
+        self.assertEqual(ms.verdict(res).split(":")[0], "PASS")
+
+    def test_progress_callback_can_cancel_the_simulation(self):
+        targets = [(np.array([198.668, 0.0, 230.477]), "start", False, 0.0)]
+        targets += [(np.array([198.668, float(i), 230.477]), f"m{i}", True, 300.0) for i in range(1, 40)]
+        calls = []
+
+        def cancel_at_five(done, total):
+            calls.append(done)
+            if done >= 5:
+                raise ms.SimulationCancelled()
+
+        with self.assertRaises(ms.SimulationCancelled):
+            ms.simulate(targets, progress=cancel_at_five)
+        self.assertEqual(calls, [0, 1, 2, 3, 4, 5])                   # 남은 34개 명령은 계산하지 않음
+
+    def test_progress_callback_reports_every_command(self):
+        targets = [(np.array([198.668, 0.0, 230.477]), "start", False, 0.0),
+                   (np.array([198.668, 10.0, 230.477]), "a", True, 300.0),
+                   (np.array([198.668, 10.0, 240.477]), "b", True, 300.0)]
+        seen = []
+        ms.simulate(targets, progress=lambda done, total: seen.append((done, total)))
+        self.assertEqual(seen, [(0, 3), (1, 3), (2, 3)])
+
+
 if __name__ == "__main__":
     unittest.main()

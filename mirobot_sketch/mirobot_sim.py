@@ -105,28 +105,51 @@ def _rot_error(r_cur, r_goal):
     return 0.5 * np.array([r[2, 1] - r[1, 2], r[0, 2] - r[2, 0], r[1, 0] - r[0, 1]])
 
 
+_FIXED_ARR = np.array(_FIXED)                                   # (6, 4, 4)
+_AXIS_SIGN = np.array([axis[2] for _, _, axis in URDF_JOINTS], float)   # 모든 관절 축이 z축(±1)이라 회전을 직접 계산
+
+
+def fk_batch(qs, tool=TOOL_OFFSET_MM):
+    """여러 관절각 (n, 6) -> 플랜지 변환 (n, 4, 4). fk와 같은 결과를 배치로 계산 (IK가 이걸로 7개 자세를 한 번에 풂)."""
+    qs = np.atleast_2d(np.asarray(qs, float))
+    t = np.broadcast_to(np.eye(4), (len(qs), 4, 4)).copy()
+    for i in range(6):
+        t = t @ _FIXED_ARR[i]
+        ang = qs[:, i] * _AXIS_SIGN[i]
+        c, s = np.cos(ang)[:, None], np.sin(ang)[:, None]
+        col0, col1 = t[:, :, 0].copy(), t[:, :, 1].copy()       # t @ Rz(ang)
+        t[:, :, 0] = c * col0 + s * col1
+        t[:, :, 1] = -s * col0 + c * col1
+    if tool is not None:
+        t[:, :3, 3] += np.einsum("nij,j->ni", t[:, :3, :3], tool)
+    return t
+
+
+def _error_batch(t, target_mm, r_goal, w_rot):
+    """(n, 6) 오차: [목표 - 위치, w_rot * 자세 오차]. 스칼라 버전(_rot_error)과 같은 식."""
+    r = np.einsum("ij,nkj->nik", r_goal, t[:, :3, :3])          # r_goal @ r_cur.T
+    rot = 0.5 * np.stack([r[:, 2, 1] - r[:, 1, 2], r[:, 0, 2] - r[:, 2, 0], r[:, 1, 0] - r[:, 0, 1]], axis=1)
+    return np.concatenate([target_mm - t[:, :3, 3], w_rot * rot], axis=1)
+
+
 def ik(target_mm, q0, r_goal=HOME_ROT, iters=100, tol_mm=1e-3):
-    """위치+자세 IK (감쇠 최소제곱). 반환: (q, 위치오차 mm, 수렴 여부). 관절 한계는 적용하지 않음."""
+    """위치+자세 IK (감쇠 최소제곱). 반환: (q, 위치오차 mm, 수렴 여부). 관절 한계는 적용하지 않음.
+    유한 차분 야코비안을 위한 7개 자세를 배치로 계산한다 (예전 구현과 같은 알고리즘, 파이썬 호출 수만 줄임)."""
     q = np.array(q0, float)
     w_rot = 100.0  # 자세 오차(rad)를 mm 스케일로
+    h = 1e-6
+    steps = np.eye(6) * h
+    damping = 0.5 ** 2 * np.eye(6)
     for _ in range(iters):
-        t, _ = fk(q)
-        e = np.concatenate([target_mm - t[:3, 3], w_rot * _rot_error(t[:3, :3], r_goal)])
+        e_all = _error_batch(fk_batch(np.vstack([q, q + steps])), target_mm, r_goal, w_rot)
+        e = e_all[0]
         if np.linalg.norm(e[:3]) < tol_mm and np.linalg.norm(e[3:]) < w_rot * 1e-5:
             break
-        jac = np.zeros((6, 6))
-        h = 1e-6
-        for i in range(6):
-            dq = q.copy()
-            dq[i] += h
-            td, _ = fk(dq)
-            ed = np.concatenate([target_mm - td[:3, 3], w_rot * _rot_error(td[:3, :3], r_goal)])
-            jac[:, i] = (e - ed) / h
-        lam = 0.5
-        q = q + jac.T @ np.linalg.solve(jac @ jac.T + lam ** 2 * np.eye(6), e)
-    t, _ = fk(q)
-    pos_err = float(np.linalg.norm(target_mm - t[:3, 3]))
-    rot_err = float(np.linalg.norm(_rot_error(t[:3, :3], r_goal)))
+        jac = ((e - e_all[1:]) / h).T       # jac[:, i] = (e - e_i) / h
+        q = q + jac.T @ np.linalg.solve(jac @ jac.T + damping, e)
+    t = fk_batch(q)
+    pos_err = float(np.linalg.norm(target_mm - t[0, :3, 3]))
+    rot_err = float(np.linalg.norm(_rot_error(t[0, :3, :3], r_goal)))
     return q, pos_err, pos_err < 0.05 and rot_err < 1e-3
 
 
@@ -156,20 +179,33 @@ def plan_targets(strokes, cfg, air=False):
     return out
 
 
-def simulate(targets, step_mm=1.0):
-    """직선 보간하며 IK. 반환 dict: samples(q, tcp, 설명, pen_down), 위반/실패 목록, 관절별 최소 여유."""
+class SimulationCancelled(Exception):
+    """progress 콜백이 던지면 시뮬레이션을 중간에 멈춘다 (더 이상 필요 없는 백그라운드 계산을 끝냄)."""
+
+
+def simulate(targets, step_mm=1.0, progress=None):
+    """직선 보간하며 IK. 반환 dict: samples(q, tcp, 설명, pen_down), 위반/실패 목록, 관절별 최소 여유.
+    progress(끝낸 명령 수, 전체 명령 수)는 명령마다 불려 화면이 진행률을 보여 줄 수 있고,
+    SimulationCancelled를 던지면 그대로 밖으로 나와 계산을 멈춘다."""
     q = np.zeros(6)
     samples = []
     failures = []
     prev = targets[0][0]
     cmd_feed = []   # 명령별 속도 (시작 자세 제외) — 실시간 따라가기의 보간 속도
     for t, (xyz, label, pen_down, feed) in enumerate(targets):
+        if progress is not None:
+            progress(t, len(targets))
         if t > 0:
             cmd_feed.append(feed)
         n = max(1, int(np.ceil(np.linalg.norm(xyz - prev) / step_mm)))
+        q_before = None
         for k in range(1, n + 1):
             p = prev + (xyz - prev) * (k / n)
-            q, err, ok = ik(p, q)
+            # 직선 구간에서는 앞선 두 점의 변화량으로 다음 자세를 예측해 시작하면 IK 반복이 줄어든다
+            # (해는 같음: 관절각 차이 1e-5 rad 이하)
+            q_start = q if q_before is None else q + (q - q_before)
+            q_before = q
+            q, err, ok = ik(p, q_start)
             if not ok:
                 failures.append({"command": label, "target_mm": p.round(2).tolist(), "pos_error_mm": round(err, 3)})
             samples.append((q.copy(), p.copy(), label, pen_down, t - 1))   # 마지막 값: G-code 명령 번호

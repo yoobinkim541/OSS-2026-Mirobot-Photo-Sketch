@@ -81,7 +81,8 @@ class SketchSession:
         self.notice = ""
         self._last_simplify = None
         self.proposal_epoch = 0  # 번호를 새로 매길 때마다 +1 (다른 번호 체계의 제안 표시를 섞지 않게)
-        self._fit_strokes = []   # 종이 배치(배율·중심)를 정하는 획: 파이프라인 결과 기준으로 고정 (편집해도 mm 좌표가 안 움직이게)
+        self._fit_outline = []   # 종이 배치를 정하는 윤곽 획 (파이프라인 결과 기준으로 고정)
+        self._fit_strokes = []   # 종이 배치(배율·중심)를 정하는 획 = 윤곽 + 명암 빗금: 편집해도 mm 좌표가 안 움직이게
 
     # ------------------------------------------------------------ 설정
     def param_specs(self):
@@ -134,8 +135,8 @@ class SketchSession:
 
     # ------------------------------------------------------------ 실패하면 되돌리기
     _STATE = ("result", "table", "next_id", "book", "pending", "proposals", "_groups", "_group_seq", "history",
-              "edit_log", "notice", "_last_simplify", "unapplied", "sim", "_fit_strokes", "proposal_epoch",
-              "_frame_box")
+              "edit_log", "notice", "_last_simplify", "unapplied", "sim", "_fit_strokes", "_fit_outline",
+              "proposal_epoch", "_frame_box")
 
     def _snapshot(self):
         snap = {k: getattr(self, k) for k in self._STATE}
@@ -146,6 +147,27 @@ class SketchSession:
     def _restore(self, snap):
         for k, v in snap.items():
             setattr(self, k, v)
+
+    def reset(self):
+        """그림 한 장이 끝났을 때: 사진과 작업 내용(획·편집 기록·시뮬레이션·제안)을 모두 비우고 새 그림을 그릴 수 있게 한다.
+        처리 설정(이미지 종류·상세도·크기 등)은 다음 그림에도 쓰도록 그대로 둔다."""
+        with self.lock:
+            self.image_path = None
+            self.color = None
+            self._inputs_cache, self._faces_cache, self._frame_cache = {}, {}, {}
+            self._frame_box = None
+            self.result = self.sim = None
+            self.history, self.edit_log = [], []
+            self.book = {"removed": [], "added": [], "trash": []}
+            self.table, self.next_id = {}, 1
+            self._clear_proposals()
+            self.unapplied = 0
+            self.notice = ""
+            self._last_simplify = None
+            self._fit_strokes, self._fit_outline = [], []
+            self.pipeline = stages.Pipeline()          # 단계별 캐시(큰 이미지 포함)도 비움
+            self.proposal_epoch += 1
+            self.generation += 1
 
     # ------------------------------------------------------------ 처리
     def set_image(self, path):
@@ -296,7 +318,10 @@ class SketchSession:
                         if fr["notice"]:
                             self.notice += f" · {fr['notice']}"
                         self._last_simplify = outs["simplify"]
-                        self._fit_strokes = [e["poly"] for e in self.table.values() if e["kind"] == "stroke"]
+                        self._fit_outline = [e["poly"] for e in self.table.values() if e["kind"] == "stroke"]
+                    # 명암 빗금은 윤곽과 함께 배치를 정함 (빗금 설정만 바뀌어도 다시 맞춤)
+                    self._fit_strokes = self._fit_outline + [np.asarray(h, np.float64)
+                                                              for h in outs["tone"].get("hatch_strokes", [])]
                     self._refresh_drawing(refit=True)
                 except Exception:
                     self._restore(snap)   # 반쯤 바뀐 결과를 남기지 않음 (예: 획이 0개)
@@ -364,8 +389,10 @@ class SketchSession:
         다시 맞추면 모든 획의 mm 좌표가 움직여, 에이전트가 들고 있는 좌표가 틀어짐."""
         strokes = [e["poly"] for _, e in sorted(self.table.items()) if e["kind"] == "stroke"]
         if not strokes:
-            raise SessionError("획이 없습니다. 상세도를 높이거나 Canny 하한을 낮춰 보세요.")
-        ordered = sp.order_strokes(strokes)
+            raise SessionError("획이 없습니다. 상세도를 높이거나 '약한 선 민감도(Canny 하한)'를 낮춰 보세요.")
+        # 명암 빗금은 편집 번호표에 넣지 않고(번호가 수백 개로 불어남) 그리기 순서를 정할 때 윤곽과 합친다
+        hatch = [np.asarray(h, np.float64) for h in self.result["stages"]["tone"].get("hatch_strokes", [])]
+        ordered = sp.order_strokes(strokes + hatch)
         if refit or self.result.get("placement") is None:
             box = self.params["box_mm"]
             _, self.result["placement"] = pm.pixels_to_paper(self._fit_strokes or strokes, box_mm=(box, box),
@@ -721,19 +748,34 @@ class SketchSession:
                     "truncated": len(mm) > limit}
 
     # ------------------------------------------------------------ 시뮬레이션
-    def simulate(self):
+    def simulate(self, progress=None):
+        """progress(끝낸 명령 수, 전체 명령 수): 화면이 진행률을 보여 줄 때."""
         from . import mirobot_sim as ms
 
         with self.lock:
             self._need_result()
             strokes = [[tuple(pt) for pt in s] for s in self.result["strokes_mm"]]
-        res = ms.simulate(ms.plan_targets(strokes, self.cfg))
+        res = ms.simulate(ms.plan_targets(strokes, self.cfg), progress=progress)
         j = int(np.argmin(res["min_margin_deg"]))
         summary = {"verdict": ms.verdict(res), "min_margin_deg": round(float(res["min_margin_deg"][j]), 1),
                    "axis": ms.CONTROLLER_AXES[j], "samples": len(res["samples"])}
         with self.lock:
             self.sim = {"summary": summary, "raw": res}
         return summary
+
+    # ------------------------------------------------------------ 사진과 비교
+    def compare(self):
+        """사진과 지금 그려질 그림이 얼마나 닮았는지 (읽기 전용). 반환: (지표 dict, 나란히 보기 BGR 이미지)."""
+        from . import tone
+
+        with self.lock:
+            self._need_result()
+            r = self.result
+            gray, color, edges = r["base"], r["color"], r["edges"]
+            strokes = [np.asarray(s, np.float64) for s in r["strokes_px"]]
+            outline = [np.asarray(e["poly"], np.float64) for e in self.table.values() if e["kind"] == "stroke"]
+            pen_px = self.params["pen_mm"] / self._xf()[0]           # 펜 굵기(mm)를 작업 이미지 px로
+        return tone.compare_report(gray, color, strokes, pen_px, edges, outline=outline)
 
     # ------------------------------------------------------------ 로봇 그리기 안내
     ROBOT_STEPS = (
@@ -846,6 +888,8 @@ class SketchSession:
                 "face": (f"얼굴 {o['face']['faces_used']} · 획 {len(o['face']['strokes'])}" if o["face"]["faces_used"]
                          else ("얼굴 없음" if not r["faces"] else "꺼짐")),
                 "simplify": f"획 {len(o['simplify']['strokes'])} · 점 {pts(o['simplify']['strokes']):,}",
+                "tone": (o["tone"].get("tone_note") and "배경이 어두움: 배경 제거" or
+                         (f"빗금 {len(o['tone']['hatch_strokes'])}획" if o["tone"]["hatch_strokes"] else "꺼짐")),
                 "edit": f"획 {n_stroke} · 후보 {n_cand}" + (f" · 제안 {len(self.proposals)}" if self.proposals else ""),
                 "paper": f"{t['total_s'] / 60:.1f}분 · {pl['drawing_width_mm']:.0f}×{pl['drawing_height_mm']:.0f}mm",
             }

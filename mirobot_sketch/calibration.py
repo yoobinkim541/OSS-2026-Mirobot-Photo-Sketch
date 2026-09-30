@@ -492,8 +492,8 @@ def save_report(report, config_path=None):
     base = paths.runs_dir().parent / "calibrations"
     base.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    record = {"created_local": datetime.now().astimezone().isoformat(timespec="seconds"),
-              "config_path": str(config_path or paths.config_path()), **report}
+    record = paths.scrub_paths({"created_local": datetime.now().astimezone().isoformat(timespec="seconds"),
+                                "config_path": str(config_path or paths.config_path()), **report})
     path = base / f"calibration-{stamp}.json"
     with path.open("w", encoding="utf-8", newline="\n") as f:
         json.dump(record, f, ensure_ascii=False, indent=2)

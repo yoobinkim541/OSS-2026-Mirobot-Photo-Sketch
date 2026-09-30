@@ -431,6 +431,31 @@ class CodexBackend(_CliBackend):
 KEYRING_SERVICE = "MirobotSketch"
 
 
+BACKEND_ORDER = ("Claude Code", "Codex", "OpenRouter")
+
+
+def backend_ready(name):
+    """이 연결 방식이 지금 바로 쓸 수 있는 상태인지 (CLI 설치 / OpenRouter 키 저장)."""
+    if name == "Claude Code":
+        return bool(ClaudeCodeBackend.available())
+    if name == "Codex":
+        return bool(CodexBackend.available())
+    return bool(get_openrouter_key())
+
+
+def default_backend_name(settings):
+    """패널이 시작할 때 고를 연결 방식: 저장한 선택이 지금 쓸 수 있으면 그대로, 아니면 쓸 수 있는 것 중 첫 번째
+    (설치 안 된 방식에서 첫 메시지를 보내고서야 오류가 나는 것을 막음). 하나도 준비되지 않았으면 저장값(없으면 Claude Code).
+    설정 파일은 바꾸지 않는다 (사용자가 직접 고를 때만 저장)."""
+    saved = settings.get("backend")
+    if saved in BACKEND_ORDER and backend_ready(saved):
+        return saved
+    ready = next((n for n in BACKEND_ORDER if backend_ready(n)), None)
+    if ready:
+        return ready
+    return saved if saved in BACKEND_ORDER else "Claude Code"
+
+
 def get_openrouter_key():
     """OS 자격 증명 저장소(Windows 자격 증명 관리자) > 환경 변수 OPENROUTER_API_KEY."""
     try:

@@ -41,7 +41,7 @@ class StageTextTest(unittest.TestCase):
     def test_every_stage_has_number_and_description(self):
         for k, st in enumerate(stages.ALL_STAGES):
             self.assertTrue(st.desc, st.id)
-            self.assertEqual(stages.stage_title(st.id), f"{'①②③④⑤⑥⑦⑧⑨⑩'[k]} {st.label}")
+            self.assertEqual(stages.stage_title(st.id), f"{'①②③④⑤⑥⑦⑧⑨⑩⑪'[k]} {st.label}")
 
 
 class PipelineTest(unittest.TestCase):
@@ -53,7 +53,7 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(pl.run_counts, first)                         # 전부 캐시
         pl.run(inputs(), "img", {**p, "epsilon_px": 2.0})
         changed = {k for k in first if pl.run_counts[k] != first[k]}
-        self.assertEqual(changed, {"simplify"})
+        self.assertEqual(changed, {"simplify", "tone"})              # 윤곽이 바뀌면 (꺼진) 명암 단계 입력도 바뀜
         pl.run(inputs(), "img", {**p, "epsilon_px": 2.0, "canny_low": 60})
         self.assertEqual(pl.run_counts["prep"], first["prep"])
         self.assertEqual(pl.run_counts["edges"], first["edges"] + 1)

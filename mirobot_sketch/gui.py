@@ -247,6 +247,7 @@ class SketchApp:
         self.ctrl_title = ctk.CTkLabel(self.ctrl_card, text="", font=font(14, "bold"), anchor="w")
         self.ctrl_title.pack(fill="x", padx=14, pady=(12, 0))
         self.controls = None
+        self._controls_cache = {}       # 단계별 조절 칸: 한 번 만들어 두고 보이기/숨기기만 함 (단계 전환이 빠르도록)
 
         c3 = Card(side, "③ 실행")
         c3.pack(fill="x", pady=(0, 10))
@@ -264,11 +265,18 @@ class SketchApp:
         ctk.CTkButton(row, text="JSON 내보내기", command=self.export_strokes, font=font(12), height=32,
                       fg_color="transparent", border_width=1, text_color=TEXT
                       ).pack(side="left", fill="x", expand=True, padx=(0, 4))
-        self.traj_btn = ctk.CTkButton(row, text="RViz 3D로 보기", command=self.view_rviz, font=font(12), height=32,
-                                      fg_color="transparent", border_width=1, text_color=TEXT, state="disabled")
-        self.traj_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
-        ctk.CTkButton(c3, text="RViz 3D 환경 설치·확인…", command=self.open_rviz_setup, font=font(12), height=28,
-                      fg_color="transparent", border_width=1, text_color=TEXT).pack(fill="x", padx=14, pady=(0, 3))
+        # RViz(3D 재생)는 고급 기능이라 접어 둠: 처음 쓰는 사람에게 주요 실행 버튼과 같은 층에 두지 않는다
+        self._adv_open = False
+        self.adv_btn = ctk.CTkButton(c3, text="고급: RViz 3D ▸", command=self._toggle_advanced, font=font(11), height=26,
+                                     fg_color="transparent", text_color=MUTED, hover=False, anchor="w")
+        self.adv_btn.pack(fill="x", padx=14, pady=(0, 2))
+        self.adv_frame = ctk.CTkFrame(c3, fg_color="transparent")
+        self.traj_btn = ctk.CTkButton(self.adv_frame, text="RViz 3D로 보기", command=self.view_rviz, font=font(12),
+                                      height=32, fg_color="transparent", border_width=1, text_color=TEXT,
+                                      state="disabled")
+        self.traj_btn.pack(fill="x", pady=(0, 3))
+        ctk.CTkButton(self.adv_frame, text="RViz 3D 환경 설치·확인…", command=self.open_rviz_setup, font=font(12),
+                      height=28, fg_color="transparent", border_width=1, text_color=TEXT).pack(fill="x", pady=(0, 3))
         self.progress = ctk.CTkProgressBar(c3, mode="indeterminate", height=6)
         self.progress.pack(fill="x", padx=14, pady=(6, 4))
         self.progress.set(0)
@@ -277,8 +285,8 @@ class SketchApp:
         self.status.pack(fill="x", padx=14, pady=(0, 12))
         lim = limits.executor_region(self.cfg).x_max * 2
         plim = limits.pending_region(self.cfg).x_max * 2
-        ctk.CTkLabel(c3, text=f"종이 미리보기: 파란 점선 {lim:.0f}mm = 실행기 허용 · 주황 점선(최대 폭 {plim:.0f}mm) = "
-                              "넓은 범위(실물 확인 전, 위쪽이 낮은 지붕 모양)",
+        ctk.CTkLabel(c3, text=f"종이 미리보기: 파란 점선 = 펜으로 그릴 수 있는 범위(폭 {lim:.0f}mm) · "
+                              f"주황 점선 = 공중 모드로만 확인하는 넓은 범위(최대 폭 {plim:.0f}mm, 위쪽이 낮은 지붕 모양)",
                      font=font(11), text_color=MUTED, wraplength=300, anchor="w", justify="left"
                      ).pack(fill="x", padx=14, pady=(0, 12))
 
@@ -315,6 +323,14 @@ class SketchApp:
         self._build_controls()
         self.strip.select(self.stage_id)
 
+    def _toggle_advanced(self):
+        self._adv_open = not self._adv_open
+        if self._adv_open:
+            self.adv_frame.pack(fill="x", padx=14, pady=(0, 3), after=self.adv_btn)
+        else:
+            self.adv_frame.pack_forget()
+        self.adv_btn.configure(text="고급: RViz 3D " + ("▾" if self._adv_open else "▸"))
+
     # ---------------------------------------------------------- 그림 테마
     def _theme_colors(self):
         dark = ctk.get_appearance_mode() == "Dark"
@@ -332,18 +348,22 @@ class SketchApp:
         return DETAIL_KEYS[DETAIL_LABELS.index(self.detail_seg.get())]
 
     def _build_controls(self):
+        """현재 단계의 조절 칸을 보임. 단계마다 한 번만 만들고(이후엔 숨겼다 보이기) 다른 단계에서 바뀐 값은 맞춰 넣는다.
+        (예전에는 단계를 바꿀 때마다 부수고 다시 만들어 0.2~0.3초가 걸렸다.)"""
         if self.controls is not None:
-            self.controls.destroy()
-            self.controls = None
-            # 버린 조절 칸의 tk 변수(순환 참조)를 메인 스레드에서 바로 정리. 두면 작업 스레드의 가비지 컬렉션이
-            # 정리하다 "main thread is not in main loop" 경고를 냄
-            gc.collect()
+            self.controls.pack_forget()
         st = stages.STAGE_BY_ID[self.stage_id]
         specs = [self.session.param_specs()[p.key] for p in st.params]
         self.ctrl_title.configure(text=f"조절: {st.label}" + ("" if specs else " (조절 항목 없음)"))
-        self.controls = ParamControls(self.ctrl_card, specs, self.session.params, self._on_param, font)
-        self.controls.pack(fill="x", pady=(0, 12))
-        self.controls.set_enabled(not self._agent_busy)
+        ctl = self._controls_cache.get(self.stage_id)
+        if ctl is None:
+            ctl = self._controls_cache[self.stage_id] = ParamControls(
+                self.ctrl_card, specs, self.session.params, self._on_param, font)
+        else:
+            ctl.set_values(self.session.params)
+        self.controls = ctl
+        ctl.pack(fill="x", pady=(0, 12))
+        ctl.set_enabled(not (self._agent_busy or self.drawing))
 
     def apply_type_preset(self):
         t = presets.IMAGE_TYPES[self._type_key()]
@@ -473,14 +493,14 @@ class SketchApp:
                     ax.text(mid[0], mid[1], str(i), fontsize=8, color=color, clip_on=True)
                     n += 1
 
-    def refresh_proposals(self):
+    def refresh_proposals(self, redraw=True):
         views = self.session.proposal_views() if self.session.proposals else []
         if views:
             self.proposal_bar.set_views(views, self.session.proposal_epoch)
             self.proposal_bar.pack(fill="x", padx=8, pady=(0, 8))
         else:
             self.proposal_bar.pack_forget()
-        if self.stage_id == "edit":
+        if redraw and self.stage_id == "edit":
             self.view.redraw()
 
     def _apply_proposals(self, exclude):
@@ -517,8 +537,8 @@ class SketchApp:
         self.type_seg.set(presets.IMAGE_TYPES[s.image_type]["label"])
         self.type_hint.configure(text=presets.IMAGE_TYPES[s.image_type]["why"])
         self.detail_seg.set(DETAIL_LABELS[DETAIL_KEYS.index(s.detail)])
-        if self.controls is not None:
-            self.controls.set_values(s.params)
+        for ctl in self._controls_cache.values():      # 보이지 않는 단계의 조절 칸도 함께 맞춤
+            ctl.set_values(s.params)
 
     def _refresh_from_session(self, what="result"):
         if what == "proposals":
@@ -534,23 +554,32 @@ class SketchApp:
         """에이전트가 작업 중이거나 로봇이 그리는 중이면 처리·조절·시뮬레이션을 잠금 (같은 세션을 동시에 바꾸지 않게)."""
         self._agent_busy = busy
         locked = busy or self.drawing
+        if busy:      # 왜 잠겼는지 알려 줌 (끝나면 결과 표시가 상태 문구를 새로 씀)
+            self._set_status("에이전트가 작업하는 동안 설정·시뮬레이션이 잠깁니다. 끝나면 자동으로 풀려요.")
+        elif not self.drawing and self.result is not None:
+            self._set_status("에이전트 작업이 끝났습니다.")
         state = "disabled" if locked or self.busy else "normal"
         self.run_btn.configure(state=state)
         self.sim_btn.configure(state=state)
-        if self.controls is not None:
-            self.controls.set_enabled(not locked)
+        for ctl in self._controls_cache.values():
+            ctl.set_enabled(not locked)
         for seg in (self.type_seg, self.detail_seg):
             seg.configure(state="disabled" if locked else "normal")
         if not locked and self._recompute_pending:
             self._recompute_pending = False
             self._schedule_recompute(0)
 
-    def _start_busy(self, text):
+    def _start_busy(self, text, determinate=False):
         self.busy = True
         self.run_btn.configure(state="disabled")
         self.sim_btn.configure(state="disabled")
-        self.progress.configure(mode="indeterminate")
-        self.progress.start()
+        if determinate:      # 진행률을 아는 작업 (로봇 시뮬레이션)
+            self.progress.stop()
+            self.progress.configure(mode="determinate")
+            self.progress.set(0)
+        else:
+            self.progress.configure(mode="indeterminate")
+            self.progress.start()
         self._set_status(text)
 
     def _end_busy(self):
@@ -616,8 +645,8 @@ class SketchApp:
         t, pl = r["timing"], r["placement"]
         self.st_strokes.set(f"{t['stroke_count']}획", f"명령 {t['command_count']}개")
         size_color = BAD if r["out_of_pending"] else (WARN if r["out_of_limits"] else None)
-        size_note = ("실물 미확인 범위도 초과" if r["out_of_pending"]
-                     else "실행 시 --pending-limits 필요" if r["out_of_limits"] else "실행기 허용 범위 안")
+        size_note = ("공중 확인 범위도 넘음: 크기를 줄이세요" if r["out_of_pending"]
+                     else "펜 범위 밖: 공중 모드로 확인" if r["out_of_limits"] else "펜으로 그릴 수 있는 범위 안")
         self.st_size.set(f"{pl['drawing_width_mm']:.0f}×{pl['drawing_height_mm']:.0f} mm", size_note, size_color)
         self.st_time.set(f"{t['total_s'] / 60:.1f}분",
                          f"그리기 {t['draw_s'] / 60:.1f} · 이동 {t['travel_s'] / 60:.1f} · "
@@ -626,22 +655,34 @@ class SketchApp:
         edits = len(self.session.edit_log)
         notice, self.session.notice = self.session.notice, ""
         self._set_status(status + (f" (획 편집 {edits}건)" if edits else "") + (f"\n{notice}" if notice else ""))
-        self.refresh_proposals()
+        self.refresh_proposals(redraw=False)      # 위 _show_stage가 이미 그림 (편집 단계를 두 번 그리지 않음)
 
     def simulate(self):
         if not self.result:
-            messagebox.showwarning("알림", "먼저 '처리 실행'을 해주세요.")
+            messagebox.showwarning("알림", "먼저 이미지를 열어 주세요.")
             return
         if self.busy or self._agent_busy:
             return
-        path_mm = self.result["timing"]["pen_down_mm"] + self.result["timing"]["pen_up_mm"]
-        self._start_busy(f"시뮬레이션 중... (경로 약 {path_mm:.0f}mm, 1mm마다 역기구학)")
+        self._start_busy("로봇 시뮬레이션 중... 0% (관절이 한계를 넘는지 확인합니다. 그림에 따라 10~30초)", determinate=True)
         self.st_sim.set("검사 중", "")
         threading.Thread(target=self._sim_worker, daemon=True).start()
 
+    def _sim_progress(self, done, total):
+        self.progress.set(done / max(total, 1))
+        self._set_status(f"로봇 시뮬레이션 중... {100 * done // max(total, 1)}% "
+                         "(관절이 한계를 넘는지 확인합니다)")
+
     def _sim_worker(self):
+        last = [-1]
+
+        def progress(done, total):          # 퍼센트가 바뀔 때만 화면에 알림 (큐가 넘치지 않게)
+            pct = 100 * done // max(total, 1)
+            if pct != last[0]:
+                last[0] = pct
+                self._ui(self._sim_progress, done, total)
+
         try:
-            self._ui(self._show_sim, self.session.simulate())
+            self._ui(self._show_sim, self.session.simulate(progress=progress))
         except Exception as e:
             self._ui(messagebox.showerror, "시뮬레이션 오류", str(e))
         finally:
@@ -656,7 +697,7 @@ class SketchApp:
 
     def export_strokes(self):
         if not self.result:
-            messagebox.showwarning("알림", "먼저 '처리 실행'을 해주세요.")
+            messagebox.showwarning("알림", "먼저 이미지를 열어 주세요.")
             return
         path = filedialog.asksaveasfilename(initialdir=str(paths.output_dir()), defaultextension=".json",
                                             filetypes=[("JSON", "*.json")])
@@ -672,12 +713,13 @@ class SketchApp:
         }
         pm.save_strokes_json(path, pm.build_strokes_document(r["strokes_mm"], r["placement"], metrics, source))
         extra = " --pending-limits" if r["out_of_limits"] else ""
-        messagebox.showinfo("완료", f"저장됨: {path}\n\n다음: python robot/draw_executor.py \"{path}\"{extra}")
+        messagebox.showinfo("완료", f"저장됨: {path}\n\n앱에서 바로 그리려면 '로봇으로 그리기'를 쓰세요.\n"
+                                  f"명령줄로 그리려면: mirobot-draw \"{path}\"{extra}")
 
     def view_rviz(self):
         """시뮬레이션(아직이면 먼저 실행) → 관절 궤적 저장 → WSL에서 RViz 재생 창 열기."""
         if not self.result:
-            messagebox.showwarning("알림", "먼저 '처리 실행'을 해주세요.")
+            messagebox.showwarning("알림", "먼저 이미지를 열어 주세요.")
             return
         if self.busy or self._agent_busy:
             return
@@ -812,6 +854,30 @@ class SketchApp:
         self.draw_window = DrawWindow(self, self.session, self.cfg, font, launch_rviz=launch_rviz)
         return self.draw_window
 
+    def reset_for_next_drawing(self):
+        """그림이 끝까지 그려진 뒤: 사진과 작업 내용을 비우고 새 그림을 그릴 수 있는 처음 상태로 돌린다."""
+        if self._recompute_after is not None:
+            self.root.after_cancel(self._recompute_after)
+            self._recompute_after = None
+        self._recompute_pending = False
+        self.session.reset()
+        self.path_label.configure(text="선택된 파일 없음")
+        self.strip.clear()
+        self.view.clear()
+        self.view.options_frame.pack_forget()
+        self.proposal_bar.pack_forget()
+        self.st_strokes.set("—", "")
+        self.st_size.set("—", "")
+        self.st_time.set("—", "")
+        self.st_sim.set("—", "")
+        self.traj_btn.configure(state="disabled")
+        self.stage_id = "source"
+        self.strip.select("source")
+        self._build_controls()
+        if self.agent_panel is not None and not self.agent_panel.busy:
+            self.agent_panel.new_chat()           # 지난 그림 이야기는 지움
+        self._set_status("그림이 끝났습니다. 종이를 바꾸고 새 사진을 열어 주세요.")
+
     def set_drawing(self, on):
         """실행 중에는 조절 칸·편집·재계산·에이전트 편집 도구를 잠금 (그리는 획이 바뀌지 않게)."""
         self.drawing = bool(on)
@@ -845,6 +911,11 @@ class SketchApp:
                 except tk.TclError:
                     pass
         self.root.destroy()
+        # 닫힌 창의 tk 객체(글꼴·변수·이미지)를 메인 스레드에서 바로 정리. 두면 나중에 작업 스레드의 가비지 컬렉션이
+        # 정리하다 "main thread is not in main loop" 경고를 내거나, 이미 닫힌 인터프리터를 기다리며 멈출 수 있음
+        self.controls = None
+        self._controls_cache.clear()
+        gc.collect()
 
 
 APP_ID = "YoobinKim.MirobotSketch"  # 작업표시줄 묶음·고정용 앱 ID (바로가기/설치 프로그램과 같은 값)

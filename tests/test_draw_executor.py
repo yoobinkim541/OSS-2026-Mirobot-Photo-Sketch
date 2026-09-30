@@ -105,6 +105,29 @@ class PlannerTest(unittest.TestCase):
         planner = de.Planner(self._high_pen_up_cfg(10.0), air=True)
         self.assertNotIn("stroke 0 descend", [label for _, label in planner.plan(SQUARE)])
 
+    def test_return_to_origin_puts_the_pen_back_on_the_paper_center(self):
+        cfg = self._high_pen_up_cfg(10.0)
+        planner = de.Planner(cfg)
+        cmds = planner.return_to_origin()
+        self.assertEqual([label for _, label in cmds], ["return origin descend", "return origin"])
+        x_of = lambda line: float(re.search(r"X([-\d.]+)", line).group(1))
+        feed_of = lambda line: float(re.search(r"F([\d.]+)", line).group(1))
+        c = cfg["paper_center_tcp_mm"]
+        sign = cfg["pen"]["retract_x_sign"]
+        self.assertAlmostEqual(x_of(cmds[-1][0]), c["x"], places=3)                      # 처음 자세: 종이 중심, 펜 끝이 닿음
+        self.assertAlmostEqual(sign * (x_of(cmds[0][0]) - c["x"]), cfg["pen"]["slow_zone_mm"], places=3)
+        self.assertEqual(feed_of(cmds[-1][0]), cfg["feeds_mm_per_min"]["approach"])       # 닿기 직전은 천천히
+        for line, _ in cmds:
+            self.assertIn(f"Y{c['y']:.3f}", line)
+            self.assertIn(f"Z{c['z']:.3f}", line)
+
+    def test_return_to_origin_is_one_slow_move_when_pen_up_is_within_the_slow_zone(self):
+        cmds = de.Planner(CFG).return_to_origin()                                        # 기본 설정: 펜업 2.5 = 느린 구간
+        self.assertEqual([label for _, label in cmds], ["return origin"])
+
+    def test_return_to_origin_is_empty_in_air_mode(self):
+        self.assertEqual(de.Planner(self._high_pen_up_cfg(10.0), air=True).return_to_origin(), [])
+
     def test_axis_signs(self):
         planner = de.Planner(CFG)
         c = CFG["paper_center_tcp_mm"]
