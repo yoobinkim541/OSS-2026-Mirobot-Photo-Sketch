@@ -78,7 +78,8 @@ def trajectories_dir():
     return root / "trajectories" if root else None
 
 
-_ABS_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|/(?:home|Users|mnt|root)/)")
+# 절대 경로: 드라이브 문자(C:\ 또는 C:/) 또는 이름 뒤에 다시 /가 오는 POSIX 경로(/tmp/a, /home/x/y, /mnt/c/z ...)
+_ABS_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|/[A-Za-z0-9_.-]+/)")
 
 
 def portable_path(value):

@@ -70,9 +70,13 @@ class PortablePathTest(unittest.TestCase):
         self.assertEqual(paths.portable_path("D:/photos/family/pic.png"), "pic.png")
         self.assertEqual(paths.portable_path("/mnt/c/Users/someone/x/y.json"), "y.json")
         self.assertEqual(paths.portable_path("/home/someone/z.txt"), "z.txt")
+        for posix in ("/tmp/tmpa4w3jork/line.png", "/var/folders/ab/cd/line.png", "/opt/app/data/line.png",
+                      "/srv/data/line.png", "/root/x/line.png"):             # 임시 폴더 등 어떤 절대 경로든
+            self.assertEqual(paths.portable_path(posix), "line.png", posix)
 
     def test_things_that_are_not_absolute_paths_are_left_alone(self):
-        for value in ("COM9", "out/x.json", "input/a.jpg", "C:", "https://example.com/a", "펜 끝이 종이에 닿음", "", 3.5, None):
+        for value in ("COM9", "out/x.json", "input/a.jpg", "C:", "https://example.com/a", "펜 끝이 종이에 닿음", "", 3.5, None,
+                      "/", "/ 또는 \\", "약 5/6"):
             self.assertEqual(paths.portable_path(value), value)
 
     def test_installed_mode_keeps_only_the_file_name(self):
