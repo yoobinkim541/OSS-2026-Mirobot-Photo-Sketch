@@ -8,6 +8,7 @@
 """
 
 import threading
+import time
 import tkinter as tk
 
 import customtkinter as ctk
@@ -30,6 +31,7 @@ QUICK_PROMPTS = [
     "배경이나 테두리에 있는 잡음 획을 찾아서 지워줘",
     "주요 윤곽은 유지하면서 15분 안에 그릴 수 있게 줄여줘",
     "얼굴 디테일을 더 살려줘",
+    "사진과 최대한 비슷하고 예쁘게 다듬어줘 (필요하면 명암 빗금도 써줘)",
     "로봇 시뮬레이션으로 관절 한계를 확인해줘",
     "이 그림을 로봇으로 그릴 준비가 됐는지 확인하고 순서를 알려줘",
 ]
@@ -41,10 +43,14 @@ class AgentPanel(ctk.CTkFrame):
         self.app, self.toolbox, self.bridge, self.font = app, toolbox, bridge, font
         self.on_close = on_close
         self.settings = bk.load_settings()
-        self.backend_name = self.settings.get("backend", "Claude Code")
+        self.backend_name = bk.default_backend_name(self.settings)   # 설치 안 된 방식이면 쓸 수 있는 방식으로
         self.backends = {}
         self.busy = False
         self._current_tools = []
+        self._tool_started = {}        # 도구 칩 -> 시작 시각 (오래 걸리는 도구의 경과 시간 표시)
+        self._thinking = None          # "생각하는 중…" 표시 (첫 응답이 오기 전)
+        self._thinking_since = 0.0
+        self._tick_after = None
         self.grid_propagate(False)
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
@@ -109,8 +115,9 @@ class AgentPanel(ctk.CTkFrame):
         if self.icon_image is not None:
             ctk.CTkLabel(box, image=self.icon_image, text="").pack()
         ctk.CTkLabel(box, text="무엇을 도와드릴까요?", font=self.font(16, "bold")).pack(pady=(10, 4))
-        ctk.CTkLabel(box, text="대화로 처리 설정을 바꾸고 획을 정리합니다.\n예: “배경 잡음을 지워줘”, “10분 안에 끝나게 해줘”",
-                     font=self.font(12), text_color=MUTED, justify="center").pack()
+        ctk.CTkLabel(box, text="대화로 처리 설정을 바꾸고 획을 정리하고, 로봇으로 그릴 준비가 됐는지 확인합니다.\n"
+                               "예: “배경 잡음을 지워줘”, “10분 안에 끝나게 해줘”, “로봇으로 그려도 되는지 봐줘”",
+                     font=self.font(12), text_color=MUTED, justify="center", wraplength=340).pack()
         ctk.CTkLabel(box, text="로봇 연결·시작은 사용자가 '로봇으로 그리기' 창에서 직접 합니다.", font=self.font(11), text_color=MUTED).pack(pady=(8, 0))
         self._empty = True
 
@@ -139,17 +146,23 @@ class AgentPanel(ctk.CTkFrame):
         brief = ", ".join(f"{k}={v}" for k, v in list(args.items())[:4]) if isinstance(args, dict) else ""
         if len(brief) > 60:
             brief = brief[:57] + "…"
+        if name == "simulate":
+            brief = (brief + "  " if brief else "") + "(그림에 따라 10~30초)"
         chip = ctk.CTkLabel(self.chat, text=f"⚙ {name}  {brief}  …", font=self.font(11), text_color=MUTED,
                             fg_color=BUBBLE, corner_radius=10, padx=10, pady=3, anchor="w")
         chip.grid(row=r, column=0, sticky="w", padx=10, pady=2)
         self._current_tools.append((chip, name, brief))
+        self._tool_started[chip] = time.monotonic()
+        self._start_ticker()
         self._scroll_end()
 
     def tool_done(self, ok):
         if not self._current_tools:
             return
         chip, name, brief = self._current_tools.pop(0)
-        chip.configure(text=f"{'✓' if ok else '✕'} {name}  {brief}", text_color=MUTED if ok else ERR_FG)
+        started = self._tool_started.pop(chip, None)
+        took = f"  {time.monotonic() - started:.0f}초" if started and time.monotonic() - started >= 3 else ""
+        chip.configure(text=f"{'✓' if ok else '✕'} {name}  {brief}{took}", text_color=MUTED if ok else ERR_FG)
 
     def add_error(self, text, action=None):
         r = self._row()
@@ -175,6 +188,44 @@ class AgentPanel(ctk.CTkFrame):
                           " 실행 중 — 브라우저에서 로그인을 마친 뒤 다시 보내세요")
         else:
             self.add_error("로그인 창을 열지 못했습니다. 명령 프롬프트에서 직접 실행하세요: " + " ".join(argv))
+
+    # ------------------------------------------------------------ 기다리는 동안의 표시
+    def _show_thinking(self):
+        """응답이 오기 전에 '생각하는 중… N초'를 보여 멈춘 것처럼 보이지 않게 함."""
+        r = self._row()
+        self._thinking = ctk.CTkLabel(self.chat, text="생각하는 중… 0초", font=self.font(11), text_color=MUTED,
+                                      anchor="w")
+        self._thinking.grid(row=r, column=0, sticky="w", padx=12, pady=(2, 6))
+        self._thinking_since = time.monotonic()
+        self._start_ticker()
+        self._scroll_end()
+
+    def _hide_thinking(self):
+        if self._thinking is not None:
+            try:
+                self._thinking.destroy()
+            except tk.TclError:
+                pass
+            self._thinking = None
+
+    def _start_ticker(self):
+        if self._tick_after is None:
+            self._tick_after = self.after(1000, self._tick)
+
+    def _tick(self):
+        self._tick_after = None
+        now = time.monotonic()
+        try:
+            if self._thinking is not None:
+                self._thinking.configure(text=f"생각하는 중… {now - self._thinking_since:.0f}초")
+            for chip, name, brief in self._current_tools:
+                t0 = self._tool_started.get(chip)
+                if t0 is not None and now - t0 >= 3:
+                    chip.configure(text=f"⚙ {name}  {brief}  … {now - t0:.0f}초")
+        except tk.TclError:      # 새 대화로 위젯이 지워진 경우
+            self._thinking = None
+        if self._thinking is not None or self._current_tools:
+            self._tick_after = self.after(1000, self._tick)
 
     def add_info(self, text):
         r = self._row()
@@ -265,6 +316,8 @@ class AgentPanel(ctk.CTkFrame):
         for b in self.backends.values():
             b.reset()
         self._current_tools = []
+        self._tool_started = {}
+        self._thinking = None
         self._show_empty()
 
     def _send_or_stop(self):
@@ -283,6 +336,7 @@ class AgentPanel(ctk.CTkFrame):
             return
         self.add_user(text)
         self._set_busy(True)
+        self._show_thinking()
         backend = self._backend()
         threading.Thread(target=self._worker, args=(backend, text), daemon=True).start()
 
@@ -291,6 +345,8 @@ class AgentPanel(ctk.CTkFrame):
 
     def _handle(self, ev):
         t = ev["type"]
+        if t in ("text", "tool", "error", "done"):
+            self._hide_thinking()
         if t == "text":
             self.add_assistant(ev["text"])
         elif t == "tool":

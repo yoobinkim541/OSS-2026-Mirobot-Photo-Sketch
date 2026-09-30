@@ -4,6 +4,7 @@ import re
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -88,7 +89,7 @@ class DrawJobTest(unittest.TestCase):
         self.assertTrue(Path(fin["record_path"]).exists())
         import json
         run = json.loads(Path(fin["record_path"]).read_text(encoding="utf-8"))
-        strokes_file = Path(run["strokes_json"])
+        strokes_file = Path(self.tmp.name) / run["strokes_json"]           # 기록에는 파일 이름만 (저장소 밖 경로)
         self.assertTrue(strokes_file.exists())
         doc, saved_strokes = de.load_strokes(strokes_file)
         self.assertEqual(doc["source"]["image"], str(self.session.image_path))
@@ -139,8 +140,11 @@ class DrawJobTest(unittest.TestCase):
         job.start(virtual=True, virtual_speed=1)
         self.assertTrue(rec.ready.wait(10))
         job.confirm(checked=True)
-        threading.Timer(0.5, job.stop).start()
-        self.assertTrue(rec.done.wait(5))
+        deadline = time.monotonic() + 30                      # 공중 경로 확인이 끝나고 그리기가 시작된 뒤에 멈춤
+        while not any(k == "progress" for k, _ in rec.events) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        job.stop()
+        self.assertTrue(rec.done.wait(10))
         fin = next(d for k, d in rec.events if k == "finished")
         self.assertEqual(fin["result"]["result"], "stopped_by_user")
         self.assertEqual(lp.read_progress(Path(self.tmp.name) / "live.json")["state"], "stopped")
@@ -223,7 +227,7 @@ class DrawJobTest(unittest.TestCase):
              mock.patch.object(calibration, "save_config") as save, \
              mock.patch.object(de, "execute", return_value={"result": "completed", "commands_sent": 1,
                                                             "elapsed_s": 0.1}) as execute:
-            job.start(virtual=False)
+            job.start(virtual=False, return_to_origin=False)          # 가짜 연결이라 되돌리기는 이 테스트와 무관
             self.assertTrue(rec.ready.wait(15), rec.events[-5:])
             self.assertFalse(job.summary["plane_verified"])
             job.confirm(air=False, pending=False, checked=True)
@@ -336,7 +340,7 @@ class DrawJobTest(unittest.TestCase):
              mock.patch.object(calibration, "save_config"), \
              mock.patch.object(de, "execute", return_value={"result": "completed", "commands_sent": 7,
                                                             "elapsed_s": 0.1}) as execute:
-            job.start(virtual=False, pending=True, recalibrate=True)
+            job.start(virtual=False, pending=True, recalibrate=True, return_to_origin=False)
             self.assertTrue(rec.ready.wait(25), rec.events[-5:])
             self.assertEqual(run.call_args.kwargs["target_rect_mm"], (-61.0, -36.4, 61.0, 36.4))
             self.assertEqual(cfg["limits"], {"x_max_mm": 61.0, "y_min_mm": -36.4,
@@ -354,6 +358,7 @@ class DrawJobTest(unittest.TestCase):
         job = self.job(rec, launch_rviz=lambda *a, **k: time.sleep(3))   # WSL이 깨어나는 데 오래 걸리는 경우
         job.start(virtual=True, virtual_speed=500)
         self.assertTrue(rec.ready.wait(10))
+        job._air_thread.join(60)                          # 공중 경로 확인이 끝난 뒤부터 재서 RViz 대기만 측정
         t0 = time.monotonic()
         job.confirm(checked=True)
         first = threading.Event()
@@ -368,6 +373,150 @@ class DrawJobTest(unittest.TestCase):
         self.assertTrue(first.wait(5))
         self.assertLess(time.monotonic() - t0, 1.0)       # RViz를 기다리지 않고 바로 첫 명령
         self.assertTrue(rec.done.wait(60))
+
+    def test_air_simulation_runs_while_waiting_and_is_awaited_only_for_air_mode(self):
+        for air in (True, False):
+            rec = Recorder()
+            job = self.job(rec)
+            with mock.patch.object(job, "_wait_air_simulation", wraps=job._wait_air_simulation) as waited:
+                job.start(virtual=True, virtual_speed=2000)
+                self.assertTrue(rec.ready.wait(20))
+                self.assertIsNotNone(job._air_thread)         # 확인을 기다리는 동안 이미 시작됨
+                job.confirm(air=air, checked=True)
+                self.assertTrue(rec.done.wait(60))
+            self.assertEqual(waited.call_count, 1 if air else 0, air)
+            fin = next(d for k, d in rec.events if k == "finished")
+            self.assertEqual(fin["result"]["result"], "completed", air)
+            self.assertTrue(job._air_verdict.startswith(("PASS", "WARN")), air)
+
+    def test_stop_while_waiting_for_air_simulation_cancels_without_moving(self):
+        rec = Recorder()
+        job = self.job(rec)
+        release = threading.Event()
+        job.start(virtual=True, virtual_speed=2000)
+        self.assertTrue(rec.ready.wait(20))
+        job._air_thread.join(60)
+        job._air_thread = threading.Thread(target=release.wait, args=(30,), daemon=True)   # 아직 도는 중인 것처럼
+        job._air_thread.start()
+        job.confirm(air=True, checked=True)
+        time.sleep(0.5)
+        self.assertEqual(job.state, "confirm")                # 시뮬레이션을 기다리는 중
+        job.stop()
+        self.assertTrue(rec.done.wait(10))
+        release.set()
+        fin = next(d for k, d in rec.events if k == "finished")
+        self.assertEqual(fin["result"]["result"], "cancelled")
+        self.assertEqual(job.link.sent, [])                   # 로봇 명령은 하나도 안 감
+
+    def test_background_air_simulation_stops_when_the_job_ends(self):
+        rec = Recorder()
+        job = self.job(rec)
+        job.start(virtual=True, virtual_speed=2000)
+        self.assertTrue(rec.ready.wait(20))
+        job._air_cancel.clear()
+        started = threading.Event()
+        from mirobot_sketch import mirobot_sim as ms
+        real = ms.simulate
+
+        def endless(targets, step_mm=1.0, progress=None):          # 오래 걸리는 계산을 흉내: 취소만 기다림
+            started.set()
+            while True:
+                progress(0, 1)
+                time.sleep(0.01)
+
+        job._air_thread.join(60)
+        with mock.patch.object(ms, "simulate", endless):
+            job._start_air_simulation(self.session.result["strokes_mm"])
+            self.assertTrue(started.wait(5))
+            job.cancel()                                                # 확인 단계에서 취소 -> 작업 끝
+            self.assertTrue(rec.done.wait(10))
+            job._air_thread.join(5)
+            self.assertFalse(job._air_thread.is_alive(), "남은 공중 경로 계산이 계속 돌고 있음")
+
+    def _finish_run(self, air=False, return_to_origin=True, link_kw=None, stop_after=None, link_cls=None):
+        """가상 로봇으로 끝까지(또는 중간까지) 그린다. 반환: (job, link, finished 결과, 이벤트 기록)."""
+        rec = Recorder()
+        job = self.job(rec)
+        holder = {}
+
+        def open_link(cfg, virtual=False, speed=20.0, verbose=False):
+            from mirobot_sketch.virtual_robot import VirtualMirobotLink
+            holder["link"] = (link_cls or VirtualMirobotLink)(cfg, speed=speed, **(link_kw or {}))
+            return holder["link"]
+
+        with mock.patch.object(de, "open_link", open_link):
+            job.start(virtual=True, virtual_speed=2000, return_to_origin=return_to_origin)
+            self.assertTrue(rec.ready.wait(30))
+            job.confirm(air=air, checked=True)
+            if stop_after:
+                deadline = time.monotonic() + 30
+                while len(holder["link"].sent) < stop_after and not rec.done.is_set() and time.monotonic() < deadline:
+                    time.sleep(0.005)
+                job.stop()
+            self.assertTrue(rec.done.wait(90))
+        fin = next(d for k, d in rec.events if k == "finished")
+        return job, holder["link"], fin, rec
+
+    def test_pen_returns_to_the_initial_origin_after_a_completed_drawing(self):
+        job, link, fin, rec = self._finish_run()
+        res = fin["result"]
+        self.assertEqual((res["result"], res["returned_to_origin"]), ("completed", True))
+        c = job.cfg["paper_center_tcp_mm"]
+        self.assertEqual(tuple(round(v, 3) for v in link.pos), (c["x"], c["y"], c["z"]))      # 처음 자세 = 종이 중심, 닿음
+        self.assertIn(f"X{c['x']:.3f}", link.sent[-1])
+        import json
+        run = json.loads(Path(fin["record_path"]).read_text(encoding="utf-8"))
+        self.assertTrue(run["return_to_origin"])
+        self.assertTrue(run["returned_to_origin"])
+
+    def test_option_off_leaves_the_pen_lifted_at_the_paper_center(self):
+        job, link, fin, rec = self._finish_run(return_to_origin=False)
+        c = job.cfg["paper_center_tcp_mm"]
+        self.assertNotIn("returned_to_origin", fin["result"])
+        self.assertNotEqual(round(link.pos[0], 3), c["x"])                                    # 펜업 위치에서 끝남
+        self.assertEqual((round(link.pos[1], 3), round(link.pos[2], 3)), (c["y"], c["z"]))
+
+    def test_air_mode_has_nothing_to_return(self):
+        job, link, fin, rec = self._finish_run(air=True)
+        self.assertEqual(fin["result"]["result"], "completed")
+        self.assertIsNone(fin["result"].get("returned_to_origin"))
+
+    def test_no_automatic_movement_after_stop_or_error(self):
+        job, link, fin, rec = self._finish_run(stop_after=20)
+        self.assertEqual(fin["result"]["result"], "stopped_by_user")
+        self.assertNotIn("returned_to_origin", fin["result"])
+        job2, link2, fin2, rec2 = self._finish_run(link_kw={"fail_at": 30})
+        self.assertEqual(fin2["result"]["result"], "stopped_on_error")
+        self.assertNotIn("returned_to_origin", fin2["result"])
+        self.assertEqual(len(link2.sent), 30)
+
+    def test_failure_while_returning_is_reported_without_recovery(self):
+        _probe_job, _probe_link, probe, _ = self._finish_run()
+        n_planned = probe["result"]["commands_sent"]                                          # 그림 명령 수
+        job, link, fin, rec = self._finish_run(link_kw={"fail_at": n_planned + 1})            # 되돌리기 첫 명령에서 오류
+        res = fin["result"]
+        self.assertEqual((res["result"], res["returned_to_origin"]), ("completed", False))
+        self.assertIn("시작 위치로 돌아가는 중 오류", res["return_error"])
+        self.assertEqual(len(link.sent), n_planned + 1)                                       # 그 뒤로는 보내지 않음
+        done_msgs = [d["message"] for k, d in rec.events
+                     if k == "step" and d["id"] == "drawing" and d["status"] == "done"]
+        self.assertTrue(any("돌아가지 못했습니다" in m for m in done_msgs), done_msgs)
+
+    def test_unexpected_error_while_returning_does_not_turn_a_finished_drawing_into_a_failure(self):
+        from mirobot_sketch.virtual_robot import VirtualMirobotLink
+        _job, _link, probe, _ = self._finish_run()
+        n_planned = probe["result"]["commands_sent"]
+
+        class BrokenAfterDrawing(VirtualMirobotLink):
+            def send_and_ack(self, line, timeout, should_stop=None):
+                if len(self.sent) >= n_planned:
+                    raise RuntimeError("예상 못 한 연결 오류")
+                return super().send_and_ack(line, timeout, should_stop)
+
+        job, link, fin, rec = self._finish_run(link_cls=BrokenAfterDrawing)
+        res = fin["result"]
+        self.assertEqual((res["result"], res["returned_to_origin"]), ("completed", False))    # 그림은 끝난 것으로 남김
+        self.assertIn("RuntimeError", res["return_error"])
 
     def test_state_is_active_as_soon_as_started(self):
         rec = Recorder()
@@ -396,8 +545,8 @@ class DrawJobTest(unittest.TestCase):
         self.assertTrue(Path(fin["record_path"]).exists())
         import json
         run = json.loads(Path(fin["record_path"]).read_text(encoding="utf-8"))
-        self.assertEqual(run["source"]["image"], path)
-        self.assertTrue(Path(run["strokes_json"]).exists())
+        self.assertEqual(run["source"]["image"], Path(path).name)          # 기록에는 사진 파일 이름만 (폴더 경로는 뺌)
+        self.assertTrue((Path(self.tmp.name) / run["strokes_json"]).exists())
 
     def test_progress_file_failures_never_abort_drawing(self):
         rec = Recorder()

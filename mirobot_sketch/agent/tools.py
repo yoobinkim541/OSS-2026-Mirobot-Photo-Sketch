@@ -50,9 +50,21 @@ SYSTEM_PROMPT = """당신은 사진을 로봇 팔(WLKATA Mirobot)이 펜으로 �
 - face 얼굴 세밀: face_detail(켬/끔), face_sensitivity(낮을수록 약한 선도), pen_mm(이보다 촘촘한 얼굴 선은 합침).
   실사 사진에서만 얼굴을 찾음 (애니·만화 그림체는 보통 못 찾음). view(face)의 초록 타원이 처리 영역
 - simplify 스무딩·단순화: smooth_sigma_px, epsilon_px, round_iters
+- tone 명암 빗금: tone_levels(0=끔, 1~3), tone_spacing_mm, tone_angle, tone_min_mm, tone_bias. 어두운 면을 평행 빗금
+  (더 어두우면 교차)으로 채워 사진 같은 명암을 냅니다. 켜면 획 수와 시간이 늘어나니 결과 요약의 예상 시간을 알려 주세요.
+  배경이 어두운 사진은 먼저 rembg를 켜야 하고, 안 켜면 빗금이 화면을 덮어 만들지 않고 경고합니다(view tone에 표시).
 - paper 종이: box_mm(그림 긴 변 크기. 실행기 허용 범위를 넘으면 실제 드로잉 전 별도 확인 필요)
 - image_type(photo/illustration/manga)과 detail(low/medium/high)은 여러 값을 한꺼번에 채우는 프리셋
 - 선이 빠졌으면 어느 단계에서 빠졌는지 view로 단계를 차례로 보고, 그 단계의 값을 바꾸세요.
+
+사진과 비슷하고 예쁘게 만들기 (사용자가 "사진처럼", "예쁘게", "더 닮게"라고 하면)
+- compare로 원본 | 그림 | 차이를 봅니다. 차이 그림에서 빨강 = 사진보다 밝게(덜) 그려짐, 파랑 = 사진보다 어둡게(빽빽하게) 그려짐,
+  초록 = 잘 맞음. 지표: tone_match(명암 닮음, 높을수록 좋음), edge_recall(윤곽 재현), edge_precision(잡음이 적을수록 높음),
+  under/over_shaded_pct. 돌려주는 hints를 따라 설정을 바꾸고 다시 compare해서 좋아졌는지 확인하세요(2~3번). 나빠지면 되돌리고 말하세요.
+- 눈으로도 확인하세요: 얼굴(눈·코·입)이 살아 있는지, 배경 잡음이 튀지 않는지, 어두운 면과 밝은 면의 대비가 있는지,
+  예상 시간이 사용자가 원하는 범위인지. 숫자만 믿지 말고 view로 최종 그림을 보세요.
+- 순서: 배경 제거(rembg) → 이미지 종류·상세도 프리셋 → 잔선·획 정리 → tone_levels 1~2로 명암 → 시간이 너무 늘면 줄임.
+  빗금은 시간이 늘어나는 대가가 있으니 사용자가 "닮게/예쁘게"를 원할 때, 혹은 시간 여유가 있을 때 제안하세요.
 
 로봇으로 그리기까지 (사용자가 "로봇으로 그려줘", "이제 어떻게 해?"라고 하면)
 - 편집을 마치면 simulate로 관절 한계를 확인하고, robot_guide로 이 그림이 펜으로 그릴 수 있는 범위인지·시뮬레이션이
@@ -188,6 +200,14 @@ TOOLS = [
         "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
+        "name": "compare",
+        "description": (
+            "사진과 지금 그려질 그림이 얼마나 닮았는지 읽기 전용으로 비교합니다. 원본 | 그림 | 차이(빨강=사진보다 너무 밝게, "
+            "파랑=너무 어둡게, 초록=일치) 그림과 지표(tone_match 명암 닮음, edge_recall 윤곽 재현, edge_precision, "
+            "under/over_shaded_pct, ink_coverage_pct)와 개선 hints를 돌려줍니다."),
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
         "name": "robot_guide",
         "description": (
             "이 그림을 로봇으로 그릴 준비가 됐는지 읽기 전용으로 알려 줍니다: 펜으로 그릴 수 있는 범위와 공중 확인용 "
@@ -197,7 +217,7 @@ TOOLS = [
     },
 ]
 TOOL_NAMES = {t["name"] for t in TOOLS}
-READ_ONLY_TOOLS = {"get_state", "view", "list_strokes", "get_stroke", "simulate", "robot_guide"}   # 그리는 중에도 쓸 수 있는 도구
+READ_ONLY_TOOLS = {"get_state", "view", "list_strokes", "get_stroke", "simulate", "robot_guide", "compare"}   # 그리는 중에도 쓸 수 있는 도구
 
 
 def image_part(img_bgr, max_side=1024):
@@ -296,6 +316,10 @@ class AgentToolbox:
         summary = self.session.simulate()
         self.on_change("sim")
         return [text_part(summary)]
+
+    def _compare(self):
+        metrics, img = self.session.compare()
+        return [text_part(metrics), image_part(img, max_side=1400)]
 
     def _robot_guide(self):
         return [text_part(self.session.robot_guide())]

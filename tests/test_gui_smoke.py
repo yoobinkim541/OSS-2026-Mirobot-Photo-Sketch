@@ -1,5 +1,6 @@
 """GUI 스모크: 창을 띄워 이미지 열기 → 값 변경 → 자동 재계산이 끝나는지 (화면이 없으면 건너뜀)."""
 
+import gc
 import sys
 import tempfile
 import time
@@ -15,6 +16,7 @@ import golden  # noqa: E402
 
 
 def make_app():
+    gc.collect()      # 앞선 테스트가 남긴 tk 객체를 메인 스레드에서 정리 (작업 스레드의 GC가 닫힌 창을 기다리며 멈추는 것을 막음)
     try:
         import customtkinter as ctk
         root = ctk.CTk()
@@ -87,6 +89,241 @@ class GuiResponsivenessTest(unittest.TestCase):
         finally:
             close_quietly(app)
             sys.setswitchinterval(before)
+
+
+class GuiNextDrawingTest(unittest.TestCase):
+    """그림이 끝나면 사진·작업을 비우고 새 그림을 바로 시작할 수 있는 처음 상태로."""
+
+    def run_virtual_drawing(self, root, app, d, clear=True, air=True, stop=False):
+        p = Path(d) / "line.png"
+        cv2.imwrite(str(p), golden.synthetic_images()["line"])
+        app.load_image(p)
+        self.assertTrue(pump(root, app, lambda: app.result is not None and app._workers == 0))
+        app.session.update_params({"box_mm": 60, "epsilon_px": 4.0})
+        app._schedule_recompute(0)
+        self.assertTrue(pump(root, app, lambda: app._workers == 0 and app.result["params"]["box_mm"] == 60))
+        w = app.open_draw_window(launch_rviz=lambda *a, **k: None)
+        w.virtual_var.set(True)
+        w.speed_var.set("500×")
+        w.air_var.set(air)
+        w.clear_var.set(clear)
+        w.begin()
+        self.assertTrue(pump(root, app, lambda: w.job.state == "confirm", timeout=90))
+        if stop:
+            w.on_stop()
+        else:
+            w.check_var.set(True)
+            w._on_check()
+            w.on_start()
+        self.assertTrue(pump(root, app, lambda: w.finished is not None, timeout=120))
+        return w, p
+
+    def test_options_exist_and_default_to_on(self):
+        root, app = make_app()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                cv2.imwrite(str(Path(d) / "line.png"), golden.synthetic_images()["line"])
+                app.load_image(Path(d) / "line.png")
+                self.assertTrue(pump(root, app, lambda: app.result is not None and app._workers == 0))
+                w = app.open_draw_window(launch_rviz=lambda *a, **k: None)
+                self.assertTrue(w.return_var.get())
+                self.assertTrue(w.clear_var.get())
+                w.close()
+        finally:
+            close_quietly(app)
+
+    def test_completed_drawing_clears_photo_and_work_and_a_new_photo_can_be_opened(self):
+        root, app = make_app()
+        try:
+            with tempfile.TemporaryDirectory() as d, mock.patch("mirobot_sketch.draw_job.paths.output_dir",
+                                                                 lambda: Path(d)), \
+                    mock.patch("mirobot_sketch.draw_executor.paths.runs_dir", lambda: Path(d) / "runs"):
+                w, path = self.run_virtual_drawing(root, app, d)
+                self.assertEqual(w.finished["result"]["result"], "completed")
+                self.assertIsNone(app.session.image_path)
+                self.assertIsNone(app.session.result)
+                self.assertIsNone(app.session.sim)
+                self.assertEqual(app.session.edit_log, [])
+                self.assertEqual(app.path_label.cget("text"), "선택된 파일 없음")
+                self.assertEqual(str(app.traj_btn.cget("state")), "disabled")
+                self.assertIsNone(app.view.image)                            # 큰 보기도 비움
+                self.assertEqual(app.session.params["box_mm"], 60)          # 설정은 다음 그림에도 씀
+                self.assertIn("새 사진", app.status.cget("text"))
+                self.assertIn("비웠습니다", w.detail.cget("text"))
+                self.assertFalse(app.drawing)
+                self.assertEqual(str(app.open_btn.cget("state")), "normal")
+                app.load_image(path)                                          # 새 그림을 바로 시작
+                self.assertTrue(pump(root, app, lambda: app.result is not None and app._workers == 0))
+                self.assertGreater(app.result["timing"]["stroke_count"], 0)
+                w.close()
+        finally:
+            close_quietly(app)
+
+    def test_option_off_keeps_the_photo_and_work(self):
+        root, app = make_app()
+        try:
+            with tempfile.TemporaryDirectory() as d, mock.patch("mirobot_sketch.draw_job.paths.output_dir",
+                                                                 lambda: Path(d)), \
+                    mock.patch("mirobot_sketch.draw_executor.paths.runs_dir", lambda: Path(d) / "runs"):
+                w, path = self.run_virtual_drawing(root, app, d, clear=False)
+                self.assertEqual(w.finished["result"]["result"], "completed")
+                self.assertIsNotNone(app.session.result)
+                self.assertEqual(app.path_label.cget("text"), "line.png")
+                w.close()
+        finally:
+            close_quietly(app)
+
+    def test_cancelled_drawing_keeps_the_photo_and_work(self):
+        root, app = make_app()
+        try:
+            with tempfile.TemporaryDirectory() as d, mock.patch("mirobot_sketch.draw_job.paths.output_dir",
+                                                                 lambda: Path(d)), \
+                    mock.patch("mirobot_sketch.draw_executor.paths.runs_dir", lambda: Path(d) / "runs"):
+                w, path = self.run_virtual_drawing(root, app, d, stop=True)
+                self.assertEqual(w.finished["result"]["result"], "cancelled")
+                self.assertIsNotNone(app.session.result)                      # 다시 시도할 수 있게 그대로
+                self.assertEqual(app.path_label.cget("text"), "line.png")
+                w.close()
+        finally:
+            close_quietly(app)
+
+    def test_draw_window_asks_for_an_image_when_there_is_nothing_to_draw(self):
+        root, app = make_app()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                cv2.imwrite(str(Path(d) / "line.png"), golden.synthetic_images()["line"])
+                app.load_image(Path(d) / "line.png")
+                self.assertTrue(pump(root, app, lambda: app.result is not None and app._workers == 0))
+                w = app.open_draw_window(launch_rviz=lambda *a, **k: None)
+                app.reset_for_next_drawing()
+                with mock.patch("mirobot_sketch.draw_window.messagebox.showwarning") as warn:
+                    w.begin()
+                warn.assert_called_once()
+                self.assertIsNone(w.job)                                       # 작업을 시작하지 않음
+                w.close()
+        finally:
+            close_quietly(app)
+
+
+class GuiTextAndLayoutTest(unittest.TestCase):
+    def test_rviz_buttons_are_folded_under_advanced(self):
+        root, app = make_app()
+        try:
+            root.update()
+            self.assertEqual(app.adv_frame.winfo_manager(), "")           # 처음에는 접혀 있음
+            self.assertEqual(str(app.traj_btn.cget("state")), "disabled")  # 이미지 전에는 꺼짐 (접혀 있어도 상태는 유지)
+            app._toggle_advanced()
+            root.update()
+            self.assertEqual(app.adv_frame.winfo_manager(), "pack")
+            self.assertIn("▾", app.adv_btn.cget("text"))
+            app._toggle_advanced()
+            root.update()
+            self.assertEqual(app.adv_frame.winfo_manager(), "")
+        finally:
+            close_quietly(app)
+
+    def test_draw_window_hides_the_speed_menu_for_the_real_robot(self):
+        root, app = make_app()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                p = Path(d) / "line.png"
+                cv2.imwrite(str(p), golden.synthetic_images()["line"])
+                app.load_image(p)
+                self.assertTrue(pump(root, app, lambda: app.result is not None and app._workers == 0))
+            w = app.open_draw_window(launch_rviz=lambda *a, **k: None)     # 처리 결과가 없으면 경고창이 떠서 멈춤
+            root.update()
+            self.assertEqual(w.speed_menu.winfo_manager(), "grid")          # 가상 시뮬레이션(기본): 배속 선택 가능
+            w.virtual_var.set(False)
+            w._sync_speed_menu()
+            root.update()
+            self.assertEqual(w.speed_menu.winfo_manager(), "")              # 로봇: 항상 실제 속도라 숨김
+            w.virtual_var.set(True)
+            w._sync_speed_menu()
+            root.update()
+            self.assertEqual(w.speed_menu.winfo_manager(), "grid")
+            w.close()
+        finally:
+            close_quietly(app)
+
+    def test_no_stale_or_jargon_texts_in_the_screens(self):
+        root_dir = Path(__file__).resolve().parent.parent / "mirobot_sketch"
+        forbidden = ("처리 실행", "실행기 허용", "python robot/draw_executor.py", "1mm마다 역기구학")
+        for name in ("gui.py", "draw_window.py", "stage_view.py"):
+            text = (root_dir / name).read_text(encoding="utf-8")
+            for bad in forbidden:
+                self.assertNotIn(bad, text, f"{name}: {bad}")
+        # GUI에는 명령줄 옵션 이름을 메시지로 노출하지 않음 (내보내기 완료창의 mirobot-draw 안내는 예외)
+        gui_text = (root_dir / "gui.py").read_text(encoding="utf-8")
+        self.assertNotIn("실행 시 --pending-limits", gui_text)
+
+
+class GuiAgentUxTest(unittest.TestCase):
+    def open_panel(self):
+        root, app = make_app()
+        app.toggle_agent()
+        root.update()
+        return root, app, app.agent_panel
+
+    def test_thinking_indicator_shows_until_the_first_reply_and_counts_seconds(self):
+        root, app, panel = self.open_panel()
+        try:
+            panel._show_thinking()
+            self.assertIn("생각하는 중", panel._thinking.cget("text"))
+            panel._thinking_since -= 5                                   # 5초 지난 것처럼
+            panel._tick()
+            self.assertRegex(panel._thinking.cget("text"), r"생각하는 중… [5-6]초")
+            panel._handle({"type": "tool", "name": "get_state", "args": {}})   # 첫 응답이 오면 사라짐
+            self.assertIsNone(panel._thinking)
+            self.assertEqual(len(panel._current_tools), 1)
+            panel._handle({"type": "done"})
+        finally:
+            close_quietly(app)
+
+    def test_long_tool_chip_shows_hint_and_elapsed_time(self):
+        root, app, panel = self.open_panel()
+        try:
+            panel.add_tool("simulate", {})
+            chip = panel._current_tools[0][0]
+            self.assertIn("10~30초", chip.cget("text"))
+            panel._tool_started[chip] -= 12
+            panel._tick()
+            self.assertRegex(chip.cget("text"), r"… 1[2-3]초")
+            panel.tool_done(True)
+            self.assertRegex(chip.cget("text"), r"^✓ simulate .*1[2-3]초$")
+        finally:
+            close_quietly(app)
+
+    def test_new_chat_clears_the_thinking_indicator(self):
+        root, app, panel = self.open_panel()
+        try:
+            panel._show_thinking()
+            panel.new_chat()
+            self.assertIsNone(panel._thinking)
+            panel._tick()                                                # 지워진 위젯을 건드려도 오류 없음
+        finally:
+            close_quietly(app)
+
+    def test_screen_explains_why_settings_are_locked_while_the_agent_works(self):
+        root, app, panel = self.open_panel()
+        try:
+            app.agent_busy(True)
+            pump(root, app, lambda: "잠깁니다" in app.status.cget("text"), timeout=5)
+            self.assertIn("잠깁니다", app.status.cget("text"))
+            self.assertEqual(str(app.sim_btn.cget("state")), "disabled")
+            app._set_status("x")
+            app.agent_busy(False)
+            self.assertEqual(str(app.sim_btn.cget("state")), "normal")
+        finally:
+            close_quietly(app)
+
+    def test_empty_chat_mentions_the_robot_readiness_check(self):
+        root, app, panel = self.open_panel()
+        try:
+            texts = [w.cget("text") for w in panel.chat.winfo_children()[0].winfo_children() if hasattr(w, "cget")
+                     and isinstance(w.cget("text"), str)]
+            self.assertTrue(any("로봇으로 그릴 준비" in t for t in texts), texts)
+        finally:
+            close_quietly(app)
 
 
 class GuiSmokeTest(unittest.TestCase):

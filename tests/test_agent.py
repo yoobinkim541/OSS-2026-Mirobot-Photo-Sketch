@@ -99,7 +99,7 @@ class SessionTest(SessionTestBase):
         s.update_params({"epsilon_px": 2.5})
         s.run()
         changed = {k for k in before if s.pipeline.run_counts[k] != before[k]}
-        self.assertEqual(changed, {"simplify"})
+        self.assertEqual(changed, {"simplify", "tone"})              # 윤곽이 바뀌면 (꺼진) 명암 단계 입력도 바뀜
 
     def test_line_source_is_mapped_to_edge_mode(self):
         s = self.new_session()
@@ -559,7 +559,7 @@ class ToolboxTest(SessionTestBase):
     def test_set_params_reports_recomputed_stages(self):
         tb = AgentToolbox(self.new_session())
         out = json.loads(tb.call("set_params", {"epsilon_px": 2.2})[0][0]["text"])
-        self.assertEqual(out["recomputed"], ["simplify", "edit", "paper"])
+        self.assertEqual(out["recomputed"], ["simplify", "tone", "edit", "paper"])
 
     def test_tools_are_read_only_while_robot_draws(self):
         s = self.new_session()
@@ -740,6 +740,70 @@ class OpenRouterBackendTest(SessionTestBase):
         b.send("안녕", events.append)
         self.assertEqual(events[0]["type"], "error")
         self.assertIn("API 키", events[0]["text"])
+
+
+class SessionResetTest(SessionTestBase):
+    def test_reset_clears_the_photo_and_all_work_but_keeps_settings(self):
+        s = self.new_session()
+        s.update_params({"box_mm": 70})
+        s.run_current()
+        s.simulate()
+        stroke = next(i for i, e in s.table.items() if e["kind"] == "stroke")
+        s.propose_edits([{"op": "delete", "ids": [stroke]}], apply_now=True)
+        other = next(i for i, e in s.table.items() if e["kind"] == "stroke")
+        s.propose_edits([{"op": "delete", "ids": [other]}])
+        self.assertTrue(s.edit_log and s.history and s.proposals)
+        s.reset()
+        self.assertIsNone(s.image_path)
+        self.assertIsNone(s.color)
+        self.assertIsNone(s.result)
+        self.assertIsNone(s.sim)
+        self.assertEqual((s.table, s.history, s.edit_log, s.proposals, s.pending), ({}, [], [], {}, None))
+        self.assertEqual(s.book, {"removed": [], "added": [], "trash": []})
+        self.assertEqual(s._inputs_cache, {})
+        self.assertEqual(s.params["box_mm"], 70)                       # 설정은 다음 그림에도 씀
+        st = s.state()
+        self.assertIsNone(st["image"])
+        self.assertNotIn("result", st)
+        with self.assertRaises(SessionError):
+            s.run()                                                    # 이미지가 없으면 처리할 수 없음
+        with self.assertRaises(SessionError):
+            s.simulate()
+
+    def test_a_new_image_works_after_reset(self):
+        s = self.new_session()
+        s.reset()
+        s.set_image(self.img)
+        r = s.run_current()
+        self.assertGreater(r["timing"]["stroke_count"], 0)
+        self.assertEqual(sorted(s.table)[0], 1)                         # 번호가 처음부터 다시 매겨짐
+        self.assertEqual(s.edit_log, [])
+
+
+class DefaultBackendTest(unittest.TestCase):
+    def pick(self, settings, claude=False, codex=False, key=False):
+        with mock.patch.object(bk.ClaudeCodeBackend, "available", staticmethod(lambda: "claude" if claude else None)),              mock.patch.object(bk.CodexBackend, "available", staticmethod(lambda: "codex" if codex else None)),              mock.patch.object(bk, "get_openrouter_key", lambda: "sk-test" if key else ""):
+            return bk.default_backend_name(settings)
+
+    def test_saved_choice_is_kept_when_it_is_usable(self):
+        self.assertEqual(self.pick({"backend": "Codex"}, claude=True, codex=True), "Codex")
+        self.assertEqual(self.pick({"backend": "OpenRouter"}, claude=True, key=True), "OpenRouter")
+
+    def test_first_run_or_unusable_choice_falls_back_to_a_usable_backend(self):
+        self.assertEqual(self.pick({}, codex=True), "Codex")                          # 처음: 설치된 것
+        self.assertEqual(self.pick({}, claude=True, codex=True), "Claude Code")       # 둘 다면 기본 순서
+        self.assertEqual(self.pick({"backend": "Claude Code"}, key=True), "OpenRouter")  # 저장한 CLI가 지워짐
+        self.assertEqual(self.pick({}, key=True), "OpenRouter")
+
+    def test_nothing_ready_keeps_the_saved_or_default_name(self):
+        self.assertEqual(self.pick({}), "Claude Code")
+        self.assertEqual(self.pick({"backend": "Codex"}), "Codex")
+        self.assertEqual(self.pick({"backend": "없는방식"}), "Claude Code")
+
+    def test_settings_file_is_not_rewritten_by_the_fallback(self):
+        settings = {"backend": "Claude Code"}
+        self.pick(settings, key=True)
+        self.assertEqual(settings, {"backend": "Claude Code"})
 
 
 class CliEventParsingTest(unittest.TestCase):

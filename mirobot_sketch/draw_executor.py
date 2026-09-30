@@ -129,6 +129,19 @@ class Planner:
         a, b, c = self.abc
         return f"M20 G90 G01 X{x:.3f} Y{y:.3f} Z{z:.3f} A{a:.3f} B{b:.3f} C{c:.3f} F{feed:.0f}"
 
+    def return_to_origin(self):
+        """그림을 다 그린 뒤 펜을 처음 상태(종이 중심, 펜 끝이 종이에 살짝 닿음)로 되돌리는 명령들.
+        plan()이 끝나는 자세(종이 중심 펜업)에서 이어 보낸다. 다음 그림이 같은 시작 자세를 가정할 수 있게 하기 위한 것.
+        공중 모드는 종이에 닿지 않고 처음 자세도 펜업 높이이므로 없음."""
+        if self.air:
+            return []
+        f = self.feeds
+        cmds = []
+        if self.two_stage:
+            cmds.append((self.gcode(self.pose_slow_zone(0, 0), f["travel"]), "return origin descend"))
+        cmds.append((self.gcode(self.pose(0, 0, True), f["approach"]), "return origin"))
+        return cmds
+
     def plan(self, strokes):
         """[(gcode, 설명)] 리스트. 종이 중심 펜업에서 시작해 종이 중심 펜업으로 끝납니다."""
         f = self.feeds
@@ -391,7 +404,9 @@ def write_run_record(meta, result, cfg):
     run_dir = paths.runs_dir()
     run_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    run = {"started_local": stamp, **meta, "config_snapshot": cfg, **result, "visual_verification": "pending"}
+    # 공개 저장소에 올려도 사용자 폴더 이름이 남지 않게 경로를 정리해서 기록
+    run = paths.scrub_paths({"started_local": stamp, **meta, "config_snapshot": cfg, **result,
+                             "visual_verification": "pending"})
     path = run_dir / f"run-{stamp}.json"
     with open(path, "w", encoding="utf-8") as f:
         json.dump(run, f, ensure_ascii=False, indent=1)

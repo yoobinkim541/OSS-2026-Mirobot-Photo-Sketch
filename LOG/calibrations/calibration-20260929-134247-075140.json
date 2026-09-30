@@ -1,6 +1,6 @@
 {
   "created_local": "2026-09-29T13:42:47+09:00",
-  "config_path": "C:\\Users\\asus\\Desktop\\Mirobot\\robot\\drawing_config.json",
+  "config_path": "robot/drawing_config.json",
   "result": "aborted",
   "reason": "contact capture cancelled",
   "samples": [],

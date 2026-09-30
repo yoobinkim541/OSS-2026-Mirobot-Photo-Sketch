@@ -1,6 +1,6 @@
 {
  "started_local": "20260929-113130",
- "strokes_json": "C:\\Users\\asus\\Desktop\\Mirobot\\out\\run_strokes_20260929-113054.json",
+ "strokes_json": "out/run_strokes_20260929-113054.json",
  "stroke_count": 389,
  "command_count": 2989,
  "air_mode": false,
@@ -43,7 +43,7 @@
  "virtual": true,
  "virtual_speed": 500.0,
  "run_id": "20260929-113054",
- "trajectory": "C:\\Users\\asus\\Desktop\\Mirobot\\out\\live_traj_20260929-113054.json",
+ "trajectory": "out/live_traj_20260929-113054.json",
  "config_snapshot": {
   "_about": "robot/draw_executor.py 설정. 값을 바꾸면 LOG에 이유와 결과를 기록할 것.",
   "port": "COM9",

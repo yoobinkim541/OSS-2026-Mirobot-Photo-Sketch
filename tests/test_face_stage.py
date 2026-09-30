@@ -108,7 +108,8 @@ class FaceStageWiringTest(unittest.TestCase):
         ids = list(stages.PIPELINE_IDS)
         self.assertEqual(ids.index("face"), ids.index("merge") + 1)
         self.assertEqual(ids.index("simplify"), ids.index("face") + 1)
-        self.assertTrue(stages.stage_title("paper").startswith("⑩"))
+        self.assertEqual(ids.index("tone"), ids.index("simplify") + 1)
+        self.assertTrue(stages.stage_title("paper").startswith("⑪"))
         outs = {"simplify": {"discarded_trace": [], "discarded_dedupe": [],
                              "discarded_face": [(FAR, "얼굴 세밀 처리로 교체")]}}
         self.assertEqual(len(stages.candidates_of(outs)), 1)

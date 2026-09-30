@@ -43,6 +43,7 @@
 - [2026-09-29 — 펜 올림 높이 10 mm, 접촉 직전만 느리게](./2026-09-29-pen-up-10mm.md)
 - [2026-09-29 — 앱 안 에이전트의 로봇으로 그리기 지원 확인·보강](./2026-09-29-agent-robot-flow.md)
 - [2026-09-29 — 로봇 시뮬레이션 중 앱이 멈추는 문제 수정](./2026-09-29-simulation-freeze.md)
+- [2026-09-29 — UX·속도 개선과 명암 빗금 (전체 검사 후속)](./2026-09-29-ux-speed-hatching.md)
 
 ## 주요 프로젝트 파일
 
@@ -51,3 +52,6 @@
 - [프로젝트 설계 문서](../docs/superpowers/specs/2026-09-23-mirobot-photo-sketch-design.md)
 - [드로잉 실행기 설정](../robot/drawing_config.json)
 - 실물 실행 기록: runs/ (robot/draw_executor.py --execute 가 자동 생성)
+
+- [2026-09-29 — 그림이 끝나면 펜을 처음 위치로 되돌리고 사진·작업을 비움](./2026-09-29-next-drawing.md)
+- [2026-09-30 — 기록에서 사용자 폴더 경로 지우기](./2026-09-30-portable-paths.md)

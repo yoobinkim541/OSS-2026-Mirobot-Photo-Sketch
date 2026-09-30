@@ -1,6 +1,6 @@
 {
   "created_local": "2026-09-29T18:08:58+09:00",
-  "config_path": "C:\\Users\\asus\\Desktop\\Mirobot\\robot\\drawing_config.json",
+  "config_path": "robot/drawing_config.json",
   "result": "needs_paper_adjustment",
   "center_tcp_mm": {
     "x": 183.05,

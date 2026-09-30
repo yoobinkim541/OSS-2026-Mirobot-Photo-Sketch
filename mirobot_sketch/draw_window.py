@@ -53,18 +53,25 @@ class DrawWindow(ctk.CTkToplevel):
         opts.pack(fill="x", padx=16, pady=8)
         self.virtual_var = ctk.BooleanVar(value=True)
         ctk.CTkRadioButton(opts, text=f"로봇 ({cfg['port']})", variable=self.virtual_var, value=False,
-                           font=font(12)).grid(row=0, column=0, sticky="w")
+                           font=font(12), command=self._sync_speed_menu).grid(row=0, column=0, sticky="w")
         ctk.CTkRadioButton(opts, text="가상 시뮬레이션 (로봇 없이)", variable=self.virtual_var, value=True,
-                           font=font(12)).grid(row=0, column=1, sticky="w", padx=12)
+                           font=font(12), command=self._sync_speed_menu).grid(row=0, column=1, sticky="w", padx=12)
         self.speed_var = ctk.StringVar(value="20×")
-        ctk.CTkOptionMenu(opts, values=SPEEDS, variable=self.speed_var, width=80, font=font(12)
-                          ).grid(row=0, column=2, sticky="w")
+        # 배속은 가상 시뮬레이션에만 적용되므로 로봇을 고르면 숨김 (실제 로봇은 항상 실제 속도)
+        self.speed_menu = ctk.CTkOptionMenu(opts, values=SPEEDS, variable=self.speed_var, width=80, font=font(12))
+        self.speed_menu.grid(row=0, column=2, sticky="w")
         self.air_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(opts, text="공중 모드 (펜을 대지 않고 경로만)", variable=self.air_var, font=font(12)
                         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=4)
         self.pending_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(opts, text="넓은 범위(공중 확인용)", variable=self.pending_var, font=font(12)
                         ).grid(row=1, column=2, sticky="w", pady=4)
+        self.return_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(opts, text="끝나면 펜을 처음 위치(종이 중심)로 되돌리기", variable=self.return_var, font=font(12)
+                        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=4)
+        self.clear_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(opts, text="그림이 끝나면 사진·작업 내용 비우기 (새 그림을 바로 시작)", variable=self.clear_var,
+                        font=font(12)).grid(row=5, column=0, columnspan=3, sticky="w", pady=4)
         self.recalibrate_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(opts, text="종이·펜 위치 변경: 다시 보정", variable=self.recalibrate_var,
                         font=font(12)).grid(row=2, column=0, columnspan=3, sticky="w", pady=4)
@@ -93,9 +100,18 @@ class DrawWindow(ctk.CTkToplevel):
                                        state="disabled")
         self.start_btn.pack(side="right", padx=8)
 
+    def _sync_speed_menu(self):
+        if self.virtual_var.get():
+            self.speed_menu.grid()
+        else:
+            self.speed_menu.grid_remove()
+
     # ---------------------------------------------------------------- 버튼
     def begin(self):
         """①~④: 사전 검사 → 연결·호밍 → 시작 위치 → 최종 확인에서 멈춰 기다림."""
+        if not self.session.result:
+            messagebox.showwarning("알림", "먼저 이미지를 열어 처리해 주세요.", parent=self)
+            return
         self.finished = None
         self.failure_message = ""
         self.check_var.set(False)
@@ -116,7 +132,8 @@ class DrawWindow(ctk.CTkToplevel):
         self.stop_btn.configure(state="normal", text="취소")
         self.job.start(virtual=bool(self.virtual_var.get()), virtual_speed=speed,
                        pending=bool(self.pending_var.get()),
-                       recalibrate=bool(self.recalibrate_var.get()))
+                       recalibrate=bool(self.recalibrate_var.get()),
+                       return_to_origin=bool(self.return_var.get()))
 
     def _on_check(self):
         ready = self.job is not None and self.job.state == "confirm" and self.check_var.get()
@@ -210,13 +227,26 @@ class DrawWindow(ctk.CTkToplevel):
             self.finished = d
             self.stop_btn.configure(state="disabled")
             r = d["result"]["result"]
+            returned = d["result"].get("returned_to_origin")      # True 돌아옴 / False 못 돌아옴 / None 해당 없음
+            done_text = "완료했습니다" + {True: ". 펜이 처음 위치(종이 중심)로 돌아왔습니다.",
+                                        False: " — 다만 펜이 처음 위치로 돌아가지 못했습니다.",
+                                        None: ""}[returned]
             self.todo.configure(text=self.failure_message if r in ("not_started", "error") and self.failure_message
-                                else {"completed": "완료했습니다", "stopped_by_user": "멈췄습니다 (자동 복구 없음)",
+                                else {"completed": done_text, "stopped_by_user": "멈췄습니다 (자동 복구 없음)",
                                       "cancelled": "취소했습니다"}.get(r, f"끝: {r}"))
             note = getattr(self, "rviz_note", "")
+            detail = ""
             if d.get("record_path"):
-                self.detail.configure(text=f"실행 기록: {d['record_path']}" + (f"\n{note}" if note else ""))
+                detail = f"실행 기록: {d['record_path']}" + (f"\n{note}" if note else "")
+            if returned is False:
+                detail += f"\n{d['result'].get('return_error', '')} 다음 그림 전에 호밍하거나 펜 위치를 확인하세요."
             self.start_btn.configure(state="disabled")
             self.check_box.configure(state="disabled")
             self.app.set_drawing(False)
             self.begin_btn.configure(state="normal")
+            # 끝까지 그렸고 펜도 처음 자리로 돌아왔으면 사진·작업을 비워 새 그림을 바로 시작할 수 있게 (옵션)
+            if r == "completed" and returned is not False and self.clear_var.get():
+                self.app.reset_for_next_drawing()
+                detail += "\n사진과 작업 내용을 비웠습니다. 종이를 바꾸고 새 사진을 열어 주세요."
+            if detail:
+                self.detail.configure(text=detail.strip())
