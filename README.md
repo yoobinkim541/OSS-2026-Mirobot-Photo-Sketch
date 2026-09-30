@@ -1,11 +1,4 @@
-# Open Sourse Software - (2026-2)
-
-- [O] Make a repositories
-- [O] write README.md
-
----
-
-## 텀프로젝트: Mirobot Photo Sketch
+# Mirobot Photo Sketch
 
 <img src="assets/app_icon_256.png" width="128" alt="앱 아이콘: 로봇 팔이 이젤의 캔버스에 붓으로 그림을 그리는 모습">
 
