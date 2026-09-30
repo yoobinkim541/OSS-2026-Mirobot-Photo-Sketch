@@ -54,4 +54,4 @@
 - 실물 실행 기록: runs/ (robot/draw_executor.py --execute 가 자동 생성)
 
 - [2026-09-29 — 그림이 끝나면 펜을 처음 위치로 되돌리고 사진·작업을 비움](./2026-09-29-next-drawing.md)
-- [2026-09-30 — 기록에서 사용자 폴더 경로 지우기](./2026-09-30-portable-paths.md)
+- [2026-09-30 — 기록에서 사용자 폴더 경로 지우기](./2026-09-30-portable-paths.md)- [2026-09-30 — README 한·영 분리와 설계 문서(ARCHITECTURE) 추가](./2026-09-30-readme-architecture.md)

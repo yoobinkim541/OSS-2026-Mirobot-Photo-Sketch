@@ -1,53 +1,154 @@
-# Open Sourse Software - (2026-2)
+# Mirobot Photo Sketch
 
-- [O] Make a repositories
-- [O] write README.md
+**한국어** | [English](README.en.md)
 
----
-
-## 텀프로젝트: Mirobot Photo Sketch
-
-<img src="assets/app_icon_256.png" width="128" alt="앱 아이콘: 로봇 팔이 이젤의 캔버스에 붓으로 그림을 그리는 모습">
+<img src="assets/app_icon_256.png" width="96" alt="앱 아이콘: 로봇 팔이 이젤의 캔버스에 붓으로 그림을 그리는 모습">
 
 [![CI](https://github.com/yoobinkim541/OSS-2026-Mirobot-Photo-Sketch/actions/workflows/ci.yml/badge.svg)](https://github.com/yoobinkim541/OSS-2026-Mirobot-Photo-Sketch/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/yoobinkim541/OSS-2026-Mirobot-Photo-Sketch)](https://github.com/yoobinkim541/OSS-2026-Mirobot-Photo-Sketch/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-사진을 입력하면 OpenCV로 선 경로를 만들고, WLKATA Mirobot 로봇팔이 벽에 붙인 A4 용지에 펜으로 그리는 오픈소스프로그래밍 텀프로젝트입니다.
+사진을 넣으면 OpenCV로 선 경로를 만들고, [WLKATA Mirobot](https://www.wlkata.com/) 로봇팔이 벽에 붙인 A4 용지에 펜으로 그려 주는 오픈소스 프로젝트입니다. 로봇이 없어도 선 추출, 3D 시뮬레이션, 가상 시뮬레이션을 모두 써 볼 수 있습니다.
+
+<p align="center"><img src="assets/screenshots/ui-paper.png" width="820" alt="Mirobot Sketch 화면: 사진에서 뽑은 선 경로를 A4 용지 위에 배치한 모습"></p>
 
 ```
-사진 ─▶ CV/make_strokes.py (또는 gui_sketch.py) ─▶ 획 JSON (종이 mm)
-     ─▶ robot/draw_executor.py (dry-run → --execute) ─▶ Mirobot 펜 드로잉
+사진 ─▶ 선 추출 파이프라인 ─▶ 획(종이 mm) ─▶ 검증(허용 범위·관절 시뮬레이션) ─▶ Mirobot 펜 드로잉
+        (OpenCV 등, 11단계)                                                     (Windows, USB 시리얼)
+                                                           └─▶ (선택) RViz 3D 실시간 따라가기 (WSL2 + ROS 2)
 ```
 
-### 설치
+> 앱의 화면 문구는 현재 **한국어만** 지원합니다. 설계와 기술 선택은 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)에 정리했습니다.
 
-**Windows 사용자 (파이썬 없이):** [Releases](https://github.com/yoobinkim541/OSS-2026-Mirobot-Photo-Sketch/releases)에서 받습니다.
-- `MirobotSketch-Setup-X.Y.Z.exe` (추천): 설치하면 시작 메뉴와 바탕화면(선택)에 **Mirobot Sketch** 바로가기가 생기고, "앱 및 기능"에서 제거할 수 있습니다. 관리자 권한은 필요 없습니다.
-- `MirobotSketch-vX.Y.Z-windows-x64.zip`: 설치 없이 압축을 풀어 `MirobotSketch.exe`(GUI)나 `mirobot.exe`(명령줄: `mirobot draw …`, `mirobot strokes …`, `mirobot sim …`)를 실행합니다.
+## 목차
 
-코드 서명이 없어서 처음 실행할 때 Windows SmartScreen이 "알 수 없는 게시자" 경고를 띄울 수 있습니다. **추가 정보 → 실행**을 누르면 됩니다.
+- [주요 기능](#주요-기능)
+- [설치](#설치)
+- [왜 Ubuntu 22.04 + ROS 2 Humble인가](#왜-ubuntu-2204--ros-2-humble인가)
+- [사용법](#사용법)
+- [에이전트 패널](#에이전트-패널-대화로-편집)
+- [3D 시뮬레이션](#3d-시뮬레이션-로봇-없이-확인)
+- [기술 스택과 설계 문서](#기술-스택과-설계-문서)
+- [배포 (CI/CD)](#배포-cicd)
+- [테스트 · 폴더 · 라이선스](#테스트)
+
+## 주요 기능
+
+- **사진 → 선 경로:** 실사 사진 / 컬러 일러스트 / 흑백 만화별 추천 설정, 얼굴 인식 기반 구도·세밀 처리, 배경 제거(선택), 명암 빗금(선택)
+- **단계별 화면:** 11단계를 눌러 보며 값을 바꾸면 바뀐 단계부터 자동으로 다시 계산
+- **로봇으로 그리기:** 사전 검사 → 연결·호밍 → 시작 위치 확인 → 사람의 최종 확인 → 그리는 중 → 끝의 안전 절차, 로봇 없는 가상 시뮬레이션
+- **3D 시뮬레이션:** 관절 한계 검사, 그리는 동안 RViz가 로봇 진행을 따라감 (선택)
+- **에이전트:** 대화로 설정 변경·획 편집 제안 (로봇을 움직이는 도구는 없음)
+
+<table>
+<tr>
+<td><img src="assets/screenshots/ui-source.png" alt="원본 단계" width="400"></td>
+<td><img src="assets/screenshots/ui-hatch.png" alt="명암 빗금을 켠 결과" width="400"></td>
+</tr>
+<tr>
+<td align="center">단계 띠와 큰 보기</td>
+<td align="center">명암 빗금 2단계</td>
+</tr>
+<tr>
+<td><img src="assets/screenshots/ui-draw-window.png" alt="로봇으로 그리기 창" width="400"></td>
+<td><img src="assets/screenshots/ui-rviz.png" alt="RViz 3D 화면" width="400"></td>
+</tr>
+<tr>
+<td align="center">로봇으로 그리기 창</td>
+<td align="center">RViz 3D 따라가기</td>
+</tr>
+</table>
+
+예시 사진은 NASA 공개 도메인 사진입니다([출처](THIRD_PARTY_NOTICES.md)).
+
+## 설치
+
+| | Windows 10/11 | 로봇 | RViz 3D (선택) |
+|---|---|---|---|
+| 필요한 것 | 64비트 Windows (.exe 설치는 파이썬 불필요) | WLKATA Mirobot + USB(CH340) 케이블, A4 용지, 펜 | Windows 11 + WSL2 (또는 Ubuntu 22.04) |
+
+로봇 없이도 선 추출·시뮬레이션·가상 시뮬레이션은 모두 됩니다. RViz 3D는 없어도 됩니다.
+
+### 방법 1. 설치 프로그램 (.exe, 추천)
+
+[Releases](https://github.com/yoobinkim541/OSS-2026-Mirobot-Photo-Sketch/releases)에서 `MirobotSketch-Setup-X.Y.Z.exe`를 받아 실행합니다.
+
+- 시작 메뉴와 바탕화면(선택)에 **Mirobot Sketch** 바로가기가 생기고 "앱 및 기능"에서 제거할 수 있습니다. 관리자 권한은 필요 없습니다.
+- 설치 중 **"RViz 3D 환경도 설치"** 를 체크하면 설치 후 3D 환경 설치 도우미가 열립니다(약 400MB 다운로드).
+- 코드 서명이 없어 처음 실행할 때 Windows SmartScreen이 "알 수 없는 게시자" 경고를 띄울 수 있습니다. **추가 정보 → 실행**을 누르면 됩니다.
 
 설정 파일은 처음 실행할 때 `%APPDATA%\MirobotSketch\drawing_config.json`에 만들어지고, 실행 기록은 같은 폴더의 `runs\`에 쌓입니다. 이 파일에서 포트와 보정값을 고칩니다. 배경 제거(rembg)는 용량 문제로 .exe에 넣지 않았습니다.
 
-**개발자 (파이썬 3.10 이상):**
+### 방법 2. zip (설치 없이)
+
+같은 릴리스의 `MirobotSketch-vX.Y.Z-windows-x64.zip`을 풀어 `MirobotSketch.exe`(GUI)나 `mirobot.exe`(명령줄: `mirobot draw …`, `mirobot strokes …`, `mirobot sim …`, `mirobot setup-rviz …`)를 실행합니다.
+
+### 방법 3. 개발자 설치 (파이썬 3.10 이상)
 
 ```bash
+git clone https://github.com/yoobinkim541/OSS-2026-Mirobot-Photo-Sketch.git
+cd OSS-2026-Mirobot-Photo-Sketch
 pip install -e .
 ```
 
-`mirobot-sketch`(GUI), `mirobot-strokes`, `mirobot-draw`, `mirobot-sim` 명령이 생깁니다. 저장소 코드를 바로가기로 실행하려면 아래 스크립트를 한 번 실행합니다. 바탕화면과 시작 메뉴에 바로가기가 생깁니다(콘솔 창 없음, `-Remove`로 삭제).
+`mirobot-sketch`(GUI), `mirobot-strokes`, `mirobot-draw`, `mirobot-sim` 명령이 생깁니다. 저장소에서 실행하면 `robot/drawing_config.json`, `LOG/runs/`, `out/`을 그대로 씁니다. 필요한 기능만 추가로 설치합니다.
+
+| 추가 기능 | 명령 |
+|---|---|
+| 배경 제거 (첫 실행 때 모델 약 170MB 다운로드) | `pip install -e ".[rembg]"` |
+| 에이전트 패널 (MCP, keyring, requests) | `pip install -e ".[agent]"` |
+| .exe 빌드 | `pip install -e ".[build]"` 후 `pyinstaller packaging/mirobot_sketch.spec --noconfirm` |
+
+저장소 코드를 바로가기로 실행하려면 한 번만 실행합니다(바탕화면과 시작 메뉴에 생김, 콘솔 창 없음, `-Remove`로 삭제).
 
 ```bash
 powershell -ExecutionPolicy Bypass -File packaging/create_shortcuts.ps1
 ```
- 저장소에서 실행하면 `robot/drawing_config.json`, `LOG/runs/`, `out/`을 그대로 씁니다. 추가 기능은 필요할 때 설치합니다.
-- 배경 제거: `pip install -e ".[rembg]"` (첫 실행 때 모델 약 170MB를 내려받음)
-- .exe 빌드: `pip install -e ".[build]"` 후 `pyinstaller packaging/mirobot_sketch.spec --noconfirm`
 
-### 사용법
+### RViz 3D 환경 설치 (선택: WSL2 + ROS 2 Humble + Mirobot 모델)
 
-#### 1. 사진 → 획 JSON
+3D 보기와 실시간 따라가기에만 필요합니다. 아래 중 편한 방법 하나를 고르세요.
+
+**A. 설치 도우미 (추천, 버튼 한 번)** — 미리 만든 이미지(약 400MB, 설치 후 약 2GB)를 받아 `MirobotSketch-ROS` 배포판으로 가져옵니다(약 2분 + 다운로드). 기존 WSL 배포판은 건드리지 않습니다.
+
+- **GUI:** "③ 실행"의 `고급` → [RViz 3D 환경 설치·확인…] → [설치]. 끊겨도 [이어서 설치]로 받던 곳부터 이어받습니다.
+- **명령줄:** `mirobot setup-rviz --check | --install | --uninstall | --manual | --wsl`
+- **설치 프로그램:** "RViz 3D 환경도 설치" 체크. 앱을 지울 때 배포판도 지울지 묻습니다.
+- **WSL이 없는 PC:** [WSL 설치(관리자)] → Windows 승인 → 재부팅 → [설치]. 관리자 권한은 이 한 번뿐이고 비밀번호는 받지 않습니다.
+
+**B. 셸 스크립트로 직접 설치** — Ubuntu 22.04(WSL2 또는 리눅스)의 터미널에서 실행합니다.
+
+```bash
+git clone https://github.com/yoobinkim541/OSS-2026-Mirobot-Photo-Sketch.git
+cd OSS-2026-Mirobot-Photo-Sketch
+bash packaging/wsl/setup_ros_env.sh
+```
+
+ROS 2 Humble(`ros-base`, `rviz2`, `robot_state_publisher`)과 WLKATA 모델(`~/mirobot_ws`)을 설치하고, 이미 끝난 단계는 건너뛰며, 마지막 줄에 `SETUP_OK`를 출력합니다. 필요한 곳에서만 `sudo` 비밀번호를 묻습니다. Ubuntu 22.04(jammy)가 아니면 종료합니다. 앱은 `/opt/ros/humble`과 `~/mirobot_ws`가 있는 WSL 배포판을 자동으로 찾고, 다른 배포판을 쓰려면 환경 변수 `MIROBOT_WSL_DISTRO`를 지정합니다.
+
+**C. 설치 도우미의 예비 경로** — 이미지를 받을 수 없을 때 [직접 설치(예비)]: Ubuntu 공식 22.04 WSL 루트 파일(약 230MB, SHA256 확인)을 받아 전용 배포판 `MirobotSketch-ROS`로 가져온 뒤 그 안에서 `setup_ros_env.sh --image`를 실행합니다. 사용자의 기존 배포판은 건드리지 않고, 비밀번호·추가 관리자 승인이 없습니다.
+
+손으로 재생하려면 궤적을 내보낸 뒤 WSL2에서 실행합니다.
+
+```bash
+mirobot-sim out/photo.json --export out/photo_traj.json
+wsl -d MirobotSketch-ROS -- bash -lc "cd /mnt/c/<저장소 경로> && bash sim/run_rviz.sh out/photo_traj.json 10"
+```
+
+## 왜 Ubuntu 22.04 + ROS 2 Humble인가
+
+RViz 3D 환경을 위한 조합이며, **로봇을 움직이는 데는 필요 없습니다**(실물 제어는 Windows에서 USB 시리얼 G-code로 직접 합니다).
+
+- **ROS 2 Humble은 Ubuntu 22.04(jammy)용 LTS 배포판**이라 22.04에서 바이너리 패키지로 바로 설치됩니다. 설치 스크립트도 jammy가 아니면 거부합니다.
+- 3D 보기에는 `ros-base` + `rviz2` + `robot_state_publisher` + WLKATA 모델 패키지 하나면 충분해 전체 데스크톱 설치보다 훨씬 작습니다.
+- WLKATA 공식 ROS 2 저장소를 커밋 `c0a7ad4`에 고정해 이 조합에서 빌드되는 것을 확인했습니다. 다른 조합(예: Ubuntu 24.04 + Jazzy)은 확인하지 않았습니다.
+- 같은 스크립트를 GitHub Actions의 `ubuntu:22.04` 컨테이너에서 돌려 WSL로 가져올 수 있는 이미지를 릴리스에 올립니다.
+
+자세한 이유와 Windows ↔ WSL 연결 방식은 [설계 문서](docs/ARCHITECTURE.md#6-왜-ubuntu-2204--ros-2-humble인가)를 보세요.
+
+## 사용법
+
+### 1. 사진 → 획 JSON
 
 GUI (추천):
 
@@ -80,7 +181,7 @@ CustomTkinter로 만든 카드형 화면이며 라이트/다크 모드를 지원
 mirobot-strokes photo.jpg --type photo --out out/photo
 ```
 
-- `--type photo|illustration|manga` : 이미지 종류별 추천 설정 (`CV/presets.py`)
+- `--type photo|illustration|manga` : 이미지 종류별 추천 설정 (`mirobot_sketch/presets.py`)
 - `--detail low|medium|high` : 상세도. 낮출수록 획 수와 그리는 시간이 줄어듭니다.
 - `--rembg` / `--no-rembg` : 배경 제거 (결과는 `out/cache/`에 저장해 재사용)
 - `--median 11` : 만화 스크린톤(망점)처럼 작은 무늬를 지웁니다.
@@ -91,7 +192,7 @@ mirobot-strokes photo.jpg --type photo --out out/photo
 
 `out/photo.json`과 비교 이미지 `out/photo_preview.png`(입력 / 선 후보 / 획 / 그리는 순서)가 만들어집니다.
 
-#### 2. 획 JSON → 로봇
+### 2. 획 JSON → 로봇
 
 ```bash
 mirobot-draw out/photo.json
@@ -134,7 +235,9 @@ python -m mirobot_sketch.calibration --execute    # 실물 캘리브레이션
 
 다섯 접촉점으로 계산한 최대 평면 잔차가 1 mm 이하여야 설정을 갱신합니다. 통과하면 중심 TCP, 평면 보정값, 확인된 정사각형 한계가 `robot/drawing_config.json`에 저장되고 전체 측정값은 `LOG/calibrations/`에 남습니다. 편차가 크거나 사용자가 중단하면 기존 설정을 유지합니다. 로봇 포트나 설치 위치가 바뀌면 다시 캘리브레이션하세요.
 
-### 에이전트 패널 (대화로 편집)
+## 에이전트 패널 (대화로 편집)
+
+<p align="center"><img src="assets/screenshots/ui-agent.png" width="640" alt="에이전트 패널을 연 화면"></p>
 
 GUI 오른쪽 위 **✦ 에이전트** 버튼을 누르면 채팅 패널이 열립니다. "획이 너무 많아, 15분 안에 끝나게 해줘", "배경 잡음을 지워줘", "머리카락 윤곽을 더 살려줘"처럼 말하면, 에이전트가 원본과 단계별 결과를 직접 보고 설정을 바꾸거나 편집을 **제안**합니다. 제안은 편집 단계에 빨강·초록과 번호로 표시되고, "5번 빼고 적용해"처럼 번호로 지시하면 됩니다. 바뀐 내용은 왼쪽 설정과 미리보기에 바로 반영됩니다.
 
@@ -148,7 +251,7 @@ GUI 오른쪽 위 **✦ 에이전트** 버튼을 누르면 채팅 패널이 열�
 
 개발 환경에서 에이전트를 쓰려면 `pip install -e ".[agent]"`로 필요한 패키지(mcp, keyring, requests)를 설치합니다.
 
-### 3D 시뮬레이션 (로봇 없이 확인)
+## 3D 시뮬레이션 (로봇 없이 확인)
 
 실행기와 같은 경로로 Mirobot 기구학(IK)을 풀어 관절 한계(Soft limit)를 넘는지 검사합니다.
 
@@ -157,28 +260,26 @@ mirobot-sim out/photo.json --plot out/joints.png --gif out/sim.gif
 mirobot-sim --reach-map out/reach_map.png
 ```
 
-### RViz 3D 환경 설치 (WSL2 + ROS 2 Humble + Mirobot 모델)
+RViz 3D 환경이 있으면 GUI의 `고급` → [RViz 3D로 보기]로 로봇팔 모델이 궤적을 재생하는 것을 볼 수 있고, 그리는 동안에는 명령 응답을 따라갑니다. 설치는 [위 절차](#rviz-3d-환경-설치-선택-wsl2--ros-2-humble--mirobot-모델)를 따르세요.
 
-RViz 3D 보기와 실시간 따라가기는 WSL2에 ROS 2 Humble과 WLKATA Mirobot 모델이 있어야 합니다. 설치 도우미가 알아서 갖춥니다.
+## 기술 스택과 설계 문서
 
-- **GUI:** "③ 실행"의 [RViz 3D 환경 설치·확인…] → [설치]. 미리 만든 이미지(약 400MB, 설치 후 약 2GB)를 받아 `MirobotSketch-ROS` 배포판으로 가져옵니다(약 2분 + 다운로드). 끊겨도 [이어서 설치]로 받던 곳부터 이어받습니다.
-- **명령줄:** `mirobot setup-rviz --check | --install | --uninstall | --manual | --wsl`
-- **설치 프로그램:** "RViz 3D 환경도 설치"를 체크하면 설치 후 도우미가 열립니다. 앱을 지울 때 배포판도 지울지 묻습니다.
-- **WSL이 없는 PC:** [WSL 설치(관리자)] → Windows 승인 → 재부팅 → [설치]. 관리자 권한은 이 한 번뿐이고 비밀번호는 받지 않습니다.
-- **예비 경로:** 이미지를 받을 수 없으면 [직접 설치(예비)]: Ubuntu 공식 22.04 WSL 루트 파일(약 230MB, SHA256 확인)을 받아 전용 배포판 `MirobotSketch-ROS`로 가져온 뒤, 새 콘솔에서 그 안의 root로 `packaging/wsl/setup_ros_env.sh --image`를 실행합니다. 이미 있으면 스크립트만 다시 실행합니다(끝난 단계는 건너뜀). 사용자의 기존 배포판은 건드리지 않고, 비밀번호·추가 관리자 승인이 없습니다.
-- 기존 WSL 배포판은 건드리지 않습니다. 다른 배포판을 쓰려면 환경 변수 `MIROBOT_WSL_DISTRO`.
+| 영역 | 사용한 것 |
+|---|---|
+| 영상 처리 | [OpenCV](https://opencv.org/) (Canny, 미디언, 형태학, `approxPolyDP`, YuNet 얼굴 검출), [scikit-image](https://scikit-image.org/) (`skeletonize`), [NumPy](https://numpy.org/), [SciPy](https://scipy.org/) |
+| 배경 제거 | [rembg](https://github.com/danielgatis/rembg) (선택) |
+| UI | [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter) |
+| 로봇 통신 | [pyserial](https://github.com/pyserial/pyserial) — USB 시리얼 G-code |
+| 3D 시각화 | [ROS 2 Humble](https://docs.ros.org/en/humble/) + [RViz](https://github.com/ros2/rviz) + WLKATA 공식 URDF (WSL2 Ubuntu 22.04) |
+| 에이전트 | [MCP](https://modelcontextprotocol.io/), Claude Code / Codex CLI / OpenRouter |
+| 패키징·배포 | [PyInstaller](https://pyinstaller.org/), [Inno Setup](https://jrsoftware.org/isinfo.php), GitHub Actions |
 
-손으로 재생하려면 궤적을 내보낸 뒤 WSL2에서 실행합니다.
+각 단계에 무엇을 왜 골랐는지, 사용한 OpenCV 함수, Windows ↔ WSL2 브리지 설계, 패키징은 **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** 에 있습니다.
 
-```bash
-mirobot-sim out/photo.json --export out/photo_traj.json
-wsl -d MirobotSketch-ROS -- bash -lc "cd /mnt/c/<저장소 경로> && bash sim/run_rviz.sh out/photo_traj.json 10"
-```
-
-### 배포 (CI/CD)
+## 배포 (CI/CD)
 
 - **CI** (`.github/workflows/ci.yml`): main push와 PR마다 Windows/Ubuntu × Python 3.11/3.13에서 테스트와 명령줄 도구 동작을 확인합니다.
-- **CD** (`.github/workflows/release.yml`): `v*` 태그를 push하면 Windows .exe를 빌드하고, 빌드된 exe로 동작을 확인한 뒤 GitHub Releases에 zip으로 올립니다. 같은 릴리스에 RViz 3D 환경 이미지(`ubuntu:22.04` 컨테이너에서 설치 스크립트로 만들고 ROS·모델을 확인한 WSL 루트 파일, SHA256 포함)도 올립니다.
+- **CD** (`.github/workflows/release.yml`): `v*` 태그를 push하면 Windows .exe를 빌드하고, 빌드된 exe로 동작을 확인한 뒤 GitHub Releases에 zip과 설치 프로그램으로 올립니다. 같은 릴리스에 RViz 3D 환경 이미지(`ubuntu:22.04` 컨테이너에서 설치 스크립트로 만들고 ROS·모델을 확인한 WSL 루트 파일, SHA256 포함)도 올립니다.
 - **Dependabot** (`.github/dependabot.yml`): Actions와 의존성 업데이트를 매주 PR로 알려 줍니다.
 
 새 버전 배포:
@@ -189,35 +290,37 @@ git tag -a v0.3.0 -m "..." && git push origin v0.3.0
 
 `mirobot_sketch/__init__.py`의 `__version__`도 함께 올립니다.
 
-### 테스트
+## 테스트
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-### 폴더
+## 폴더
 
 | 경로 | 내용 |
 |---|---|
-| `mirobot_sketch/` | 파이썬 패키지: CV 파이프라인, 종이 좌표, 실행기, 시뮬레이터, GUI (`data/`에 기본 설정·아이콘) |
+| `mirobot_sketch/` | 파이썬 패키지: CV 파이프라인, 종이 좌표, 실행기, 시뮬레이터, GUI (`data/`에 기본 설정·아이콘·얼굴 모델) |
+| `mirobot_sketch/agent/` | 에이전트: 도구 정의, 대화 백엔드(OpenRouter / Claude Code / Codex), MCP 서버, 로컬 브리지, 채팅 패널 |
 | `CV/` | 저장소용 실행 파일(`gui_sketch.py`, `make_strokes.py`), `experiments/`는 학습 단계 스크립트 |
 | `robot/` | 로봇 설정(`drawing_config.json`), 저장소용 실행기 진입점, 초기 시리얼·그리퍼·펌프 시험 코드 |
 | `sim/` | 저장소용 시뮬레이터 진입점, RViz 재생(WSL2 ROS 2) |
-| `mirobot_sketch/agent/` | 에이전트: 도구 정의, 대화 백엔드(OpenRouter / Claude Code / Codex), MCP 서버, 로컬 브리지, 채팅 패널 |
-| `packaging/` | PyInstaller 빌드 설정과 .exe 진입점 |
-| `.github/workflows/` | CI(테스트), Release(태그 push 시 .exe 빌드) |
-| `assets/` | 앱 아이콘과 생성 스크립트 |
+| `packaging/` | PyInstaller 빌드 설정, 설치 프로그램(Inno Setup), WSL ROS 환경 설치 스크립트(`wsl/`) |
+| `.github/workflows/` | CI(테스트), Release(태그 push 시 .exe·이미지 빌드) |
+| `assets/` | 앱 아이콘, README 스크린샷과 예시 사진 |
 | `trajectories/` | 도형 템플릿과 테스트 경로 |
-| `docs/` | 설계 문서, OpenCV 학습 자료 |
+| `docs/` | 설계 문서([ARCHITECTURE](docs/ARCHITECTURE.md)), OpenCV 학습 자료 |
 | `LOG/` | 날짜별 작업 기록, 실행 기록 |
 | `tests/` | 회귀 테스트 |
 
-### 라이선스
-
-[MIT](LICENSE)
-
-### 환경 메모
+## 환경 메모
 
 - 실물 제어는 Windows pyserial로 합니다. WSL2에 USB 패스스루한 CH340 포트는 응답을 읽지 못합니다.
 - 시리얼 포트를 새로 열면 보드가 리셋됩니다. 실행 중에는 다른 프로그램이 같은 포트를 열지 않게 합니다.
-- ROS 2 Humble / MoveIt 2(WSL2)는 경로 검토와 시각화에 사용합니다.
+- ROS 2 Humble(WSL2)은 RViz 3D 보기에만 씁니다. 로봇 제어에는 ROS를 쓰지 않습니다.
+
+## 라이선스
+
+[MIT](LICENSE). 포함된 서드파티 파일(YuNet 모델, 예시 사진)의 출처와 라이선스는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 있습니다.
+
+오픈소스프로그래밍(2026-2) 텀프로젝트로 시작했습니다.
