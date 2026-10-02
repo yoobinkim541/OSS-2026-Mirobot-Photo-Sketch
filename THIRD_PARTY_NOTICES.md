@@ -30,3 +30,10 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## 예시 사진 (README·문서 스크린샷)
+
+- **파일:** `assets/sample/sample-portrait.jpg` (원본을 긴 변 1400px로 줄임)
+- **출처:** Wikimedia Commons, "Sally Ride, First U.S. Woman in Space - GPN-2004-00019.jpg" (NASA), https://commons.wikimedia.org/wiki/File:Sally_Ride,_First_U.S._Woman_in_Space_-_GPN-2004-00019.jpg
+- **라이선스:** 퍼블릭 도메인 (NASA 제작물, Wikimedia Commons 표기 "Public domain")
+- **용도:** `assets/screenshots/`의 앱 화면 캡처에 쓴 예시 입력입니다. 앱이나 패키지에는 포함되지 않습니다.
