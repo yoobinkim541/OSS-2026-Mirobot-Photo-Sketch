@@ -21,6 +21,8 @@ from mirobot_sketch.virtual_robot import VirtualMirobotLink  # noqa: E402
 import golden  # noqa: E402
 
 CFG = golden.default_cfg()
+FLANGE_CFG = copy.deepcopy(CFG)
+FLANGE_CFG["start_pose"] = {"pen_mount": "along_flange"}     # 펜이 플랜지 축과 나란한 방식 (손목을 돌림)
 JOINT_LINE = re.compile(r"^M21 G90 G01 X([-\d.]+) Y([-\d.]+) Z([-\d.]+) A([-\d.]+) B([-\d.]+) C([-\d.]+) F\d+$")
 
 
@@ -50,7 +52,7 @@ class StatusParseTest(unittest.TestCase):
 
 class RaisePlanTest(unittest.TestCase):
     def setUp(self):
-        self.plan = sp.plan_raise(CFG)
+        self.plan = sp.plan_raise(FLANGE_CFG)
 
     def test_commands_are_joint_moves(self):
         self.assertTrue(self.plan["commands"])
@@ -59,56 +61,56 @@ class RaisePlanTest(unittest.TestCase):
 
     def test_first_move_turns_only_the_base_to_the_side(self):
         first = joints_of(self.plan["commands"][0][0])
-        side = sp.settings(CFG)["side_j1_deg"]
+        side = sp.settings(FLANGE_CFG)["side_j1_deg"]
         self.assertTrue(np.allclose(first, [side, 0, 0, 0, 0, 0]))
 
     def test_ends_facing_the_wall_with_the_pen_tip_raised(self):
         last = joints_of(self.plan["commands"][-1][0])
         self.assertAlmostEqual(last[0], 0.0, places=3)
         flange, _ = ms.fk(np.radians(last))
-        up = np.radians(sp.settings(CFG)["pen_up_deg"])
+        up = np.radians(sp.settings(FLANGE_CFG)["pen_up_deg"])
         self.assertTrue(np.allclose(flange[:3, 2], [np.cos(up), 0, np.sin(up)], atol=1e-3))
 
     def test_pen_tip_keeps_the_clearance_from_the_paper(self):
-        s = sp.settings(CFG)
+        s = sp.settings(FLANGE_CFG)
         self.assertGreaterEqual(self.plan["min_tip_clearance_mm"], s["clearance_mm"] - sp.GAP_TOL_MM)
         self.assertGreaterEqual(self.plan["min_joint_margin_deg"], s["min_joint_margin_deg"])
         self.assertGreaterEqual(self.plan["standby_singularity_deg"], s["min_singularity_deg"])
 
     def test_refuses_when_the_paper_is_too_close_for_the_pen(self):
-        cfg = copy.deepcopy(CFG)
-        cfg["start_pose"] = {"paper_x_mm": 200.0, "pen_len_max_mm": 100.0, "pen_up_deg": 35.0, "standby_z_mm": 200.0}
+        cfg = copy.deepcopy(FLANGE_CFG)
+        cfg["start_pose"] = {"pen_mount": "along_flange", "paper_x_mm": 200.0, "pen_len_max_mm": 100.0, "pen_up_deg": 35.0, "standby_z_mm": 200.0}
         with self.assertRaises(sp.StartPoseError) as cm:
             sp.plan_raise(cfg)
         self.assertIn("mm", str(cm.exception))
 
     def test_refuses_a_side_angle_outside_the_base_range(self):
-        cfg = copy.deepcopy(CFG)
-        cfg["start_pose"] = {"side_j1_deg": -130.0}      # J1 범위 -110°~+160°
+        cfg = copy.deepcopy(FLANGE_CFG)
+        cfg["start_pose"] = {"pen_mount": "along_flange", "side_j1_deg": -130.0}      # J1 범위 -110°~+160°
         with self.assertRaises(sp.StartPoseError):
             sp.plan_raise(cfg)
 
 
 class VirtualJointMoveTest(unittest.TestCase):
     def test_virtual_robot_follows_joint_moves(self):
-        link = VirtualMirobotLink(CFG, speed=1e6)
-        plan = sp.plan_raise(CFG)
+        link = VirtualMirobotLink(FLANGE_CFG, speed=1e6)
+        plan = sp.plan_raise(FLANGE_CFG)
         for line, _ in plan["commands"]:
             link.send_and_ack(line, 5.0)
         expected = ms.fk(np.radians(joints_of(plan["commands"][-1][0])))[0][:3, 3]
         self.assertTrue(np.allclose(link.pos, expected, atol=1e-3))
 
     def test_virtual_status_reports_joints_like_the_controller(self):
-        link = VirtualMirobotLink(CFG, speed=1e6)
+        link = VirtualMirobotLink(FLANGE_CFG, speed=1e6)
         link.send_and_ack("M21 G90 G01 X-90.000 Y0.000 Z0.000 A0.000 B0.000 C0.000 F600", 5.0)
         s = de.parse_status(link.query_status()[2])
         self.assertEqual(s["joints_deg"], [-90.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         self.assertTrue(np.allclose(s["tcp"], link.pos, atol=1e-3))
 
     def test_raise_runs_end_to_end_on_the_virtual_robot(self):
-        link = VirtualMirobotLink(CFG, speed=1e6)
+        link = VirtualMirobotLink(FLANGE_CFG, speed=1e6)
         link.joints = [0.0] * 6
-        result = sp.run_raise(link, CFG, confirm=lambda plan: True, progress=lambda *_: None)
+        result = sp.run_raise(link, FLANGE_CFG, confirm=lambda plan: True, progress=lambda *_: None)
         self.assertEqual(result["result"], "completed")
         self.assertTrue(np.allclose(result["reported"]["tcp"], result["plan"]["standby_tcp_mm"], atol=1e-2))
 
@@ -141,27 +143,52 @@ class RunRaiseTest(unittest.TestCase):
     def test_refuses_unless_the_robot_is_at_the_homing_pose(self):
         link = FakeLink(joints=(0, 0, 0, 0, -30, 0))
         with self.assertRaises(sp.StartPoseError):
-            sp.run_raise(link, CFG, confirm=lambda plan: True, progress=lambda *_: None)
+            sp.run_raise(link, FLANGE_CFG, confirm=lambda plan: True, progress=lambda *_: None)
         self.assertEqual(link.sent, [])
 
     def test_sends_nothing_when_the_person_declines(self):
         link = FakeLink()
-        result = sp.run_raise(link, CFG, confirm=lambda plan: False, progress=lambda *_: None)
+        result = sp.run_raise(link, FLANGE_CFG, confirm=lambda plan: False, progress=lambda *_: None)
         self.assertEqual(result["result"], "cancelled")
         self.assertEqual(link.sent, [])
 
     def test_sends_the_plan_and_reports_the_controller_pose(self):
         link = FakeLink()
-        result = sp.run_raise(link, CFG, confirm=lambda plan: True, progress=lambda *_: None)
+        result = sp.run_raise(link, FLANGE_CFG, confirm=lambda plan: True, progress=lambda *_: None)
         self.assertEqual(result["result"], "completed")
-        self.assertEqual(link.sent, [c for c, _ in sp.plan_raise(CFG)["commands"]])
+        self.assertEqual(link.sent, [c for c, _ in sp.plan_raise(FLANGE_CFG)["commands"]])
         self.assertEqual(result["reported"]["abc_deg"], (4.0, 5.0, 6.0))
 
     def test_stops_on_a_controller_error(self):
         link = FakeLink(fail_on="Y0.000 Z0.000")      # 첫 명령(J1만 옆으로)에서 오류
-        result = sp.run_raise(link, CFG, confirm=lambda plan: True, progress=lambda *_: None)
+        result = sp.run_raise(link, FLANGE_CFG, confirm=lambda plan: True, progress=lambda *_: None)
         self.assertEqual(result["result"], "stopped_on_error")
         self.assertEqual(len(link.sent), 1)
+
+
+class RightAngleMountTest(unittest.TestCase):
+    """기본 방식: 펜을 플랜지 축과 직각으로 달아 호밍 자세(팔뚝 수평)에서 펜이 수평으로 벽을 향함."""
+
+    def test_default_mount_is_right_angle(self):
+        self.assertEqual(sp.settings(CFG)["pen_mount"], "right_angle")
+
+    def test_homing_pose_is_already_the_standby_so_nothing_is_sent(self):
+        self.assertEqual(sp.plan_raise(CFG)["commands"], [])
+        link = FakeLink()
+        result = sp.run_raise(link, CFG, confirm=lambda plan: self.fail("확인할 동작이 없음"), progress=lambda *_: None)
+        self.assertEqual(result["result"], "completed")
+        self.assertEqual(link.sent, [])
+        self.assertEqual(result["reported"]["joints_deg"], [0.0] * 6)
+
+    def test_still_refuses_unless_homed(self):
+        with self.assertRaises(sp.StartPoseError):
+            sp.run_raise(FakeLink(joints=(10, 0, 0, 0, 0, 0)), CFG, confirm=lambda plan: True, progress=lambda *_: None)
+
+    def test_unknown_mount_is_rejected(self):
+        cfg = copy.deepcopy(CFG)
+        cfg["start_pose"] = {"pen_mount": "sideways"}
+        with self.assertRaises(sp.StartPoseError):
+            sp.plan_raise(cfg)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@
     python -m unittest tests.test_ready_pose -v
 """
 
+import copy
 import json
 import sys
 import tempfile
@@ -17,6 +18,8 @@ from mirobot_sketch import start_pose as sp  # noqa: E402
 import golden  # noqa: E402
 
 CFG = golden.default_cfg()
+FLANGE_CFG = copy.deepcopy(CFG)
+FLANGE_CFG["start_pose"] = {"pen_mount": "along_flange"}
 
 
 def status(x, y=0.0, z=130.0, abc=(0.0, -90.0, 0.0), joints=(0.0, -1.4, 46.4, 0.0, -135.0, 0.0)):
@@ -28,26 +31,42 @@ REFERENCE = status(185.0)        # 펜을 수평으로 올린 직후(대기 자�
 
 class CheckReadyTest(unittest.TestCase):
     def test_jog_along_x_and_y_only_is_accepted(self):
-        r = sp.check_ready(CFG, status(200.0, y=3.0), REFERENCE)
+        r = sp.check_ready(FLANGE_CFG, status(200.0, y=3.0), REFERENCE)
         self.assertTrue(r["ok"], r["problems"])
         self.assertGreater(r["min_margin_deg"], 5.0)
 
     def test_height_change_is_rejected(self):
-        r = sp.check_ready(CFG, status(200.0, z=133.0), REFERENCE)
+        r = sp.check_ready(FLANGE_CFG, status(200.0, z=133.0), REFERENCE)
         self.assertFalse(r["ok"])
         self.assertTrue(any("Z" in p for p in r["problems"]))
 
     def test_orientation_change_is_rejected(self):
-        r = sp.check_ready(CFG, status(200.0, abc=(0.0, -85.0, 0.0)), REFERENCE)
+        r = sp.check_ready(FLANGE_CFG, status(200.0, abc=(0.0, -85.0, 0.0)), REFERENCE)
         self.assertFalse(r["ok"])
         self.assertTrue(any("자세" in p for p in r["problems"]))
 
     def test_paper_too_close_to_the_base_asks_to_move_the_robot_back(self):
         # 플랜지 X 160 mm: 펜이 수평인 자세에서 그리기 범위 끝이 관절 한계에 걸림
-        r = sp.check_ready(CFG, status(160.0), REFERENCE)
+        r = sp.check_ready(FLANGE_CFG, status(160.0), REFERENCE)
         self.assertFalse(r["ok"])
         self.assertGreater(r["move_back_mm"], 0.0)
         self.assertTrue(any("뒤로" in p for p in r["problems"]))
+
+
+HOME = status(198.67, z=230.5, abc=(0.0, 0.0, 0.0), joints=(0, 0, 0, 0, 0, 0))   # 직각 홀더: 호밍 직후
+
+
+class RightAngleCheckTest(unittest.TestCase):
+    def test_pen_touching_the_paper_near_the_homing_pose_is_accepted(self):
+        r = sp.check_ready(CFG, status(205.0, y=2.0, z=230.5, abc=(0.0, 0.0, 0.0)), HOME)
+        self.assertTrue(r["ok"], r["problems"])
+        self.assertGreater(r["min_singularity_deg"], 60.0)
+
+    def test_flange_too_close_to_the_base_is_rejected(self):
+        # 직각 홀더·호밍 높이에서 플랜지 X 130 mm면 그리기 범위 끝이 J2 한계를 넘음
+        r = sp.check_ready(CFG, status(130.0, z=230.5, abc=(0.0, 0.0, 0.0)), HOME)
+        self.assertFalse(r["ok"])
+        self.assertGreater(r["move_back_mm"], 0.0)
 
 
 class SaveLoadTest(unittest.TestCase):
@@ -112,7 +131,7 @@ class JogSessionTest(unittest.TestCase):
     def run_session(self, poses, keys):
         keys = iter(keys)
         self.link = ScriptedLink(poses)
-        return sp.jog_session(self.link, CFG, REFERENCE, self.path,
+        return sp.jog_session(self.link, FLANGE_CFG, REFERENCE, self.path,
                               input_fn=lambda _: next(keys), output_fn=self.out.append)
 
     def test_enter_shows_the_current_position_and_s_saves(self):

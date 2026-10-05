@@ -61,20 +61,23 @@ def _wrap(q):
     return q
 
 
-def study(cfg, center_x, center_z, tilt_down_deg, step=10.0, center_y=0.0):
+def study(cfg, center_x, center_z, tilt_down_deg, step=10.0, center_y=0.0, rot=None, seed=None):
     """플랜지가 종이 중심 (center_x, center_y, center_z)에 있고 펜 자세가 고정일 때, 그리기 범위 전체를 검사.
-    종이 면은 평평하다고 봅니다(X 일정). 반환: 최소 관절 여유·가장 빠듯한 축·특이점까지 최소 각도·도달 불가 점 수."""
-    rot = pen_rotation(tilt_down_deg)
+    종이 면은 평평하다고 봅니다(X 일정). rot·seed를 주면 tilt_down_deg 대신 그 플랜지 자세·IK 시작 관절각을 씀
+    (예: 직각 홀더는 홈 자세 ms.HOME_ROT, 관절 0에서 시작).
+    반환: 최소 관절 여유·가장 빠듯한 축·특이점까지 최소 각도·도달 불가 점 수."""
+    rot = pen_rotation(tilt_down_deg) if rot is None else rot
+    seed = LEVEL_SEED if seed is None else np.asarray(seed, float)
     sy, sz = cfg["paper_x_to_robot_y_sign"], cfg["paper_y_to_robot_z_sign"]
     lo, hi = ms.JOINT_LIMITS_RAD[:, 0], ms.JOINT_LIMITS_RAD[:, 1]
-    center_q, _, _ = ms.ik(np.array([center_x, center_y, center_z]), LEVEL_SEED, r_goal=rot, iters=300)
+    center_q, _, _ = ms.ik(np.array([center_x, center_y, center_z]), seed, r_goal=rot, iters=300)
     worst, worst_axis, sing, unreachable = np.inf, None, np.inf, 0
     points = _paper_points(cfg, step)
     for px, py in points:
         target = np.array([center_x, center_y + sy * px, center_z + sz * py])
         q, _, ok = ms.ik(target, center_q, r_goal=rot, iters=300)
         if not ok:
-            q, _, ok = ms.ik(target, LEVEL_SEED, r_goal=rot, iters=300)
+            q, _, ok = ms.ik(target, seed, r_goal=rot, iters=300)
         if not ok:
             unreachable += 1
             continue

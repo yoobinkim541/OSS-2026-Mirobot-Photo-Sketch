@@ -1,0 +1,104 @@
+{
+ "started_local": "20261005-204022",
+ "virtual": false,
+ "settings": {
+  "pen_up_deg": 0.0,
+  "pen_len_max_mm": 60.0,
+  "paper_x_mm": 260.0,
+  "clearance_mm": 15.0,
+  "standby_z_mm": 130.0,
+  "side_j1_deg": -90.0,
+  "joint_feed": 600,
+  "min_tip_z_mm": 30.0,
+  "min_joint_margin_deg": 5.0,
+  "min_singularity_deg": 15.0,
+  "ready_tol_z_mm": 0.5,
+  "ready_tol_deg": 0.5,
+  "ready_pose": null,
+  "jog_steps_mm": [
+   0.5,
+   2.0,
+   10.0
+  ],
+  "jog_default_step": 1,
+  "jog_max_forward_mm": 60.0,
+  "jog_max_back_mm": 30.0,
+  "jog_max_y_mm": 60.0
+ },
+ "result": "completed",
+ "plan": {
+  "commands": [
+   [
+    "M21 G90 G01 X-90.000 Y0.000 Z0.000 A0.000 B0.000 C0.000 F600",
+    "base to side (pen down)"
+   ],
+   [
+    "M21 G90 G01 X-90.000 Y-1.413 Z46.421 A-0.000 B-135.007 C-0.000 F600",
+    "raise pen tip (facing side)"
+   ],
+   [
+    "M21 G90 G01 X0.000 Y-1.413 Z46.421 A-0.000 B-135.007 C-0.000 F600",
+    "turn back to the wall"
+   ]
+  ],
+  "joints_deg": [
+   [
+    -90.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   [
+    -90.0,
+    -1.413,
+    46.421,
+    -0.0,
+    -135.007,
+    -0.0
+   ],
+   [
+    0.0,
+    -1.413,
+    46.421,
+    -0.0,
+    -135.007,
+    -0.0
+   ]
+  ],
+  "standby_tcp_mm": [
+   185.0,
+   0.0,
+   130.0
+  ],
+  "min_joint_margin_deg": 13.568141521594898,
+  "min_tip_clearance_mm": 15.000010161141148,
+  "standby_singularity_deg": 45.007116054519486
+ },
+ "reported": {
+  "state": "Idle",
+  "joints_deg": [
+   0.0,
+   -1.415,
+   46.425,
+   0.0,
+   -134.992,
+   0.0
+  ],
+  "tcp": [
+   184.914,
+   0.0,
+   129.591
+  ],
+  "abc_deg": [
+   0.0,
+   -90.0,
+   0.0
+  ]
+ },
+ "jog": {
+  "result": "quit",
+  "ready": null
+ }
+}

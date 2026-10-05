@@ -26,7 +26,10 @@ import numpy as np
 from . import mirobot_sim as ms
 from . import pen_pose as pp
 
+MOUNTS = ("right_angle", "along_flange")
 DEFAULTS = {
+    "pen_mount": "right_angle",  # right_angle: 펜이 플랜지 축과 직각(호밍 자세에서 팔뚝·펜 모두 수평으로 벽을 향함,
+                                 #   손목을 돌리지 않음). along_flange: 펜이 플랜지 축과 나란함(아래 순서로 손목을 돌림)
     "pen_up_deg": 0.0,           # 펜 끝을 수평에서 위로 올리는 각도. 0 = 펜이 종이에 수직(수평). 종이 중심이 낮으면
                                  # (플랜지 Z ≤ 약 145 mm) 팔뚝이 아래로 기울어 수평 펜도 특이점에서 20° 이상 떨어짐
     "pen_len_max_mm": 60.0,      # 플랜지 면 -> 펜 끝 (펜 축 방향). 안전 계산은 이 최댓값 기준
@@ -96,11 +99,29 @@ def _check_segments(poses, s):
     return worst_margin, worst_gap
 
 
+def _mount(s):
+    if s["pen_mount"] not in MOUNTS:
+        raise StartPoseError(f"pen_mount는 {' / '.join(MOUNTS)} 중 하나여야 합니다 (지금: {s['pen_mount']}).")
+    return s["pen_mount"]
+
+
+def pen_frame(s):
+    """그리는 동안 고정할 플랜지 자세와 IK 시작 관절각."""
+    if _mount(s) == "right_angle":
+        return ms.HOME_ROT, np.zeros(6)
+    return pp.pen_rotation(-s["pen_up_deg"]), pp.LEVEL_SEED
+
+
 def plan_raise(cfg):
     """호밍 자세 -> 펜 끝을 올린 대기 자세. 반환 dict: commands [(gcode, 설명)], joints_deg(각 이동 끝),
     standby_tcp_mm, min_joint_margin_deg, min_tip_clearance_mm, standby_singularity_deg.
+    직각 홀더(right_angle)는 호밍 자세가 곧 대기 자세라 보낼 명령이 없음.
     안전 조건을 못 맞추면 StartPoseError (명령을 보내기 전에)."""
     s = settings(cfg)
+    if _mount(s) == "right_angle":
+        return {"commands": [], "joints_deg": [], "standby_tcp_mm": ms.HOME_TCP_MM.round(3).tolist(),
+                "min_joint_margin_deg": None, "min_tip_clearance_mm": None,
+                "standby_singularity_deg": pp.singularity_deg(np.zeros(6))}
     up = np.radians(s["pen_up_deg"])
     x = s["paper_x_mm"] - s["clearance_mm"] - s["pen_len_max_mm"] * np.cos(up)
     target = np.array([x, 0.0, s["standby_z_mm"]])
@@ -145,8 +166,10 @@ def check_ready(cfg, status, reference):
         problems.append(f"펜 자세(A·B·C)가 {turned:.2f}° 바뀌었습니다 (허용 {s['ready_tol_deg']:g}°). "
                         "펜을 다시 올린 뒤 X·Y만 움직이세요.")
 
+    rot, seed = pen_frame(s)
+
     def fits(cx):
-        r = pp.study(cfg, cx, z, -s["pen_up_deg"], center_y=y)
+        r = pp.study(cfg, cx, z, 0.0, center_y=y, rot=rot, seed=seed)
         good = (r["unreachable"] == 0 and r["min_margin_deg"] >= s["min_joint_margin_deg"]
                 and r["min_singularity_deg"] >= s["min_singularity_deg"])
         return good, r
@@ -260,6 +283,9 @@ def run_raise(link, cfg, confirm, progress=print):
     if j is None or max(abs(v) for v in j) > HOME_JOINT_TOL_DEG:
         raise StartPoseError(f"호밍 자세(모든 관절 0°)가 아닙니다 (관절 {j}). 가운데 버튼 2초로 호밍한 뒤 다시 하세요.")
     plan = plan_raise(cfg)
+    if not plan["commands"]:            # 직각 홀더: 호밍 자세 그대로가 대기 자세
+        progress("  펜이 이미 그리는 자세입니다(직각 홀더). 움직이지 않습니다.")
+        return {"result": "completed", "plan": plan, "reported": before}
     if not confirm(plan):
         return {"result": "cancelled", "plan": plan, "reported": before}
     for i, (line, label) in enumerate(plan["commands"], start=1):
@@ -298,12 +324,16 @@ def main():
     except StartPoseError as e:
         print(f"계획 실패: {e}")
         return 2
-    print(f"설정: 펜 끝 {s['pen_up_deg']:g}° 위, 펜 길이 최대 {s['pen_len_max_mm']:g} mm, 종이 면 X {s['paper_x_mm']:g} mm, "
-          f"옆으로 J1 {s['side_j1_deg']:g}°")
-    for line, label in plan["commands"]:
-        print(f"  {line}    ; {label}")
-    print(f"대기 자세 TCP {plan['standby_tcp_mm']}, 관절 여유 최소 {plan['min_joint_margin_deg']:.1f}°, "
-          f"펜 끝-종이 최소 {plan['min_tip_clearance_mm']:.1f} mm, 특이점까지 {plan['standby_singularity_deg']:.1f}°")
+    if plan["commands"]:
+        print(f"설정: 펜이 플랜지 축과 나란함, 펜 끝 {s['pen_up_deg']:g}° 위, 펜 길이 최대 {s['pen_len_max_mm']:g} mm, "
+              f"종이 면 X {s['paper_x_mm']:g} mm, 옆으로 J1 {s['side_j1_deg']:g}°")
+        for line, label in plan["commands"]:
+            print(f"  {line}    ; {label}")
+        print(f"대기 자세 TCP {plan['standby_tcp_mm']}, 관절 여유 최소 {plan['min_joint_margin_deg']:.1f}°, "
+              f"펜 끝-종이 최소 {plan['min_tip_clearance_mm']:.1f} mm, 특이점까지 {plan['standby_singularity_deg']:.1f}°")
+    else:
+        print("설정: 직각 홀더 — 호밍 자세(팔뚝·펜 수평)가 그리는 자세라 손목을 돌리지 않습니다. "
+              "연결 뒤 키보드로 X·Y만 맞춥니다(Z·자세는 호밍 값 고정).")
     if not (args.execute or args.virtual):
         print("dry-run: 로봇을 움직이지 않았습니다. --execute로 실물 실행.")
         return 0
