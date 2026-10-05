@@ -35,6 +35,9 @@ DEFAULTS = {
     "min_tip_z_mm": 30.0,        # 펜 끝이 책상 위로 이만큼은 떠 있어야 함
     "min_joint_margin_deg": 5.0,
     "min_singularity_deg": 15.0,
+    "ready_tol_z_mm": 0.5,       # 화살표로 X·Y만 움직였는지: 대기 자세와 Z 차이 허용
+    "ready_tol_deg": 0.5,        # 같은 이유로 A·B·C 차이 허용
+    "ready_pose": None,          # 펜 끝을 종이 가운데에 맞춘 자세 (save_ready_pose가 저장)
 }
 SAMPLES = 60    # 관절 이동 한 번을 나눠 검사하는 수
 GAP_TOL_MM = 0.1   # IK 위치 허용 오차(0.05 mm) 때문에 대기 자세 끝점이 여유보다 조금 모자라게 계산되는 것을 허용
@@ -115,6 +118,93 @@ def plan_raise(cfg):
     }
 
 
+MOVE_BACK_SCAN_MM = (5.0, 100.0)   # 그리기 범위가 안 닿을 때 로봇을 얼마나 뒤로 빼야 하는지 찾는 간격·최대
+
+
+def check_ready(cfg, status, reference):
+    """펜 끝을 종이 가운데에 맞춘 자세(status)를 저장해도 되는지. reference: 펜을 올린 직후 보고된 자세.
+    화살표로 X·Y만 움직였는지(Z·A·B·C가 그대로인지), 그 자리에서 그리기 범위(limits) 전체가 닿고 특이점에서
+    떨어져 있는지 시뮬레이터로 검사. 반환: ok, problems, min_margin_deg, min_singularity_deg, move_back_mm."""
+    s = settings(cfg)
+    problems = []
+    (x, y, z), (rx, ry, rz) = status["tcp"], reference["tcp"]
+    if abs(z - rz) > s["ready_tol_z_mm"]:
+        problems.append(f"Z가 펜을 올린 직후보다 {z - rz:+.2f} mm 바뀌었습니다 (허용 ±{s['ready_tol_z_mm']:g} mm). "
+                        "화살표로 X·Y만 움직이세요.")
+    turned = max(abs(a - b) for a, b in zip(status["abc_deg"], reference["abc_deg"]))
+    if turned > s["ready_tol_deg"]:
+        problems.append(f"펜 자세(A·B·C)가 {turned:.2f}° 바뀌었습니다 (허용 {s['ready_tol_deg']:g}°). "
+                        "펜을 다시 올린 뒤 X·Y만 움직이세요.")
+
+    def fits(cx):
+        r = pp.study(cfg, cx, z, -s["pen_up_deg"], center_y=y)
+        good = (r["unreachable"] == 0 and r["min_margin_deg"] >= s["min_joint_margin_deg"]
+                and r["min_singularity_deg"] >= s["min_singularity_deg"])
+        return good, r
+
+    good, r = fits(x)
+    move_back = 0.0
+    if not good:
+        step, limit = MOVE_BACK_SCAN_MM
+        move_back = None
+        for d in np.arange(step, limit + 1e-9, step):
+            if fits(x + d)[0]:
+                move_back = float(d)
+                break
+        need = (f"로봇을 벽에서 약 {move_back:g} mm 뒤로 옮긴 뒤 다시 맞추세요" if move_back is not None
+                else f"로봇을 {limit:g} mm 뒤로 옮겨도 부족합니다. 펜 길이·종이 높이를 확인하세요")
+        problems.append(f"이 자리에서는 그리기 범위 끝까지 닿지 않거나 여유가 부족합니다 "
+                        f"(관절 여유 {r['min_margin_deg']:.1f}°, 특이점까지 {r['min_singularity_deg']:.1f}°, "
+                        f"닿지 않는 점 {r['unreachable']}개). {need}.")
+    return {"ok": not problems, "problems": problems, "min_margin_deg": r["min_margin_deg"],
+            "min_singularity_deg": r["min_singularity_deg"], "move_back_mm": move_back}
+
+
+def save_ready_pose(config_path, status, now=None):
+    """설정 파일의 start_pose.ready_pose만 바꿔 저장 (다른 값·메모는 그대로). 반환: 저장한 dict."""
+    import json
+    from datetime import datetime
+
+    from .calibration import save_config
+
+    with open(config_path, encoding="utf-8") as f:
+        raw = json.load(f)
+    ready = {"tcp_mm": [float(v) for v in status["tcp"]], "abc_deg": [float(v) for v in status["abc_deg"]],
+             "joints_deg": [float(v) for v in status["joints_deg"]] if status.get("joints_deg") else None,
+             "saved_local": (now or datetime.now()).isoformat(timespec="seconds")}
+    raw.setdefault("start_pose", {})["ready_pose"] = ready
+    save_config(config_path, raw)
+    return ready
+
+
+def jog_session(link, cfg, reference, config_path, input_fn=input, output_fn=print):
+    """펜을 올린 뒤 사람이 컨트롤러 화살표로 X·Y만 움직여 펜 끝을 종이 가운데에 대는 동안:
+    Enter = 현재 좌표(대기 자세와의 차이), s = 검사 후 저장, q = 저장하지 않고 끝. 반환: result(saved|quit), ready."""
+    from .draw_executor import parse_status
+
+    (rx, ry, rz), rabc = reference["tcp"], reference["abc_deg"]
+    output_fn("컨트롤러 화살표로 X(벽 쪽·뒤)와 Y(좌우)만 움직여 펜 끝을 종이 가운데에 살짝 대세요.")
+    while True:
+        key = input_fn("Enter: 현재 좌표 / s: 저장 / q: 끝 > ").strip().lower()
+        if key == "q":
+            return {"result": "quit", "ready": None}
+        st = parse_status(link.query_status()[2])
+        (x, y, z), abc = st["tcp"], st["abc_deg"]
+        output_fn(f"  TCP ({x:.1f}, {y:.1f}, {z:.1f})  대기 자세에서 X {x - rx:+.1f}, Y {y - ry:+.1f}, Z {z - rz:+.2f} mm, "
+                  f"A·B·C 변화 {max(abs(a - b) for a, b in zip(abc, rabc)):.2f}°")
+        if key != "s":
+            continue
+        check = check_ready(cfg, st, reference)
+        if not check["ok"]:
+            for p in check["problems"]:
+                output_fn(f"  저장하지 않음: {p}")
+            continue
+        ready = save_ready_pose(config_path, st)
+        output_fn(f"  저장했습니다: {config_path} (관절 여유 {check['min_margin_deg']:.1f}°, "
+                  f"특이점까지 {check['min_singularity_deg']:.1f}°)")
+        return {"result": "saved", "ready": ready}
+
+
 HOME_JOINT_TOL_DEG = 0.5   # 호밍 직후로 볼 관절 각도 허용 오차
 
 
@@ -146,7 +236,7 @@ def run_raise(link, cfg, confirm, progress=print):
 
 
 def main():
-    """실물/가상으로 펜 올리기 순서만 실행: python -m mirobot_sketch.start_pose [--execute | --virtual]"""
+    """펜 올리기 -> 화살표로 종이 가운데 맞추기 -> 시작 자세 저장: python -m mirobot_sketch.start_pose [--execute | --virtual]"""
     import argparse
     import json
     from datetime import datetime
@@ -186,6 +276,8 @@ def main():
             return args.virtual or input("yes 입력 시 시작: ").strip().lower() == "yes"
 
         result = run_raise(link, cfg, confirm)
+        if result["result"] == "completed":
+            result["jog"] = jog_session(link, cfg, result["reported"], args.config or paths.config_path())
     except (de.DrawError, StartPoseError) as e:
         print(f"멈춤: {getattr(e, 'message', e)}")
         return 1
