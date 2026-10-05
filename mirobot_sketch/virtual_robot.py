@@ -5,6 +5,7 @@ MirobotLink와 같은 메서드를 가집니다. 명령마다 실제로 걸릴 �
 기다렸다가 ok를 돌려주며, speed(배속)로 줄일 수 있습니다. 오류 상황도 흉내 냅니다.
 """
 
+import math
 import re
 import time
 
@@ -12,6 +13,7 @@ from .draw_executor import ControllerError, StopRequested
 
 _XYZ = re.compile(r"X([-\d.]+) Y([-\d.]+) Z([-\d.]+)")
 _F = re.compile(r"F([\d.]+)")
+_JOINTS = re.compile(r"X([-\d.]+) Y([-\d.]+) Z([-\d.]+) A([-\d.]+) B([-\d.]+) C([-\d.]+)")
 POLL_S = 0.02     # 기다리는 동안 멈춤 확인 간격
 
 
@@ -26,6 +28,7 @@ class VirtualMirobotLink:
         c = cfg["paper_center_tcp_mm"]
         self.pos = (c["x"], c["y"], c["z"] + float(start_offset_mm))
         self.state = "Alarm"
+        self.joints = [0.0] * 6     # 관절 이동(M21) 기준. 직교 이동은 이 값을 바꾸지 않음
         self.sent = []
         self.latency = cfg.get("timing", {}).get("assumed_command_latency_s", 0.1)
 
@@ -55,7 +58,10 @@ class VirtualMirobotLink:
         return self.state, None
 
     def query_status(self, timeout=2.0):
-        return self.state, self.pos, f"<{self.state},virtual>"
+        j, (x, y, z) = self.joints, self.pos     # 실제 컨트롤러와 같은 형식 (Angle은 J4,J5,J6,D,J1,J2,J3 순서)
+        raw = (f"<{self.state},Angle(ABCDXYZ):{j[3]:.3f},{j[4]:.3f},{j[5]:.3f},0.000,{j[0]:.3f},{j[1]:.3f},{j[2]:.3f},"
+               f"Cartesian coordinate(XYZ RxRyRz):{x:.3f},{y:.3f},{z:.3f},0.000,0.000,0.000,virtual>")
+        return self.state, self.pos, raw
 
     def send_and_ack(self, line, timeout, should_stop=None):
         self.sent.append(line)
@@ -66,7 +72,15 @@ class VirtualMirobotLink:
             self._sleep(timeout, should_stop)
             raise ControllerError(f"ok 응답 시간 초과: {line}")
         m, f = _XYZ.search(line), _F.search(line)
-        if m:
+        if m and line.startswith("M21"):     # 관절 이동: X~C = J1~J6 각도(°). 걸리는 시간은 가장 많이 도는 관절 기준
+            q = [float(v) for v in _JOINTS.search(line).groups()]
+            turn = max(abs(a - b) for a, b in zip(q, self.joints))
+            feed = float(f.group(1)) if f else 1000.0
+            self._sleep((turn / (feed / 60.0) + self.latency) / self.speed, should_stop)
+            from .mirobot_sim import fk
+            self.joints = q
+            self.pos = tuple(float(v) for v in fk([math.radians(v) for v in q])[0][:3, 3])
+        elif m:
             target = tuple(float(v) for v in m.groups())
             dist = sum((a - b) ** 2 for a, b in zip(target, self.pos)) ** 0.5
             feed = float(f.group(1)) if f else 1000.0

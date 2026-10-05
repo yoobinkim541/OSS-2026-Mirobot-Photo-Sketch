@@ -100,6 +100,19 @@ def fk(q):
     return fk_chain(q, TOOL_OFFSET_MM)
 
 
+def joint_axes(q):
+    """관절각(rad) -> 관절 6개의 회전축 방향(로봇 좌표, 단위 벡터) (6, 3)."""
+    t = np.eye(4)
+    axes = []
+    for fixed, (_, _, axis), qi in zip(_FIXED, URDF_JOINTS, q):
+        t = t @ fixed
+        axes.append(t[:3, :3] @ np.asarray(axis, float))
+        rot = np.eye(4)
+        rot[:3, :3] = _axis_angle(axis, qi)
+        t = t @ rot
+    return np.array(axes)
+
+
 def _rot_error(r_cur, r_goal):
     r = r_goal @ r_cur.T
     return 0.5 * np.array([r[2, 1] - r[1, 2], r[0, 2] - r[2, 0], r[1, 0] - r[0, 1]])
@@ -183,11 +196,12 @@ class SimulationCancelled(Exception):
     """progress 콜백이 던지면 시뮬레이션을 중간에 멈춘다 (더 이상 필요 없는 백그라운드 계산을 끝냄)."""
 
 
-def simulate(targets, step_mm=1.0, progress=None):
+def simulate(targets, step_mm=1.0, progress=None, r_goal=HOME_ROT, q0=None):
     """직선 보간하며 IK. 반환 dict: samples(q, tcp, 설명, pen_down), 위반/실패 목록, 관절별 최소 여유.
     progress(끝낸 명령 수, 전체 명령 수)는 명령마다 불려 화면이 진행률을 보여 줄 수 있고,
-    SimulationCancelled를 던지면 그대로 밖으로 나와 계산을 멈춘다."""
-    q = np.zeros(6)
+    SimulationCancelled를 던지면 그대로 밖으로 나와 계산을 멈춘다.
+    r_goal: 경로 내내 고정할 플랜지 자세(기본: 홈 자세, 펜이 아래). q0: IK 시작 관절각(기본: 0)."""
+    q = np.zeros(6) if q0 is None else np.array(q0, float)
     samples = []
     failures = []
     prev = targets[0][0]
@@ -205,7 +219,7 @@ def simulate(targets, step_mm=1.0, progress=None):
             # (해는 같음: 관절각 차이 1e-5 rad 이하)
             q_start = q if q_before is None else q + (q - q_before)
             q_before = q
-            q, err, ok = ik(p, q_start)
+            q, err, ok = ik(p, q_start, r_goal=r_goal)
             if not ok:
                 failures.append({"command": label, "target_mm": p.round(2).tolist(), "pos_error_mm": round(err, 3)})
             samples.append((q.copy(), p.copy(), label, pen_down, t - 1))   # 마지막 값: G-code 명령 번호

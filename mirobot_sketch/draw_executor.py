@@ -45,6 +45,24 @@ DEFAULT_CONFIG = None  # None이면 paths.config_path() (저장소 / 사용자 �
 
 ERROR_TOKENS = ("alarm", "error", "limit", "emergency")
 CARTESIAN_RE = re.compile(r"Cartesian coordinate\(XYZ RxRyRz\):\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)")
+_NUM = r"\s*([-\d.]+)"
+POSE_RE = re.compile(r"Cartesian coordinate\(XYZ RxRyRz\):" + ",".join([_NUM] * 6))
+ANGLE_RE = re.compile(r"Angle\(ABCDXYZ\):" + ",".join([_NUM] * 7))
+
+
+def parse_status(raw):
+    """컨트롤러 상태 응답 '<상태,Angle(ABCDXYZ):…,Cartesian coordinate(XYZ RxRyRz):…>' ->
+    {state, joints_deg [J1..J6] 또는 None, tcp (x,y,z) 또는 None, abc_deg (A,B,C) 또는 None}.
+    Angle 값은 J4,J5,J6,D(레일),J1,J2,J3 순서로 옵니다."""
+    state = raw[raw.index("<") + 1:].split(",")[0] if "<" in raw else "unknown"
+    a, p = ANGLE_RE.search(raw), POSE_RE.search(raw)
+    joints = None
+    if a:
+        v = [float(x) for x in a.groups()]
+        joints = [v[4], v[5], v[6], v[0], v[1], v[2]]
+    pose = [float(x) for x in p.groups()] if p else None
+    return {"state": state, "joints_deg": joints,
+            "tcp": tuple(pose[:3]) if pose else None, "abc_deg": tuple(pose[3:]) if pose else None}
 
 
 # ---------------------------------------------------------------------------
