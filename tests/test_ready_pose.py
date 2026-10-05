@@ -35,10 +35,9 @@ class CheckReadyTest(unittest.TestCase):
         self.assertTrue(r["ok"], r["problems"])
         self.assertGreater(r["min_margin_deg"], 5.0)
 
-    def test_height_change_is_rejected(self):
+    def test_height_change_is_allowed_because_jog_moves_up_and_down(self):
         r = sp.check_ready(FLANGE_CFG, status(200.0, z=133.0), REFERENCE)
-        self.assertFalse(r["ok"])
-        self.assertTrue(any("Z" in p for p in r["problems"]))
+        self.assertTrue(r["ok"], r["problems"])
 
     def test_orientation_change_is_rejected(self):
         r = sp.check_ready(FLANGE_CFG, status(200.0, abc=(0.0, -85.0, 0.0)), REFERENCE)
@@ -142,10 +141,16 @@ class JogSessionTest(unittest.TestCase):
         self.assertEqual(saved["tcp_mm"], [200.0, 2.0, 130.0])
 
     def test_a_bad_pose_is_not_saved(self):
-        result = self.run_session([(200.0, 0.0, 135.0)], ["s", "q"])
+        result = self.run_session([(150.0, 0.0, 130.0)], ["s", "q"])      # 너무 뒤: 그리기 범위가 안 닿음
         self.assertEqual(result["result"], "quit")
         self.assertIsNone(sp.settings(de.load_config(self.path))["ready_pose"])
-        self.assertTrue(any("Z" in line for line in self.out))
+        self.assertTrue(any("뒤로" in line for line in self.out))
+
+    def test_r_and_f_move_up_and_down(self):
+        self.run_session([(185.0, 0.0, 130.0)], ["r", "f", "f", "q"])
+        zs = [float(line.split(" Z")[1].split(" ")[0]) for line in self.link.sent]
+        step = sp.settings(FLANGE_CFG)["jog_steps_mm"][sp.settings(FLANGE_CFG)["jog_default_step"]]
+        self.assertEqual(zs, [130.0 + step, 130.0, 130.0 - step])
 
 
     def test_w_moves_toward_the_wall_keeping_height_and_orientation(self):

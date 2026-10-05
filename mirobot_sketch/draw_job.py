@@ -80,14 +80,20 @@ class DrawJob:
         self._thread = None
         self._calibration_reply = None
         self._calibration_reply_lock = threading.Lock()
+        self._start_pose = False
+        self.start_pose_setup = None      # ③ 시작 자세 맞추기 중일 때만 (화면이 jog·accept를 보냄)
 
     # ---------------------------------------------------------------- 사람이 누르는 것
-    def start(self, virtual=True, virtual_speed=20.0, pending=False, recalibrate=False, return_to_origin=True):
+    def start(self, virtual=True, virtual_speed=20.0, pending=False, recalibrate=False, return_to_origin=True,
+              start_pose=False):
         """pending: 실물 확인 전 넓은 범위(limits_pending_verification) 허용 — ① 사전 검사부터 적용 (④에서 바꿀 수도 있음).
-        return_to_origin: 그림이 끝까지 그려지면 펜을 처음 상태(종이 중심에 살짝 닿은 시작 자세)로 되돌림 (공중 모드는 해당 없음)."""
+        return_to_origin: 그림이 끝까지 그려지면 펜을 처음 상태(종이 중심에 살짝 닿은 시작 자세)로 되돌림 (공중 모드는 해당 없음).
+        start_pose: ②호밍 뒤 ③에서 저장된 시작 자세로 자동 이동하고, 사람이 조그로 맞춘 뒤 [기억하고 계속]을 누르면
+        그 자세를 저장하고 이번 실행의 종이 중심으로 씀 (start_pose.StartPoseSetup, 다시 보정을 고르면 쓰지 않음)."""
         self._virtual, self._speed, self._pending = bool(virtual), float(virtual_speed), bool(pending)
         self._recalibrate = bool(recalibrate)
         self._return_origin = bool(return_to_origin)
+        self._start_pose = bool(start_pose)
         self.state = "preflight"      # 첫 이벤트 전에 창을 닫아도 '진행 중'으로 보이게 (스레드 시작 전에)
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -113,6 +119,18 @@ class DrawJob:
                 pass
 
     cancel = stop
+
+    def jog(self, dx, dy, dz):
+        """③ 시작 자세 맞추기 중일 때만: 로봇 좌표로 (dx, dy, dz) mm 움직이기 요청 (바쁘면 버려짐)."""
+        setup = self.start_pose_setup
+        if setup is not None:
+            setup.jog(dx, dy, dz)
+
+    def accept_start_pose(self):
+        """③ 시작 자세 맞추기: 지금 자세를 검사해 기억하고 다음 단계로."""
+        setup = self.start_pose_setup
+        if setup is not None:
+            setup.accept()
 
     def join(self, timeout=None):
         if self._thread:
@@ -273,7 +291,10 @@ class DrawJob:
                        if calibration_path is not None and measured.get("result") == "ready" else "Idle")
             # ③ 시작 위치
             self._step("start", "active", "펜 끝 위치를 확인합니다")
-            if self._virtual or calibrated:
+            used_start_pose = self._start_pose and not calibrated
+            if used_start_pose:
+                tcp = self._setup_start_pose()
+            if (self._virtual and not used_start_pose) or calibrated:
                 # 방금 캘리브레이션했다면 로봇은 펜을 벽에서 뺀 자세로 끝났으므로 그 자세를 허용해서 검사
                 off = de.check_start(tcp, self.cfg, retracted=calibrated)
                 start_note = f"종이 중심에서 {off:.1f} mm"
@@ -377,6 +398,24 @@ class DrawJob:
             self._step("done", "done", result["result"])
             self.state = "done"
             self.events("finished", result=result, record_path=str(record) if record else None)
+
+    def _setup_start_pose(self):
+        """③ 시작 자세: 저장된 자세로 자동 이동 → 사람이 조그로 맞추고 [기억하고 계속] → 저장하고 그 TCP를 반환."""
+        from . import start_pose as sp
+
+        self._step("start", "active", "시작 자세를 맞춥니다: 조그로 펜 끝을 종이 가운데에 살짝 대고 [이 위치 기억하고 계속]")
+        setup = sp.StartPoseSetup(self.link, self.cfg, paths.config_path(), self.events)
+        self.start_pose_setup = setup
+        try:
+            return setup.run(should_stop=self._stop.is_set)
+        except sp.StartPoseError as e:
+            raise de.DrawError("start", str(e), "" if str(e) == CANCELLED else
+                               "호밍 상태와 펜 위치를 확인하고 다시 연결하세요.") from None
+        except de.ControllerError as e:
+            raise de.DrawError("start", f"조그 중 컨트롤러 오류: {e}",
+                               "자동 복구를 하지 않았습니다. 로봇 상태를 확인하고 호밍부터 다시 하세요.") from None
+        finally:
+            self.start_pose_setup = None
 
     def _return_to_origin(self, planner):
         """완료 뒤 펜을 처음 상태로 되돌림. 반환: (성공 여부 또는 None(공중 모드라 해당 없음), 오류 문구).

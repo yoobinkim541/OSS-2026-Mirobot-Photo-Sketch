@@ -539,6 +539,44 @@ class GuiSmokeTest(unittest.TestCase):
         finally:
             app._on_close()
 
+    def test_draw_window_start_pose_hold_to_jog_and_remember(self):
+        import json
+
+        root, app = make_app()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                p1, p2 = self._patched_dirs(d)
+                config_file = Path(d) / "drawing_config.json"
+                config_file.write_text(json.dumps(golden.default_cfg(), ensure_ascii=False), encoding="utf-8")
+                p3 = mock.patch("mirobot_sketch.draw_job.paths.config_path", lambda: config_file)
+                with p1, p2, p3:
+                    p = Path(d) / "line.png"
+                    cv2.imwrite(str(p), golden.synthetic_images()["line"])
+                    app.load_image(p)
+                    self.assertTrue(pump(root, app, lambda: app.result is not None and app._workers == 0))
+                    w = app.open_draw_window(launch_rviz=lambda *a, **k: None)
+                    self.assertTrue(w.start_pose_var.get())                         # 기본으로 켜짐
+                    w.virtual_var.set(True)
+                    w.speed_var.set("500×")
+                    w.start_pose_in_virtual = True
+                    w.begin()
+                    self.assertTrue(pump(root, app, lambda: w.jog_frame.winfo_ismapped(), timeout=60))
+                    z0 = w.job.link.pos[2]
+                    w.jog_step_var.set("0.5")
+                    w._jog_press((0, 0, 1))                                          # ▲ 위 누르고 있기
+                    self.assertTrue(pump(root, app, lambda: w.job.link.pos[2] >= z0 + 1.0, timeout=20))
+                    w._jog_release()
+                    w.on_accept_start_pose()
+                    self.assertTrue(pump(root, app, lambda: w.job.state == "confirm", timeout=60))
+                    self.assertFalse(w.jog_frame.winfo_ismapped())
+                    saved = json.loads(config_file.read_text(encoding="utf-8"))["start_pose"]["ready_pose"]
+                    self.assertGreaterEqual(saved["tcp_mm"][2], z0 + 1.0)
+                    w.on_stop()
+                    self.assertTrue(pump(root, app, lambda: w.finished is not None, timeout=30))
+                    w.close()
+        finally:
+            app._on_close()
+
     def test_draw_window_retries_after_start_position_failure(self):
         from mirobot_sketch import draw_executor as de
 

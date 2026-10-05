@@ -21,6 +21,8 @@
 계산은 시뮬레이터(URDF 기구학) 기준입니다. 옆으로 도는 쪽에 물건이 없는지는 사람이 확인해야 합니다.
 """
 
+import queue
+
 import numpy as np
 
 from . import mirobot_sim as ms
@@ -41,16 +43,18 @@ DEFAULTS = {
     "min_tip_z_mm": 30.0,        # 펜 끝이 책상 위로 이만큼은 떠 있어야 함
     "min_joint_margin_deg": 5.0,
     "min_singularity_deg": 15.0,
-    "ready_tol_z_mm": 0.5,       # 화살표로 X·Y만 움직였는지: 대기 자세와 Z 차이 허용
-    "ready_tol_deg": 0.5,        # 같은 이유로 A·B·C 차이 허용
+    "ready_tol_deg": 0.5,        # 조그는 펜 자세를 바꾸지 않으므로: 대기 자세와 A·B·C 차이 허용
     "ready_pose": None,          # 펜 끝을 종이 가운데에 맞춘 자세 (save_ready_pose가 저장)
     "jog_steps_mm": [0.5, 2.0, 10.0],   # 키보드 조그 한 번 이동량 (1/2/3 키로 고름)
     "jog_default_step": 1,               # 처음 이동량: jog_steps_mm의 번호 (0부터)
     "jog_max_forward_mm": 60.0,  # 대기 자세에서 벽 쪽(+X)으로 갈 수 있는 최대
     "jog_max_back_mm": 30.0,     # 대기 자세에서 뒤(-X)로 갈 수 있는 최대
     "jog_max_y_mm": 60.0,        # 대기 자세에서 좌우(Y)로 갈 수 있는 최대
+    "jog_max_z_mm": 60.0,        # 대기 자세에서 위아래(Z)로 갈 수 있는 최대
 }
-JOG_KEYS = {"w": (1, 0), "x": (-1, 0), "a": (0, 1), "d": (0, -1)}   # (X 방향, Y 방향). 종이 왼쪽 = 로봇 +Y
+# (X, Y, Z 방향). w 벽 쪽 / x 뒤로 / a 왼쪽(종이 왼쪽 = 로봇 +Y) / d 오른쪽 / r 위 / f 아래
+JOG_KEYS = {"w": (1, 0, 0), "x": (-1, 0, 0), "a": (0, 1, 0), "d": (0, -1, 0), "r": (0, 0, 1), "f": (0, 0, -1)}
+AT_POSE_TOL_MM = 1.0       # 저장된 시작 자세에 이미 있다고 볼 거리
 SAMPLES = 60    # 관절 이동 한 번을 나눠 검사하는 수
 GAP_TOL_MM = 0.1   # IK 위치 허용 오차(0.05 mm) 때문에 대기 자세 끝점이 여유보다 조금 모자라게 계산되는 것을 허용
 _UP_SEED = np.radians([0, -10, 20, 0, -130, 0])
@@ -148,23 +152,21 @@ def plan_raise(cfg):
     }
 
 
-MOVE_BACK_SCAN_MM = (5.0, 100.0)   # 그리기 범위가 안 닿을 때 로봇을 얼마나 뒤로 빼야 하는지 찾는 간격·최대
+MOVE_BACK_SCAN_MM = (10.0, 100.0)   # 그리기 범위가 안 닿을 때 로봇을 얼마나 뒤로 빼야 하는지 찾는 간격·최대
 
 
 def check_ready(cfg, status, reference):
-    """펜 끝을 종이 가운데에 맞춘 자세(status)를 저장해도 되는지. reference: 펜을 올린 직후 보고된 자세.
-    화살표로 X·Y만 움직였는지(Z·A·B·C가 그대로인지), 그 자리에서 그리기 범위(limits) 전체가 닿고 특이점에서
-    떨어져 있는지 시뮬레이터로 검사. 반환: ok, problems, min_margin_deg, min_singularity_deg, move_back_mm."""
+    """펜 끝을 종이 가운데에 맞춘 자세(status)를 저장해도 되는지. reference: 조그를 시작한 자세(호밍 직후 또는
+    펜을 올린 직후). 조그는 X·Y·Z만 움직이므로 펜 자세(A·B·C)가 그대로인지, 그 자리에서 그리기 범위(limits)
+    전체가 닿고 특이점에서 떨어져 있는지 시뮬레이터로 검사.
+    반환: ok, problems, min_margin_deg, min_singularity_deg, move_back_mm."""
     s = settings(cfg)
     problems = []
-    (x, y, z), (rx, ry, rz) = status["tcp"], reference["tcp"]
-    if abs(z - rz) > s["ready_tol_z_mm"]:
-        problems.append(f"Z가 펜을 올린 직후보다 {z - rz:+.2f} mm 바뀌었습니다 (허용 ±{s['ready_tol_z_mm']:g} mm). "
-                        "화살표로 X·Y만 움직이세요.")
+    x, y, z = status["tcp"]
     turned = max(abs(a - b) for a, b in zip(status["abc_deg"], reference["abc_deg"]))
     if turned > s["ready_tol_deg"]:
         problems.append(f"펜 자세(A·B·C)가 {turned:.2f}° 바뀌었습니다 (허용 {s['ready_tol_deg']:g}°). "
-                        "펜을 다시 올린 뒤 X·Y만 움직이세요.")
+                        "호밍(또는 펜 올리기)부터 다시 하세요.")
 
     rot, seed = pen_frame(s)
 
@@ -209,22 +211,143 @@ def save_ready_pose(config_path, status, now=None):
     return ready
 
 
+def in_jog_box(s, target, reference):
+    """조그 목표가 기준 자세(호밍 직후 등) 둘레의 허용 상자 안인지."""
+    (x, y, z), (rx, ry, rz) = target, reference
+    return (-s["jog_max_back_mm"] <= x - rx <= s["jog_max_forward_mm"] and abs(y - ry) <= s["jog_max_y_mm"]
+            and abs(z - rz) <= s["jog_max_z_mm"])
+
+
+def jog_box_text(s):
+    return (f"기준 자세에서 X -{s['jog_max_back_mm']:g}~+{s['jog_max_forward_mm']:g}, "
+            f"Y ±{s['jog_max_y_mm']:g}, Z ±{s['jog_max_z_mm']:g} mm")
+
+
+def jog_line(xyz, abc, feed):
+    (x, y, z), (a, b, c) = xyz, abc
+    return f"M20 G90 G01 X{x:.3f} Y{y:.3f} Z{z:.3f} A{a:.3f} B{b:.3f} C{c:.3f} F{feed:.0f}"
+
+
+class StartPoseSetup:
+    """앱(그리기 창)의 시작 자세 맞추기 — 작업 스레드에서 run(), 화면 스레드에서 jog()/accept()/cancel().
+    직각 홀더(right_angle) 전용: 호밍 자세가 곧 그리는 자세.
+
+    1. 호밍 자세인지 확인. 저장된 시작 자세가 있으면 펜을 뒤로 뺀 채 그 높이·좌우로 옮긴 뒤 앞으로 다가가 자동으로
+       그 자리로 (이미 그 자리면 움직이지 않음, 호밍 자세도 저장 자세도 아니면 거부).
+    2. 조그: 누르고 있는 동안 화면이 jog(dx, dy, dz)를 계속 넣음. 한 번에 하나만 받고 바쁘면 버려서 손을 떼면 곧 멈춤.
+       펜 자세(A·B·C)는 기준 자세 값으로 고정, 허용 상자(jog_box_text) 밖으로는 보내지 않음.
+    3. accept(): 검사(check_ready)를 통과하면 설정 파일에 저장하고 그 TCP를 반환. 못 맞추면 이유를 보내고 계속 기다림.
+    events("start_pose", state=moving|jog|saved, tcp, message, problems)."""
+
+    def __init__(self, link, cfg, config_path, events):
+        self.link, self.cfg, self.config_path, self.events = link, cfg, config_path, events
+        self._jogs = queue.Queue(maxsize=1)
+        self._decision = queue.Queue()
+
+    def jog(self, dx, dy, dz):
+        try:
+            self._jogs.put_nowait((float(dx), float(dy), float(dz)))
+        except queue.Full:
+            pass
+
+    def accept(self):
+        self._decision.put("accept")
+
+    def cancel(self):
+        self._decision.put("cancel")
+
+    def _status(self):
+        from .draw_executor import parse_status
+        return parse_status(self.link.query_status()[2])
+
+    def _move(self, xyz, abc, feed):
+        self.link.send_and_ack(jog_line(xyz, abc, feed), self.cfg["ack_timeout_s"])
+        self.link.wait_idle(self.cfg["idle_timeout_s"])
+
+    def _emit(self, state, **data):
+        self.events("start_pose", state=state, **data)
+
+    def run(self, should_stop):
+        s = settings(self.cfg)
+        if _mount(s) != "right_angle":
+            raise StartPoseError("앱 안의 시작 자세 맞추기는 직각 홀더(pen_mount right_angle)만 지원합니다. "
+                                 "손목을 돌리는 방식은 python -m mirobot_sketch.start_pose --execute를 쓰세요.")
+        st = self._status()
+        j = st["joints_deg"]
+        homed = j is not None and max(abs(v) for v in j) <= HOME_JOINT_TOL_DEG
+        ready = s["ready_pose"]
+        at_ready = bool(ready) and float(np.linalg.norm(np.subtract(st["tcp"], ready["tcp_mm"]))) <= AT_POSE_TOL_MM
+        if homed:
+            reference = st
+        elif at_ready:
+            reference = {"tcp": tuple(float(v) for v in ms.HOME_TCP_MM), "abc_deg": tuple(ready["abc_deg"])}
+        else:
+            raise StartPoseError(f"호밍 자세도, 저장된 시작 자세도 아닙니다 (TCP {st['tcp']}, 관절 {j}). "
+                                 "가운데 버튼 2초로 호밍한 뒤 다시 연결하세요.")
+        abc = tuple(reference["abc_deg"])
+        feeds = self.cfg["feeds_mm_per_min"]
+        if ready and homed:
+            rx, ry, rz = ready["tcp_mm"]
+            back = min(st["tcp"][0], rx) - float(self.cfg["pen"]["up_clearance_mm"])
+            self._emit("moving", tcp=tuple(st["tcp"]), message="저장된 시작 자세로 옮기는 중입니다")
+            for xyz, feed in (((back, st["tcp"][1], st["tcp"][2]), feeds["travel"]),
+                              ((back, ry, rz), feeds["travel"]), ((rx, ry, rz), feeds["approach"])):
+                if should_stop():
+                    raise StartPoseError("취소했습니다.")
+                self._move(xyz, abc, feed)
+            st = self._status()
+        target = tuple(st["tcp"])
+        self._emit("jog", tcp=target, message="저장된 시작 자세입니다. 필요하면 조그로 고치세요." if ready else
+                   "펜 끝을 종이 가운데에 살짝 대세요.")
+        while True:
+            if should_stop():
+                raise StartPoseError("취소했습니다.")
+            try:
+                decision = self._decision.get_nowait()
+            except queue.Empty:
+                decision = None
+            if decision == "cancel":
+                raise StartPoseError("취소했습니다.")
+            if decision == "accept":
+                st = self._status()
+                check = check_ready(self.cfg, st, reference)
+                if not check["ok"]:
+                    self._emit("jog", tcp=tuple(st["tcp"]), message="기억하지 않았습니다.", problems=check["problems"])
+                    continue
+                saved = save_ready_pose(self.config_path, st)
+                self.cfg.setdefault("start_pose", {})["ready_pose"] = saved
+                self._emit("saved", tcp=tuple(st["tcp"]), message=f"시작 자세를 기억했습니다 (관절 여유 "
+                           f"{check['min_margin_deg']:.1f}°, 특이점까지 {check['min_singularity_deg']:.1f}°)")
+                return tuple(st["tcp"])
+            try:
+                dx, dy, dz = self._jogs.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            nxt = (target[0] + dx, target[1] + dy, target[2] + dz)
+            if not in_jog_box(s, nxt, reference["tcp"]):
+                self._emit("jog", tcp=target, message=f"조그 범위를 넘어 움직이지 않았습니다 ({jog_box_text(s)})")
+                continue
+            self._move(nxt, abc, feeds["approach"])
+            target = nxt
+            self._emit("jog", tcp=tuple(self._status()["tcp"]), message="")
+
+
 def jog_session(link, cfg, reference, config_path, input_fn=input, output_fn=print):
-    """펜을 올린 뒤 키보드로 X·Y만 움직여 펜 끝을 종이 가운데에 대고 저장. Z와 자세(A·B·C)는 펜을 올린 직후 값
-    (reference)으로 고정해 보냄. 키: w 벽 쪽 / x 뒤로 / a 왼쪽 / d 오른쪽 (여러 글자면 차례로), 1·2·3 이동량,
-    Enter 현재 좌표, s 검사 후 저장, q 저장하지 않고 끝. 반환: result(saved|quit), ready."""
+    """펜을 올린 뒤(직각 홀더는 호밍 직후) 키보드로 X·Y·Z를 움직여 펜 끝을 종이 가운데에 대고 저장. 자세(A·B·C)는
+    reference 값으로 고정해 보냄. 키: w 벽 쪽 / x 뒤로 / a 왼쪽 / d 오른쪽 / r 위 / f 아래 (여러 글자면 차례로),
+    1·2·3 이동량, Enter 현재 좌표, s 검사 후 저장, q 저장하지 않고 끝. 반환: result(saved|quit), ready."""
     from .draw_executor import ControllerError, parse_status
 
     s = settings(cfg)
     (rx, ry, rz), (ra, rb, rc) = reference["tcp"], reference["abc_deg"]
-    tx, ty = rx, ry
+    tx, ty, tz = rx, ry, rz
     steps = s["jog_steps_mm"]
     step = steps[s["jog_default_step"]]
     feed = cfg["feeds_mm_per_min"]["approach"]
-    output_fn("키보드로 펜 끝을 종이 가운데에 살짝 대세요. w 벽 쪽 / x 뒤로 / a 왼쪽 / d 오른쪽 (예: www), "
-              f"1·2·3 이동량 {'/'.join(f'{v:g}' for v in steps)} mm (지금 {step:g} mm). Z와 펜 자세는 고정됩니다.")
+    output_fn("키보드로 펜 끝을 종이 가운데에 살짝 대세요. w 벽 쪽 / x 뒤로 / a 왼쪽 / d 오른쪽 / r 위 / f 아래 (예: www), "
+              f"1·2·3 이동량 {'/'.join(f'{v:g}' for v in steps)} mm (지금 {step:g} mm). 펜 자세는 고정됩니다.")
     while True:
-        key = input_fn(f"[{step:g} mm] w/x/a/d 이동, 1/2/3 이동량, Enter 좌표, s 저장, q 끝 > ").strip().lower()
+        key = input_fn(f"[{step:g} mm] w/x/a/d/r/f 이동, 1/2/3 이동량, Enter 좌표, s 저장, q 끝 > ").strip().lower()
         if key == "q":
             return {"result": "quit", "ready": None}
         if key in ("1", "2", "3"):
@@ -233,21 +356,21 @@ def jog_session(link, cfg, reference, config_path, input_fn=input, output_fn=pri
             continue
         if key and all(ch in JOG_KEYS for ch in key):
             for ch in key:
-                ux, uy = JOG_KEYS[ch]
-                nx, ny = tx + ux * step, ty + uy * step
-                if not (-s["jog_max_back_mm"] <= nx - rx <= s["jog_max_forward_mm"] and abs(ny - ry) <= s["jog_max_y_mm"]):
-                    output_fn(f"  조그 범위를 넘어 움직이지 않음 (대기 자세에서 X -{s['jog_max_back_mm']:g}~"
-                              f"+{s['jog_max_forward_mm']:g}, Y ±{s['jog_max_y_mm']:g} mm)")
+                ux, uy, uz = JOG_KEYS[ch]
+                nx, ny, nz = tx + ux * step, ty + uy * step, tz + uz * step
+                if not in_jog_box(s, (nx, ny, nz), (rx, ry, rz)):
+                    output_fn(f"  조그 범위를 넘어 움직이지 않음 ({jog_box_text(s)})")
                     break
-                line = f"M20 G90 G01 X{nx:.3f} Y{ny:.3f} Z{rz:.3f} A{ra:.3f} B{rb:.3f} C{rc:.3f} F{feed:.0f}"
+                line = jog_line((nx, ny, nz), (ra, rb, rc), feed)
                 try:
                     link.send_and_ack(line, cfg["ack_timeout_s"])
                     link.wait_idle(cfg["idle_timeout_s"])
                 except ControllerError as e:
                     output_fn(f"  컨트롤러 오류로 멈춤: {e}")
                     return {"result": "stopped_on_error", "ready": None, "error": str(e)}
-                tx, ty = nx, ny
-            output_fn(f"  목표 X {tx:.1f}, Y {ty:.1f} mm (대기 자세에서 X {tx - rx:+.1f}, Y {ty - ry:+.1f})")
+                tx, ty, tz = nx, ny, nz
+            output_fn(f"  목표 X {tx:.1f}, Y {ty:.1f}, Z {tz:.1f} mm (대기 자세에서 X {tx - rx:+.1f}, "
+                      f"Y {ty - ry:+.1f}, Z {tz - rz:+.1f})")
             continue
         if key not in ("", "s"):
             output_fn(f"  모르는 키: {key}")

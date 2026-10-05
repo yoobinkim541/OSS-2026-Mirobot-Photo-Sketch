@@ -15,6 +15,10 @@ OK_C, BAD_C, ACT_C, IDLE_C = "#16a34a", "#dc2626", ("#2563eb", "#3b82f6"), ("#9a
 SPEEDS = ["1×", "5×", "20×", "50×", "500×"]
 NUMS = "①②③④⑤⑥"
 ACTIVE_STATES = ("preflight", "connect", "start", "confirm", "drawing")
+JOG_STEPS = ["0.5", "2", "10"]          # 조그 한 번 이동량(mm)
+JOG_REPEAT_MS = 150                      # 버튼을 누르고 있는 동안 다시 보내는 간격 (로봇이 바쁘면 작업 쪽에서 버림)
+# 키보드 조그: 로봇 좌표 방향 (X 벽 쪽, Y 종이 왼쪽, Z 위). 종이 오른쪽 = 로봇 -Y (paper_x_to_robot_y_sign = -1)
+JOG_KEYS = {"w": (1, 0, 0), "s": (-1, 0, 0), "Left": (0, 1, 0), "Right": (0, -1, 0), "Up": (0, 0, 1), "Down": (0, 0, -1)}
 
 
 def _fmt(sec):
@@ -23,6 +27,8 @@ def _fmt(sec):
 
 
 class DrawWindow(ctk.CTkToplevel):
+    start_pose_in_virtual = False     # 가상 시뮬레이션에서도 시작 자세 맞추기를 할지 (화면 시험용)
+
     def __init__(self, app, session, cfg, font, launch_rviz=None):
         super().__init__(app.root)
         self.app, self.session, self.cfg, self.font = app, session, cfg, font
@@ -31,7 +37,7 @@ class DrawWindow(ctk.CTkToplevel):
         # 닫을 때 작업이 끝나길 기다리는 시간: 로봇이 명령 응답을 기다리는 최대 시간 + 여유
         self.close_timeout = float(cfg.get("ack_timeout_s", 15)) + 5
         self.title("로봇으로 그리기")
-        self.geometry("780x520")
+        self.geometry("780x680")
         self.protocol("WM_DELETE_WINDOW", self.close)
 
         bar = ctk.CTkFrame(self, fg_color="transparent")
@@ -69,6 +75,34 @@ class DrawWindow(ctk.CTkToplevel):
         self.return_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(opts, text="끝나면 펜을 처음 위치(종이 중심)로 되돌리기", variable=self.return_var, font=font(12)
                         ).grid(row=4, column=0, columnspan=3, sticky="w", pady=4)
+        self.start_pose_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(opts, text="호밍 뒤 시작 자세 맞추기 (기억한 자세로 자동 이동, 조그로 고치기)",
+                        variable=self.start_pose_var, font=font(12)).grid(row=6, column=0, columnspan=3, sticky="w", pady=4)
+
+        # ③ 시작 자세 맞추기 패널 (작업이 start_pose 이벤트를 보낼 때만 보임)
+        self.jog_frame = ctk.CTkFrame(self)
+        self._jog_vec, self._jog_after = None, None
+        pad = ctk.CTkFrame(self.jog_frame, fg_color="transparent")
+        pad.grid(row=0, column=0, rowspan=3, padx=(10, 16), pady=8)
+        for r, c, text, vec in ((0, 0, "벽 쪽 (W)", (1, 0, 0)), (2, 0, "뒤로 (S)", (-1, 0, 0)),
+                                (1, 1, "◀ 왼쪽 (←)", (0, 1, 0)), (1, 2, "오른쪽 ▶ (→)", (0, -1, 0)),
+                                (0, 3, "▲ 위 (↑)", (0, 0, 1)), (2, 3, "▼ 아래 (↓)", (0, 0, -1))):
+            b = ctk.CTkButton(pad, text=text, width=104, font=font(12))
+            b.grid(row=r, column=c, padx=3, pady=3)
+            b.bind("<ButtonPress-1>", lambda _e, v=vec: self._jog_press(v), add="+")
+            b.bind("<ButtonRelease-1>", lambda _e: self._jog_release(), add="+")
+        self.jog_step_var = ctk.StringVar(value=JOG_STEPS[1])
+        ctk.CTkLabel(self.jog_frame, text="한 번에 (mm)", font=font(12)).grid(row=0, column=1, sticky="w")
+        ctk.CTkSegmentedButton(self.jog_frame, values=JOG_STEPS, variable=self.jog_step_var, font=font(12)
+                               ).grid(row=0, column=2, sticky="w", padx=6)
+        self.jog_pos = ctk.CTkLabel(self.jog_frame, text="", font=font(12), anchor="w", justify="left")
+        self.jog_pos.grid(row=1, column=1, columnspan=2, sticky="w")
+        self.jog_accept_btn = ctk.CTkButton(self.jog_frame, text="이 위치 기억하고 계속", command=self.on_accept_start_pose,
+                                            font=font(13, "bold"), fg_color=OK_C, hover_color="#15803d")
+        self.jog_accept_btn.grid(row=2, column=1, columnspan=2, sticky="w", pady=(4, 8))
+        self.jog_msg = ctk.CTkLabel(self, text="", font=font(12), anchor="w", justify="left", wraplength=740,
+                                    text_color=BAD_C)
+        self.bind("<KeyPress>", self._on_jog_key, add="+")
         self.clear_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(opts, text="그림이 끝나면 사진·작업 내용 비우기 (새 그림을 바로 시작)", variable=self.clear_var,
                         font=font(12)).grid(row=5, column=0, columnspan=3, sticky="w", pady=4)
@@ -130,10 +164,60 @@ class DrawWindow(ctk.CTkToplevel):
         self.job = DrawJob(self.session, self.cfg, lambda kind, **d: self.app.ui(self._event, kind, d),
                            launch_rviz=self.launch_rviz)
         self.stop_btn.configure(state="normal", text="취소")
-        self.job.start(virtual=bool(self.virtual_var.get()), virtual_speed=speed,
+        self._hide_jog()
+        virtual = bool(self.virtual_var.get())
+        self.job.start(virtual=virtual, virtual_speed=speed,
                        pending=bool(self.pending_var.get()),
                        recalibrate=bool(self.recalibrate_var.get()),
-                       return_to_origin=bool(self.return_var.get()))
+                       return_to_origin=bool(self.return_var.get()),
+                       start_pose=bool(self.start_pose_var.get()) and (not virtual or self.start_pose_in_virtual))
+
+    # ---------------------------------------------------------------- ③ 시작 자세 조그
+    def _show_jog(self):
+        if not self.jog_frame.winfo_ismapped():
+            self.jog_frame.pack(fill="x", padx=16, pady=(4, 2), before=self.progress)
+            self.jog_msg.pack(fill="x", padx=16, before=self.progress)
+            self.jog_accept_btn.configure(state="normal")
+            self.focus_set()                 # 키보드 조그를 바로 받게
+
+    def _hide_jog(self):
+        self._jog_release()
+        self.jog_frame.pack_forget()
+        self.jog_msg.pack_forget()
+        self.jog_msg.configure(text="")
+
+    def _jog_press(self, vec):
+        """누르고 있는 동안 JOG_REPEAT_MS마다 같은 방향으로 한 번씩 (작업 쪽이 바쁘면 버림 → 손을 떼면 곧 멈춤)."""
+        self._jog_release()
+        self._jog_vec = vec
+        self._jog_tick()
+
+    def _jog_tick(self):
+        if self._jog_vec is None or self.job is None:
+            return
+        step = float(self.jog_step_var.get())
+        self.job.jog(*(v * step for v in self._jog_vec))
+        self._jog_after = self.after(JOG_REPEAT_MS, self._jog_tick)
+
+    def _jog_release(self):
+        self._jog_vec = None
+        if self._jog_after is not None:
+            self.after_cancel(self._jog_after)
+            self._jog_after = None
+
+    def _on_jog_key(self, e):
+        """키를 누르고 있으면 운영체제의 자동 반복으로 계속 들어옴 (한 번에 한 칸)."""
+        vec = JOG_KEYS.get(e.keysym) or JOG_KEYS.get(e.keysym.lower())
+        if vec is None or self.job is None or not self.jog_frame.winfo_ismapped():
+            return
+        step = float(self.jog_step_var.get())
+        self.job.jog(*(v * step for v in vec))
+
+    def on_accept_start_pose(self):
+        if self.job:
+            self.jog_accept_btn.configure(state="disabled")      # 검사(그리기 범위 계산)가 끝날 때까지
+            self.jog_msg.configure(text="그리기 범위를 확인하는 중입니다…", text_color=IDLE_C)
+            self.job.accept_start_pose()
 
     def _on_check(self):
         ready = self.job is not None and self.job.state == "confirm" and self.check_var.get()
@@ -185,6 +269,8 @@ class DrawWindow(ctk.CTkToplevel):
             name = de.DRAW_STEPS[k][1]
             mark, color = {"active": ("●", ACT_C), "done": ("✓", OK_C), "failed": ("✕", BAD_C)}[d["status"]]
             self.steps[d["id"]].configure(text=f"{mark} {NUMS[k]} {name}", text_color=color)
+            if d["id"] == "start" and d["status"] in ("done", "failed"):
+                self._hide_jog()
             if d["status"] == "active" and d["message"]:
                 self.todo.configure(text=d["message"])
             elif d["status"] == "failed":
@@ -202,6 +288,25 @@ class DrawWindow(ctk.CTkToplevel):
                                               f" · 시작 자세를 종이 중심으로 사용(설정 파일 값과 {s['start_center_shift_mm']:g} mm 차이)"))
                 self.check_box.configure(state="normal")
                 self._on_check()
+        elif kind == "start_pose":
+            tcp = d.get("tcp")
+            if d["state"] == "saved":
+                self._hide_jog()
+                self.detail.configure(text=d.get("message", ""))
+                return
+            self._show_jog()
+            if tcp:
+                self.jog_pos.configure(text=f"펜 위치(플랜지) X {tcp[0]:.1f} · Y {tcp[1]:.1f} · Z {tcp[2]:.1f} mm")
+            if d["state"] == "moving":
+                self.todo.configure(text=d.get("message", ""))
+                self.jog_accept_btn.configure(state="disabled")
+            else:
+                self.todo.configure(text="조그로 펜 끝을 종이 가운데에 살짝 대고 [이 위치 기억하고 계속]을 누르세요")
+                problems = d.get("problems") or []
+                msg = d.get("message", "")
+                self.jog_msg.configure(text="\n".join([msg, *problems]).strip() if (problems or msg) else "",
+                                       text_color=BAD_C if problems or "넘어" in msg else IDLE_C)
+                self.jog_accept_btn.configure(state="normal")   # 검사 중에는 작업이 다른 이벤트를 보내지 않음
         elif kind == "robot_status":
             self.app.set_robot_controller_status(d.get("state"), recent=d.get("recent", False))
         elif kind == "calibration_status":
@@ -224,6 +329,7 @@ class DrawWindow(ctk.CTkToplevel):
                 self.rviz_note = f"RViz 없이 진행합니다: {d['message']}"
                 self.detail.configure(text=self.rviz_note)
         elif kind == "finished":
+            self._hide_jog()
             self.finished = d
             self.stop_btn.configure(state="disabled")
             r = d["result"]["result"]

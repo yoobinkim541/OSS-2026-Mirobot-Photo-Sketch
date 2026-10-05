@@ -293,6 +293,65 @@ class DrawJobTest(unittest.TestCase):
         self.assertEqual(job.cfg["paper_center_tcp_mm"], before)
         self.assertNotIn("start_center_shift_mm", job.summary)
 
+    def _start_pose_job(self, rec):
+        """시작 자세 맞추기를 켠 가상 실행: 설정 파일은 임시 폴더, 세션 설정은 사본."""
+        import copy
+        import json
+
+        cfg = copy.deepcopy(golden.default_cfg())
+        session = SketchSession(cfg)
+        session.set_image(Path(self.tmp.name) / "line.png")
+        session.update_params({"box_mm": 40, "epsilon_px": 4.0})
+        session.run_current()
+        session.simulate()
+        config_file = Path(self.tmp.name) / "start_pose_config.json"
+        config_file.write_text(json.dumps(golden.default_cfg(), ensure_ascii=False), encoding="utf-8")
+        patcher = mock.patch.object(de.paths, "config_path", lambda: config_file)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        job = self.job(rec)
+        job.session, job.cfg = session, cfg
+        return job, cfg, config_file
+
+    def test_start_pose_jog_is_remembered_and_used_as_paper_center(self):
+        import json
+
+        rec = Recorder()
+        job, cfg, config_file = self._start_pose_job(rec)
+        before = dict(cfg["paper_center_tcp_mm"])
+        job.start(virtual=True, virtual_speed=500, start_pose=True)
+        deadline = time.monotonic() + 15
+        while not any(k == "start_pose" and d["state"] == "jog" for k, d in list(rec.events)):
+            self.assertLess(time.monotonic(), deadline, rec.events[-5:])
+            time.sleep(0.02)
+        self.assertEqual(job.state, "start")
+        job.jog(2.0, 0.0, -1.0)
+        while not any(k == "start_pose" and d.get("tcp") and abs(d["tcp"][2] - (before["z"] - 1.0)) < 1e-6
+                      for k, d in list(rec.events)):
+            self.assertLess(time.monotonic(), deadline, rec.events[-5:])
+            time.sleep(0.02)
+        job.accept_start_pose()
+        self.assertTrue(rec.ready.wait(30), rec.events[-5:])
+        self.assertAlmostEqual(cfg["paper_center_tcp_mm"]["x"], before["x"] + 2.0, places=3)
+        self.assertAlmostEqual(cfg["paper_center_tcp_mm"]["z"], before["z"] - 1.0, places=3)
+        saved = json.loads(config_file.read_text(encoding="utf-8"))["start_pose"]["ready_pose"]
+        self.assertAlmostEqual(saved["tcp_mm"][0], before["x"] + 2.0, places=3)
+        job.cancel()
+        self.assertTrue(rec.done.wait(10))
+
+    def test_stop_while_adjusting_the_start_pose_cancels(self):
+        rec = Recorder()
+        job, cfg, config_file = self._start_pose_job(rec)
+        job.start(virtual=True, virtual_speed=500, start_pose=True)
+        deadline = time.monotonic() + 15
+        while not any(k == "start_pose" for k, _ in list(rec.events)):
+            self.assertLess(time.monotonic(), deadline, rec.events[-5:])
+            time.sleep(0.02)
+        job.stop()
+        self.assertTrue(rec.done.wait(10))
+        fin = next(d for k, d in rec.events if k == "finished")
+        self.assertEqual(fin["result"]["result"], "cancelled")
+
     def test_photo_sized_rectangle_can_be_selected_for_contact_calibration(self):
         cfg = golden.default_cfg()
         outline = [[(-60, -35.4), (60, -35.4), (60, 35.4), (-60, 35.4)]]
