@@ -19,32 +19,32 @@ import golden  # noqa: E402
 CFG = golden.default_cfg()
 
 
-def status(x, y=0.0, z=200.0, abc=(0.0, -55.0, 0.0), joints=(0.0, -27.3, 46.7, 0.0, -144.4, 0.0)):
+def status(x, y=0.0, z=130.0, abc=(0.0, -90.0, 0.0), joints=(0.0, -1.4, 46.4, 0.0, -135.0, 0.0)):
     return {"state": "Idle", "tcp": (x, y, z), "abc_deg": abc, "joints_deg": list(joints)}
 
 
-REFERENCE = status(165.9)        # 펜을 올린 직후(대기 자세)에 컨트롤러가 보고한 값이라고 가정
+REFERENCE = status(185.0)        # 펜을 수평으로 올린 직후(대기 자세)에 컨트롤러가 보고한 값이라고 가정
 
 
 class CheckReadyTest(unittest.TestCase):
     def test_jog_along_x_and_y_only_is_accepted(self):
-        r = sp.check_ready(CFG, status(182.0, y=3.0), REFERENCE)
+        r = sp.check_ready(CFG, status(200.0, y=3.0), REFERENCE)
         self.assertTrue(r["ok"], r["problems"])
         self.assertGreater(r["min_margin_deg"], 5.0)
 
     def test_height_change_is_rejected(self):
-        r = sp.check_ready(CFG, status(182.0, z=203.0), REFERENCE)
+        r = sp.check_ready(CFG, status(200.0, z=133.0), REFERENCE)
         self.assertFalse(r["ok"])
         self.assertTrue(any("Z" in p for p in r["problems"]))
 
     def test_orientation_change_is_rejected(self):
-        r = sp.check_ready(CFG, status(182.0, abc=(0.0, -50.0, 0.0)), REFERENCE)
+        r = sp.check_ready(CFG, status(200.0, abc=(0.0, -85.0, 0.0)), REFERENCE)
         self.assertFalse(r["ok"])
         self.assertTrue(any("자세" in p for p in r["problems"]))
 
     def test_paper_too_close_to_the_base_asks_to_move_the_robot_back(self):
-        # 플랜지 X 150 mm: 펜을 올린 자세에서 그리기 범위 끝이 J2 한계에 걸림 (T1)
-        r = sp.check_ready(CFG, status(150.0), REFERENCE)
+        # 플랜지 X 160 mm: 펜이 수평인 자세에서 그리기 범위 끝이 관절 한계에 걸림
+        r = sp.check_ready(CFG, status(160.0), REFERENCE)
         self.assertFalse(r["ok"])
         self.assertGreater(r["move_back_mm"], 0.0)
         self.assertTrue(any("뒤로" in p for p in r["problems"]))
@@ -65,8 +65,8 @@ class SaveLoadTest(unittest.TestCase):
         saved = sp.save_ready_pose(self.path, status(182.0, y=3.0))
         loaded = sp.settings(de.load_config(self.path))["ready_pose"]
         self.assertEqual(loaded, saved)
-        self.assertEqual(loaded["tcp_mm"], [182.0, 3.0, 200.0])
-        self.assertEqual(loaded["abc_deg"], [0.0, -55.0, 0.0])
+        self.assertEqual(loaded["tcp_mm"], [182.0, 3.0, 130.0])
+        self.assertEqual(loaded["abc_deg"], [0.0, -90.0, 0.0])
 
     def test_saving_keeps_the_other_settings(self):
         sp.save_ready_pose(self.path, status(182.0))
@@ -94,7 +94,7 @@ class ScriptedLink:
     def query_status(self, timeout=2.0):
         x, y, z = self.poses.pop(0) if len(self.poses) > 1 else self.poses[0]
         raw = ("<Idle,Angle(ABCDXYZ):0.0,-144.4,0.0,0.0,0.0,-27.3,46.7,"
-               f"Cartesian coordinate(XYZ RxRyRz):{x},{y},{z},0.0,-55.0,0.0,Pump PWM:0>")
+               f"Cartesian coordinate(XYZ RxRyRz):{x},{y},{z},0.0,-90.0,0.0,Pump PWM:0>")
         return "Idle", (x, y, z), raw
 
 
@@ -116,21 +116,21 @@ class JogSessionTest(unittest.TestCase):
                               input_fn=lambda _: next(keys), output_fn=self.out.append)
 
     def test_enter_shows_the_current_position_and_s_saves(self):
-        result = self.run_session([(170.0, 0.0, 200.0), (182.0, 2.0, 200.0)], ["", "s"])
+        result = self.run_session([(190.0, 0.0, 130.0), (200.0, 2.0, 130.0)], ["", "s"])
         self.assertEqual(result["result"], "saved")
-        self.assertTrue(any("170.0" in line for line in self.out))
+        self.assertTrue(any("190.0" in line for line in self.out))
         saved = sp.settings(de.load_config(self.path))["ready_pose"]
-        self.assertEqual(saved["tcp_mm"], [182.0, 2.0, 200.0])
+        self.assertEqual(saved["tcp_mm"], [200.0, 2.0, 130.0])
 
     def test_a_bad_pose_is_not_saved(self):
-        result = self.run_session([(182.0, 0.0, 205.0)], ["s", "q"])
+        result = self.run_session([(200.0, 0.0, 135.0)], ["s", "q"])
         self.assertEqual(result["result"], "quit")
         self.assertIsNone(sp.settings(de.load_config(self.path))["ready_pose"])
         self.assertTrue(any("Z" in line for line in self.out))
 
 
     def test_w_moves_toward_the_wall_keeping_height_and_orientation(self):
-        self.run_session([(165.9, 0.0, 200.0)], ["w", "q"])
+        self.run_session([(185.0, 0.0, 130.0)], ["w", "q"])
         step = sp.settings(CFG)["jog_steps_mm"][sp.settings(CFG)["jog_default_step"]]
         x, y, z = REFERENCE["tcp"]
         a, b, c = REFERENCE["abc_deg"]
@@ -139,7 +139,7 @@ class JogSessionTest(unittest.TestCase):
                                           f"A{a:.3f} B{b:.3f} C{c:.3f} F{feed:.0f}"])
 
     def test_step_keys_change_the_step_and_moves_add_up(self):
-        self.run_session([(165.9, 0.0, 200.0)], ["3", "aa", "1", "d", "q"])
+        self.run_session([(185.0, 0.0, 130.0)], ["3", "aa", "1", "d", "q"])
         steps = sp.settings(CFG)["jog_steps_mm"]
         ys = [float(line.split(" Y")[1].split(" ")[0]) for line in self.link.sent]
         self.assertEqual(ys, [steps[2], 2 * steps[2], 2 * steps[2] - steps[0]])
@@ -147,7 +147,7 @@ class JogSessionTest(unittest.TestCase):
     def test_moves_outside_the_jog_box_are_refused(self):
         limit = sp.settings(CFG)["jog_max_y_mm"]
         keys = ["3"] + ["a"] * int(limit / sp.settings(CFG)["jog_steps_mm"][2] + 2) + ["q"]
-        self.run_session([(165.9, 0.0, 200.0)], keys)
+        self.run_session([(185.0, 0.0, 130.0)], keys)
         ys = [float(line.split(" Y")[1].split(" ")[0]) for line in self.link.sent]
         self.assertLessEqual(max(ys), limit + 1e-9)
         self.assertTrue(any("범위" in line for line in self.out))

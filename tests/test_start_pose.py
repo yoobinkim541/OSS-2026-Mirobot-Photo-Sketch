@@ -77,7 +77,7 @@ class RaisePlanTest(unittest.TestCase):
 
     def test_refuses_when_the_paper_is_too_close_for_the_pen(self):
         cfg = copy.deepcopy(CFG)
-        cfg["start_pose"] = {"paper_x_mm": 200.0, "pen_len_max_mm": 100.0}
+        cfg["start_pose"] = {"paper_x_mm": 200.0, "pen_len_max_mm": 100.0, "pen_up_deg": 35.0, "standby_z_mm": 200.0}
         with self.assertRaises(sp.StartPoseError) as cm:
             sp.plan_raise(cfg)
         self.assertIn("mm", str(cm.exception))
