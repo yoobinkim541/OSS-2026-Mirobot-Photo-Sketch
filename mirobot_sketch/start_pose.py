@@ -38,7 +38,13 @@ DEFAULTS = {
     "ready_tol_z_mm": 0.5,       # 화살표로 X·Y만 움직였는지: 대기 자세와 Z 차이 허용
     "ready_tol_deg": 0.5,        # 같은 이유로 A·B·C 차이 허용
     "ready_pose": None,          # 펜 끝을 종이 가운데에 맞춘 자세 (save_ready_pose가 저장)
+    "jog_steps_mm": [0.5, 2.0, 10.0],   # 키보드 조그 한 번 이동량 (1/2/3 키로 고름)
+    "jog_default_step": 1,               # 처음 이동량: jog_steps_mm의 번호 (0부터)
+    "jog_max_forward_mm": 60.0,  # 대기 자세에서 벽 쪽(+X)으로 갈 수 있는 최대
+    "jog_max_back_mm": 30.0,     # 대기 자세에서 뒤(-X)로 갈 수 있는 최대
+    "jog_max_y_mm": 60.0,        # 대기 자세에서 좌우(Y)로 갈 수 있는 최대
 }
+JOG_KEYS = {"w": (1, 0), "x": (-1, 0), "a": (0, 1), "d": (0, -1)}   # (X 방향, Y 방향). 종이 왼쪽 = 로봇 +Y
 SAMPLES = 60    # 관절 이동 한 번을 나눠 검사하는 수
 GAP_TOL_MM = 0.1   # IK 위치 허용 오차(0.05 mm) 때문에 대기 자세 끝점이 여유보다 조금 모자라게 계산되는 것을 허용
 _UP_SEED = np.radians([0, -10, 20, 0, -130, 0])
@@ -178,20 +184,52 @@ def save_ready_pose(config_path, status, now=None):
 
 
 def jog_session(link, cfg, reference, config_path, input_fn=input, output_fn=print):
-    """펜을 올린 뒤 사람이 컨트롤러 화살표로 X·Y만 움직여 펜 끝을 종이 가운데에 대는 동안:
-    Enter = 현재 좌표(대기 자세와의 차이), s = 검사 후 저장, q = 저장하지 않고 끝. 반환: result(saved|quit), ready."""
-    from .draw_executor import parse_status
+    """펜을 올린 뒤 키보드로 X·Y만 움직여 펜 끝을 종이 가운데에 대고 저장. Z와 자세(A·B·C)는 펜을 올린 직후 값
+    (reference)으로 고정해 보냄. 키: w 벽 쪽 / x 뒤로 / a 왼쪽 / d 오른쪽 (여러 글자면 차례로), 1·2·3 이동량,
+    Enter 현재 좌표, s 검사 후 저장, q 저장하지 않고 끝. 반환: result(saved|quit), ready."""
+    from .draw_executor import ControllerError, parse_status
 
-    (rx, ry, rz), rabc = reference["tcp"], reference["abc_deg"]
-    output_fn("컨트롤러 화살표로 X(벽 쪽·뒤)와 Y(좌우)만 움직여 펜 끝을 종이 가운데에 살짝 대세요.")
+    s = settings(cfg)
+    (rx, ry, rz), (ra, rb, rc) = reference["tcp"], reference["abc_deg"]
+    tx, ty = rx, ry
+    steps = s["jog_steps_mm"]
+    step = steps[s["jog_default_step"]]
+    feed = cfg["feeds_mm_per_min"]["approach"]
+    output_fn("키보드로 펜 끝을 종이 가운데에 살짝 대세요. w 벽 쪽 / x 뒤로 / a 왼쪽 / d 오른쪽 (예: www), "
+              f"1·2·3 이동량 {'/'.join(f'{v:g}' for v in steps)} mm (지금 {step:g} mm). Z와 펜 자세는 고정됩니다.")
     while True:
-        key = input_fn("Enter: 현재 좌표 / s: 저장 / q: 끝 > ").strip().lower()
+        key = input_fn(f"[{step:g} mm] w/x/a/d 이동, 1/2/3 이동량, Enter 좌표, s 저장, q 끝 > ").strip().lower()
         if key == "q":
             return {"result": "quit", "ready": None}
+        if key in ("1", "2", "3"):
+            step = steps[int(key) - 1]
+            output_fn(f"  이동량 {step:g} mm")
+            continue
+        if key and all(ch in JOG_KEYS for ch in key):
+            for ch in key:
+                ux, uy = JOG_KEYS[ch]
+                nx, ny = tx + ux * step, ty + uy * step
+                if not (-s["jog_max_back_mm"] <= nx - rx <= s["jog_max_forward_mm"] and abs(ny - ry) <= s["jog_max_y_mm"]):
+                    output_fn(f"  조그 범위를 넘어 움직이지 않음 (대기 자세에서 X -{s['jog_max_back_mm']:g}~"
+                              f"+{s['jog_max_forward_mm']:g}, Y ±{s['jog_max_y_mm']:g} mm)")
+                    break
+                line = f"M20 G90 G01 X{nx:.3f} Y{ny:.3f} Z{rz:.3f} A{ra:.3f} B{rb:.3f} C{rc:.3f} F{feed:.0f}"
+                try:
+                    link.send_and_ack(line, cfg["ack_timeout_s"])
+                    link.wait_idle(cfg["idle_timeout_s"])
+                except ControllerError as e:
+                    output_fn(f"  컨트롤러 오류로 멈춤: {e}")
+                    return {"result": "stopped_on_error", "ready": None, "error": str(e)}
+                tx, ty = nx, ny
+            output_fn(f"  목표 X {tx:.1f}, Y {ty:.1f} mm (대기 자세에서 X {tx - rx:+.1f}, Y {ty - ry:+.1f})")
+            continue
+        if key not in ("", "s"):
+            output_fn(f"  모르는 키: {key}")
+            continue
         st = parse_status(link.query_status()[2])
         (x, y, z), abc = st["tcp"], st["abc_deg"]
         output_fn(f"  TCP ({x:.1f}, {y:.1f}, {z:.1f})  대기 자세에서 X {x - rx:+.1f}, Y {y - ry:+.1f}, Z {z - rz:+.2f} mm, "
-                  f"A·B·C 변화 {max(abs(a - b) for a, b in zip(abc, rabc)):.2f}°")
+                  f"A·B·C 변화 {max(abs(a - b) for a, b in zip(abc, (ra, rb, rc))):.2f}°")
         if key != "s":
             continue
         check = check_ready(cfg, st, reference)

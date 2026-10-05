@@ -83,6 +83,13 @@ class ScriptedLink:
 
     def __init__(self, poses):
         self.poses = list(poses)
+        self.sent = []
+
+    def send_and_ack(self, line, timeout, should_stop=None):
+        self.sent.append(line)
+
+    def wait_idle(self, timeout):
+        return self.poses[0]
 
     def query_status(self, timeout=2.0):
         x, y, z = self.poses.pop(0) if len(self.poses) > 1 else self.poses[0]
@@ -104,7 +111,8 @@ class JogSessionTest(unittest.TestCase):
 
     def run_session(self, poses, keys):
         keys = iter(keys)
-        return sp.jog_session(ScriptedLink(poses), CFG, REFERENCE, self.path,
+        self.link = ScriptedLink(poses)
+        return sp.jog_session(self.link, CFG, REFERENCE, self.path,
                               input_fn=lambda _: next(keys), output_fn=self.out.append)
 
     def test_enter_shows_the_current_position_and_s_saves(self):
@@ -119,6 +127,30 @@ class JogSessionTest(unittest.TestCase):
         self.assertEqual(result["result"], "quit")
         self.assertIsNone(sp.settings(de.load_config(self.path))["ready_pose"])
         self.assertTrue(any("Z" in line for line in self.out))
+
+
+    def test_w_moves_toward_the_wall_keeping_height_and_orientation(self):
+        self.run_session([(165.9, 0.0, 200.0)], ["w", "q"])
+        step = sp.settings(CFG)["jog_steps_mm"][sp.settings(CFG)["jog_default_step"]]
+        x, y, z = REFERENCE["tcp"]
+        a, b, c = REFERENCE["abc_deg"]
+        feed = CFG["feeds_mm_per_min"]["approach"]
+        self.assertEqual(self.link.sent, [f"M20 G90 G01 X{x + step:.3f} Y{y:.3f} Z{z:.3f} "
+                                          f"A{a:.3f} B{b:.3f} C{c:.3f} F{feed:.0f}"])
+
+    def test_step_keys_change_the_step_and_moves_add_up(self):
+        self.run_session([(165.9, 0.0, 200.0)], ["3", "aa", "1", "d", "q"])
+        steps = sp.settings(CFG)["jog_steps_mm"]
+        ys = [float(line.split(" Y")[1].split(" ")[0]) for line in self.link.sent]
+        self.assertEqual(ys, [steps[2], 2 * steps[2], 2 * steps[2] - steps[0]])
+
+    def test_moves_outside_the_jog_box_are_refused(self):
+        limit = sp.settings(CFG)["jog_max_y_mm"]
+        keys = ["3"] + ["a"] * int(limit / sp.settings(CFG)["jog_steps_mm"][2] + 2) + ["q"]
+        self.run_session([(165.9, 0.0, 200.0)], keys)
+        ys = [float(line.split(" Y")[1].split(" ")[0]) for line in self.link.sent]
+        self.assertLessEqual(max(ys), limit + 1e-9)
+        self.assertTrue(any("범위" in line for line in self.out))
 
 
 if __name__ == "__main__":
