@@ -332,64 +332,140 @@ class StartPoseSetup:
             self._emit("jog", tcp=tuple(self._status()["tcp"]), message="")
 
 
-def jog_session(link, cfg, reference, config_path, input_fn=input, output_fn=print):
+# (X, Y, Z 방향) — Enter 없이 키 하나씩 읽을 때. 그리기 창과 같은 키: W/S 벽 쪽·뒤로, ←/→ 좌우, ↑/↓ 위아래
+SINGLE_KEY_MOVES = {"w": (1, 0, 0), "s": (-1, 0, 0), "x": (-1, 0, 0),
+                    "Left": (0, 1, 0), "a": (0, 1, 0), "Right": (0, -1, 0), "d": (0, -1, 0),
+                    "Up": (0, 0, 1), "r": (0, 0, 1), "Down": (0, 0, -1), "f": (0, 0, -1)}
+_CONSOLE_ARROWS = {"H": "Up", "P": "Down", "K": "Left", "M": "Right"}
+
+
+def console_keys():
+    """Windows 콘솔에서 Enter 없이 키 하나씩 읽기: (read_key, drain). 콘솔이 아니면(파이프·다른 OS) None.
+    read_key(): 글자 하나 또는 방향키 이름(Up/Down/Left/Right). drain(): 이미 들어와 쌓인 키를 버림."""
+    import sys
+
+    try:
+        import msvcrt
+    except ImportError:
+        return None
+    if not sys.stdin.isatty():
+        return None
+
+    def read_key():
+        ch = msvcrt.getwch()
+        if ch in ("\x00", "\xe0"):          # 방향키 등 특수키는 두 글자로 들어옴
+            return _CONSOLE_ARROWS.get(msvcrt.getwch(), "")
+        return ch
+
+    def drain():
+        while msvcrt.kbhit():
+            msvcrt.getwch()
+
+    return read_key, drain
+
+
+def jog_session(link, cfg, reference, config_path, input_fn=input, output_fn=print, key_fn=None, drain_fn=None):
     """펜을 올린 뒤(직각 홀더는 호밍 직후) 키보드로 X·Y·Z를 움직여 펜 끝을 종이 가운데에 대고 저장. 자세(A·B·C)는
-    reference 값으로 고정해 보냄. 키: w 벽 쪽 / x 뒤로 / a 왼쪽 / d 오른쪽 / r 위 / f 아래 (여러 글자면 차례로),
-    1·2·3 이동량, Enter 현재 좌표, s 검사 후 저장, q 저장하지 않고 끝. 반환: result(saved|quit), ready."""
+    reference 값으로 고정해 보냄. 반환: result(saved|quit|stopped_on_error), ready.
+
+    key_fn이 있으면 Enter 없이 키 하나씩 (console_keys): W/S 벽 쪽·뒤로, ←/→ 좌우, ↑/↓ 위아래(a/d, r/f, x도 됨),
+    1·2·3 이동량, Space 현재 좌표, Enter 검사 후 저장, Q/Esc 끝. 키를 누르고 있으면 자동 반복으로 계속 움직이고,
+    한 칸 움직일 때마다 drain_fn으로 그동안 쌓인 반복 키를 버려 손을 떼면 바로 멈춤.
+    key_fn이 없으면 한 줄씩(input_fn): w/x/a/d/r/f 이동(여러 글자면 차례로), 1·2·3, Enter 좌표, s 저장, q 끝."""
     from .draw_executor import ControllerError, parse_status
 
     s = settings(cfg)
     (rx, ry, rz), (ra, rb, rc) = reference["tcp"], reference["abc_deg"]
-    tx, ty, tz = rx, ry, rz
+    pos = [rx, ry, rz]
     steps = s["jog_steps_mm"]
     step = steps[s["jog_default_step"]]
     feed = cfg["feeds_mm_per_min"]["approach"]
-    output_fn("키보드로 펜 끝을 종이 가운데에 살짝 대세요. w 벽 쪽 / x 뒤로 / a 왼쪽 / d 오른쪽 / r 위 / f 아래 (예: www), "
-              f"1·2·3 이동량 {'/'.join(f'{v:g}' for v in steps)} mm (지금 {step:g} mm). 펜 자세는 고정됩니다.")
-    while True:
-        key = input_fn(f"[{step:g} mm] w/x/a/d/r/f 이동, 1/2/3 이동량, Enter 좌표, s 저장, q 끝 > ").strip().lower()
-        if key == "q":
-            return {"result": "quit", "ready": None}
-        if key in ("1", "2", "3"):
-            step = steps[int(key) - 1]
-            output_fn(f"  이동량 {step:g} mm")
-            continue
-        if key and all(ch in JOG_KEYS for ch in key):
-            for ch in key:
-                ux, uy, uz = JOG_KEYS[ch]
-                nx, ny, nz = tx + ux * step, ty + uy * step, tz + uz * step
-                if not in_jog_box(s, (nx, ny, nz), (rx, ry, rz)):
-                    output_fn(f"  조그 범위를 넘어 움직이지 않음 ({jog_box_text(s)})")
-                    break
-                line = jog_line((nx, ny, nz), (ra, rb, rc), feed)
-                try:
-                    link.send_and_ack(line, cfg["ack_timeout_s"])
-                    link.wait_idle(cfg["idle_timeout_s"])
-                except ControllerError as e:
-                    output_fn(f"  컨트롤러 오류로 멈춤: {e}")
-                    return {"result": "stopped_on_error", "ready": None, "error": str(e)}
-                tx, ty, tz = nx, ny, nz
-            output_fn(f"  목표 X {tx:.1f}, Y {ty:.1f}, Z {tz:.1f} mm (대기 자세에서 X {tx - rx:+.1f}, "
-                      f"Y {ty - ry:+.1f}, Z {tz - rz:+.1f})")
-            continue
-        if key not in ("", "s"):
-            output_fn(f"  모르는 키: {key}")
-            continue
+
+    def move(vec):
+        """한 칸. 반환: 계속 가도 되면 True (범위 밖이면 False), 컨트롤러 오류면 ControllerError."""
+        nxt = [p + u * step for p, u in zip(pos, vec)]
+        if not in_jog_box(s, nxt, (rx, ry, rz)):
+            output_fn(f"  조그 범위를 넘어 움직이지 않음 ({jog_box_text(s)})")
+            return False
+        link.send_and_ack(jog_line(nxt, (ra, rb, rc), feed), cfg["ack_timeout_s"])
+        link.wait_idle(cfg["idle_timeout_s"])
+        pos[:] = nxt
+        return True
+
+    def where():
+        output_fn(f"  목표 X {pos[0]:.1f}, Y {pos[1]:.1f}, Z {pos[2]:.1f} mm (기준 자세에서 X {pos[0] - rx:+.1f}, "
+                  f"Y {pos[1] - ry:+.1f}, Z {pos[2] - rz:+.1f}) [한 번 {step:g} mm]")
+
+    def status():
         st = parse_status(link.query_status()[2])
         (x, y, z), abc = st["tcp"], st["abc_deg"]
-        output_fn(f"  TCP ({x:.1f}, {y:.1f}, {z:.1f})  대기 자세에서 X {x - rx:+.1f}, Y {y - ry:+.1f}, Z {z - rz:+.2f} mm, "
+        output_fn(f"  TCP ({x:.1f}, {y:.1f}, {z:.1f})  기준 자세에서 X {x - rx:+.1f}, Y {y - ry:+.1f}, Z {z - rz:+.2f} mm, "
                   f"A·B·C 변화 {max(abs(a - b) for a, b in zip(abc, (ra, rb, rc))):.2f}°")
-        if key != "s":
-            continue
+        return st
+
+    def save():
+        st = status()
         check = check_ready(cfg, st, reference)
         if not check["ok"]:
             for p in check["problems"]:
                 output_fn(f"  저장하지 않음: {p}")
-            continue
+            return None
         ready = save_ready_pose(config_path, st)
         output_fn(f"  저장했습니다: {config_path} (관절 여유 {check['min_margin_deg']:.1f}°, "
                   f"특이점까지 {check['min_singularity_deg']:.1f}°)")
         return {"result": "saved", "ready": ready}
+
+    try:
+        if key_fn is not None:
+            output_fn("펜 끝을 종이 가운데에 살짝 대세요. 누르면 바로 움직입니다 (누르고 있으면 계속): "
+                      "W 벽 쪽 / S 뒤로 / ← → 좌우 / ↑ ↓ 위아래, "
+                      f"1·2·3 한 번에 {'/'.join(f'{v:g}' for v in steps)} mm (지금 {step:g} mm), "
+                      "Space 현재 좌표, Enter 저장, Q·Esc 끝. 펜 자세는 고정됩니다.")
+            while True:
+                key = key_fn()
+                k = key.lower() if len(key) == 1 else key
+                if k in ("q", "\x1b"):
+                    return {"result": "quit", "ready": None}
+                if k in ("1", "2", "3"):
+                    step = steps[int(k) - 1]
+                    output_fn(f"  이동량 {step:g} mm")
+                elif k in SINGLE_KEY_MOVES:
+                    if move(SINGLE_KEY_MOVES[k]):
+                        where()
+                    if drain_fn:
+                        drain_fn()
+                elif k == " ":
+                    status()
+                elif k in ("\r", "\n"):
+                    saved = save()
+                    if saved:
+                        return saved
+
+        output_fn("키보드로 펜 끝을 종이 가운데에 살짝 대세요. w 벽 쪽 / x 뒤로 / a 왼쪽 / d 오른쪽 / r 위 / f 아래 (예: www), "
+                  f"1·2·3 이동량 {'/'.join(f'{v:g}' for v in steps)} mm (지금 {step:g} mm). 펜 자세는 고정됩니다.")
+        while True:
+            key = input_fn(f"[{step:g} mm] w/x/a/d/r/f 이동, 1/2/3 이동량, Enter 좌표, s 저장, q 끝 > ").strip().lower()
+            if key == "q":
+                return {"result": "quit", "ready": None}
+            if key in ("1", "2", "3"):
+                step = steps[int(key) - 1]
+                output_fn(f"  이동량 {step:g} mm")
+            elif key and all(ch in JOG_KEYS for ch in key):
+                for ch in key:
+                    if not move(JOG_KEYS[ch]):
+                        break
+                where()
+            elif key == "":
+                status()
+            elif key == "s":
+                saved = save()
+                if saved:
+                    return saved
+            else:
+                output_fn(f"  모르는 키: {key}")
+    except ControllerError as e:
+        output_fn(f"  컨트롤러 오류로 멈춤: {e}")
+        return {"result": "stopped_on_error", "ready": None, "error": str(e)}
 
 
 HOME_JOINT_TOL_DEG = 0.5   # 호밍 직후로 볼 관절 각도 허용 오차
@@ -471,7 +547,9 @@ def main():
 
         result = run_raise(link, cfg, confirm)
         if result["result"] == "completed":
-            result["jog"] = jog_session(link, cfg, result["reported"], args.config or paths.config_path())
+            keys = console_keys()       # Windows 콘솔이면 Enter 없이 키 하나씩 바로 움직임
+            result["jog"] = jog_session(link, cfg, result["reported"], args.config or paths.config_path(),
+                                        key_fn=keys[0] if keys else None, drain_fn=keys[1] if keys else None)
     except (de.DrawError, StartPoseError) as e:
         print(f"멈춤: {getattr(e, 'message', e)}")
         return 1

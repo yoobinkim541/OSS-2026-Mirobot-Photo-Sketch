@@ -133,6 +133,57 @@ class JogSessionTest(unittest.TestCase):
         return sp.jog_session(self.link, FLANGE_CFG, REFERENCE, self.path,
                               input_fn=lambda _: next(keys), output_fn=self.out.append)
 
+    def run_keys(self, poses, keys):
+        """Enter 없이 키 하나씩 읽는 방식 (Windows 콘솔의 msvcrt 대신 정해 둔 키를 차례로)."""
+        keys = iter(keys)
+        self.link = ScriptedLink(poses)
+        self.drained = 0
+
+        def drain():
+            self.drained += 1
+
+        return sp.jog_session(self.link, FLANGE_CFG, REFERENCE, self.path, output_fn=self.out.append,
+                              key_fn=lambda: next(keys), drain_fn=drain)
+
+    def test_single_keys_move_immediately_like_the_draw_window(self):
+        self.run_keys([(185.0, 0.0, 130.0)], ["w", "Up", "Left", "s", "Down", "q"])
+        step = sp.settings(FLANGE_CFG)["jog_steps_mm"][sp.settings(FLANGE_CFG)["jog_default_step"]]
+        moves = [tuple(float(line.split(f" {k}")[1].split(" ")[0]) for k in "XYZ") for line in self.link.sent]
+        self.assertEqual(moves, [(185.0 + step, 0.0, 130.0), (185.0 + step, 0.0, 130.0 + step),
+                                 (185.0 + step, step, 130.0 + step), (185.0, step, 130.0 + step),
+                                 (185.0, step, 130.0)])
+        self.assertEqual(self.drained, 5)          # 움직이는 동안 쌓인 자동 반복 키는 버려서 손을 떼면 바로 멈춤
+
+    def test_single_key_enter_saves_and_digits_change_the_step(self):
+        result = self.run_keys([(200.0, 2.0, 130.0)], ["3", "x", "1", "w", " ", "\r"])
+        steps = sp.settings(FLANGE_CFG)["jog_steps_mm"]
+        xs = [float(line.split(" X")[1].split(" ")[0]) for line in self.link.sent]
+        self.assertEqual(xs, [185.0 - steps[2], 185.0 - steps[2] + steps[0]])
+        self.assertEqual(result["result"], "saved")
+        self.assertEqual(sp.settings(de.load_config(self.path))["ready_pose"]["tcp_mm"], [200.0, 2.0, 130.0])
+
+    def test_console_keys_falls_back_to_lines_when_not_a_console(self):
+        from unittest import mock
+        with mock.patch("sys.stdin") as stdin:
+            stdin.isatty.return_value = False
+            self.assertIsNone(sp.console_keys())
+
+    def test_console_arrow_keys_are_named(self):
+        from unittest import mock
+        try:
+            import msvcrt  # noqa: F401
+        except ImportError:
+            self.skipTest("Windows 콘솔 전용")
+        with mock.patch("sys.stdin") as stdin, mock.patch("msvcrt.getwch", side_effect=["à", "H", "w"]):
+            stdin.isatty.return_value = True
+            read_key, _drain = sp.console_keys()
+            self.assertEqual((read_key(), read_key()), ("Up", "w"))
+
+    def test_single_key_escape_quits_without_saving(self):
+        result = self.run_keys([(185.0, 0.0, 130.0)], ["\x1b"])
+        self.assertEqual(result["result"], "quit")
+        self.assertEqual(self.link.sent, [])
+
     def test_enter_shows_the_current_position_and_s_saves(self):
         result = self.run_session([(190.0, 0.0, 130.0), (200.0, 2.0, 130.0)], ["", "s"])
         self.assertEqual(result["result"], "saved")
