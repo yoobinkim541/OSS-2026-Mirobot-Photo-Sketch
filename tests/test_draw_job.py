@@ -42,6 +42,7 @@ class Recorder:
 class PhysicalLinkStub:
     def __init__(self):
         self.closed = False
+        self.port = "COM7"
 
     def close(self):
         self.closed = True

@@ -11,7 +11,7 @@ import customtkinter as ctk
 from . import draw_executor as de
 from .draw_job import DrawJob
 
-OK_C, BAD_C, ACT_C, IDLE_C = "#16a34a", "#dc2626", ("#2563eb", "#3b82f6"), ("#9aa3b2", "#6b7280")
+from .theme import ACCENT as ACT_C, BAD as BAD_C, BORDER, CARD, MUTED as IDLE_C, OK as OK_C, SURFACE, TEXT
 SPEEDS = ["1×", "5×", "20×", "50×", "500×"]
 NUMS = "①②③④⑤⑥"
 ACTIVE_STATES = ("preflight", "connect", "start", "confirm", "drawing")
@@ -38,16 +38,21 @@ class DrawWindow(ctk.CTkToplevel):
         self.close_timeout = float(cfg.get("ack_timeout_s", 15)) + 5
         self.title("로봇으로 그리기")
         self.geometry("780x680")
+        self.minsize(780, 680)
+        ctk.CTkLabel(self, text="드로잉 컨트롤", font=font(22, "bold"), anchor="w").pack(
+            fill="x", padx=20, pady=(18, 0))
+        ctk.CTkLabel(self, text="연결부터 완료까지, 안전 절차를 한 단계씩 확인합니다.",
+                     font=font(12), text_color=IDLE_C, anchor="w").pack(fill="x", padx=20, pady=(2, 8))
         self.protocol("WM_DELETE_WINDOW", self.close)
 
-        bar = ctk.CTkFrame(self, fg_color="transparent")
-        bar.pack(fill="x", padx=16, pady=(14, 4))
+        bar = ctk.CTkFrame(self, fg_color=CARD, border_width=1, border_color=BORDER)
+        bar.pack(fill="x", padx=16, pady=(4, 8), ipady=8)
         self.steps = {}
         for k, (sid, name, _who) in enumerate(de.DRAW_STEPS):
             if k:
-                ctk.CTkLabel(bar, text="─", text_color=IDLE_C).pack(side="left", padx=2)
+                ctk.CTkLabel(bar, text="›", text_color=IDLE_C).pack(side="left", padx=4)
             lb = ctk.CTkLabel(bar, text=f"○ {NUMS[k]} {name}", font=font(12), text_color=IDLE_C)
-            lb.pack(side="left")
+            lb.pack(side="left", padx=4)
             self.steps[sid] = lb
         self.todo = ctk.CTkLabel(self, text="연결 방식을 고르고 [연결 시작]을 누르세요", font=font(14, "bold"),
                                  anchor="w", justify="left", wraplength=740)
@@ -58,8 +63,9 @@ class DrawWindow(ctk.CTkToplevel):
         opts = ctk.CTkFrame(self, fg_color="transparent")
         opts.pack(fill="x", padx=16, pady=8)
         self.virtual_var = ctk.BooleanVar(value=True)
-        ctk.CTkRadioButton(opts, text=f"로봇 ({cfg['port']})", variable=self.virtual_var, value=False,
-                           font=font(12), command=self._sync_speed_menu).grid(row=0, column=0, sticky="w")
+        self.robot_radio = ctk.CTkRadioButton(opts, text=f"로봇 ({app.robot_port_label})", variable=self.virtual_var,
+                                              value=False, font=font(12), command=self._sync_speed_menu)
+        self.robot_radio.grid(row=0, column=0, sticky="w")
         ctk.CTkRadioButton(opts, text="가상 시뮬레이션 (로봇 없이)", variable=self.virtual_var, value=True,
                            font=font(12), command=self._sync_speed_menu).grid(row=0, column=1, sticky="w", padx=12)
         self.speed_var = ctk.StringVar(value="20×")
@@ -114,7 +120,7 @@ class DrawWindow(ctk.CTkToplevel):
                                          font=font(12, "bold"), command=self._on_check, state="disabled")
         self.check_box.grid(row=3, column=0, columnspan=3, sticky="w", pady=4)
 
-        self.progress = ctk.CTkProgressBar(self, height=10)
+        self.progress = ctk.CTkProgressBar(self, height=6)
         self.progress.pack(fill="x", padx=16, pady=(8, 2))
         self.progress.set(0)
         self.prog_text = ctk.CTkLabel(self, text="", font=font(12), anchor="w")
@@ -122,10 +128,11 @@ class DrawWindow(ctk.CTkToplevel):
 
         btns = ctk.CTkFrame(self, fg_color="transparent")
         btns.pack(fill="x", padx=16, pady=12, side="bottom")
-        self.begin_btn = ctk.CTkButton(btns, text="연결 시작", command=self.begin, font=font(13))
+        self.begin_btn = ctk.CTkButton(btns, text="연결 시작", command=self.begin, font=font(13, "bold"), height=38)
         self.begin_btn.pack(side="left")
         self.rviz_btn = ctk.CTkButton(btns, text="RViz 3D로 따라보기", command=self._open_rviz, font=font(12),
-                                      fg_color="transparent", border_width=1, state="disabled")
+                                      fg_color="transparent", border_width=1, text_color=TEXT,
+                                      hover_color=SURFACE, state="disabled")
         self.rviz_btn.pack(side="left", padx=8)
         self.stop_btn = ctk.CTkButton(btns, text="■ 멈춤", command=self.on_stop, font=font(13, "bold"),
                                       fg_color=BAD_C, hover_color="#b91c1c", state="disabled")
@@ -133,6 +140,10 @@ class DrawWindow(ctk.CTkToplevel):
         self.start_btn = ctk.CTkButton(btns, text="시작", command=self.on_start, font=font(13, "bold"),
                                        state="disabled")
         self.start_btn.pack(side="right", padx=8)
+
+    def set_robot_port(self, label):
+        """USB 감지 결과 (예: COM7, USB 미감지). 연결할 때 포트를 다시 찾으므로 표시용입니다."""
+        self.robot_radio.configure(text=f"로봇 ({label})")
 
     def _sync_speed_menu(self):
         if self.virtual_var.get():

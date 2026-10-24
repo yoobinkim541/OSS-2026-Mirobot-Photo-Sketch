@@ -39,7 +39,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import paths
+from . import paths, robot_status
 
 DEFAULT_CONFIG = None  # None이면 paths.config_path() (저장소 / 사용자 폴더 / MIROBOT_CONFIG)
 
@@ -369,11 +369,21 @@ def open_link(cfg, virtual=False, virtual_speed=20.0, verbose=False):
         from .virtual_robot import VirtualMirobotLink
         return VirtualMirobotLink(cfg, speed=virtual_speed)
     try:
-        return MirobotLink.open(cfg["port"], cfg["baud"], verbose)
-    except Exception as e:  # 포트 없음·사용 중 (serial.SerialException 등)
-        raise DrawError("connect", f"포트 {cfg['port']}를 열 수 없습니다: {e}",
-                        "USB 연결과 포트 번호(drawing_config.json의 port)를 확인하고, "
-                        "다른 프로그램이 쓰고 있지 않은지 보세요.") from None
+        choice = robot_status.detect_robot_port(cfg.get("port"))
+    except Exception as e:  # pyserial 포트 목록을 읽지 못함
+        raise DrawError("connect", f"USB 포트 목록을 읽지 못했습니다: {e}") from None
+    if choice.port is None:
+        hint = ("사용할 포트를 drawing_config.json의 port에 적어 주세요." if choice.source == "ambiguous" else
+                "로봇 전원과 USB 케이블을 확인하세요. 다른 USB-시리얼 어댑터라면 drawing_config.json의 port에 "
+                "포트 이름을 적어 주세요.")
+        raise DrawError("connect", robot_status.port_choice_problem(choice) + ".", hint)
+    try:
+        link = MirobotLink.open(choice.port, cfg["baud"], verbose)
+    except Exception as e:  # 포트 사용 중·권한 없음 (serial.SerialException 등)
+        raise DrawError("connect", f"포트 {choice.port}를 열 수 없습니다: {e}",
+                        "USB 연결을 확인하고, 다른 프로그램이 같은 포트를 쓰고 있지 않은지 보세요.") from None
+    link.port = choice.port
+    return link
 
 
 def connect_and_home(link, cfg, progress=print, should_cancel=None):

@@ -226,7 +226,7 @@ class DrawJob:
             self.summary = {"stroke_count": len(strokes), "command_count": len(pre["cmds"]),
                             "estimated_s": pre["timing"]["total_s"],
                             "drawing_mm": [pl["drawing_width_mm"], pl["drawing_height_mm"]],
-                            "port": "가상 시뮬레이션" if self._virtual else self.cfg["port"],
+                            "port": "가상 시뮬레이션" if self._virtual else "USB 자동 감지",
                             "virtual": self._virtual, "virtual_speed": self._speed,
                             "plane_verified": self.cfg.get("plane_compensation", {}).get("status") == "verified"}
             self._step("preflight", "done", f"획 {len(strokes)}개 · 명령 {len(pre['cmds'])}줄 · 시뮬레이션 {verdict.split(':')[0]}")
@@ -236,6 +236,8 @@ class DrawJob:
             if not self._virtual:
                 controller.connection_started()
             self.link = de.open_link(self.cfg, self._virtual, self._speed)
+            if not self._virtual:
+                self.summary["port"] = self.link.port
             writer.write(run_id=run_id, state="homing", acked=0, total=len(pre["cmds"]),
                          speed=self._speed if self._virtual else 1.0, trajectory=None, message="호밍 대기")
             from . import calibration
@@ -375,6 +377,7 @@ class DrawJob:
                 "return_to_origin": self._return_origin,
                 "source": {"image": snap["path"], "params": snap["params"]},
                 "virtual": self._virtual, "virtual_speed": self._speed if self._virtual else None,
+                "port": self.summary["port"],
                 "run_id": run_id, "trajectory": str(traj)}, result, self.cfg)
         except de.DrawError as e:
             self._step(e.step, "failed", e.message, e.hint)

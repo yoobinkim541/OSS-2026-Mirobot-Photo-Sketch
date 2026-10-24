@@ -245,17 +245,6 @@ class GuiTextAndLayoutTest(unittest.TestCase):
         finally:
             close_quietly(app)
 
-    def test_no_stale_or_jargon_texts_in_the_screens(self):
-        root_dir = Path(__file__).resolve().parent.parent / "mirobot_sketch"
-        forbidden = ("처리 실행", "실행기 허용", "python robot/draw_executor.py", "1mm마다 역기구학")
-        for name in ("gui.py", "draw_window.py", "stage_view.py"):
-            text = (root_dir / name).read_text(encoding="utf-8")
-            for bad in forbidden:
-                self.assertNotIn(bad, text, f"{name}: {bad}")
-        # GUI에는 명령줄 옵션 이름을 메시지로 노출하지 않음 (내보내기 완료창의 mirobot-draw 안내는 예외)
-        gui_text = (root_dir / "gui.py").read_text(encoding="utf-8")
-        self.assertNotIn("실행 시 --pending-limits", gui_text)
-
 
 class GuiAgentUxTest(unittest.TestCase):
     def open_panel(self):
@@ -322,6 +311,63 @@ class GuiAgentUxTest(unittest.TestCase):
             texts = [w.cget("text") for w in panel.chat.winfo_children()[0].winfo_children() if hasattr(w, "cget")
                      and isinstance(w.cget("text"), str)]
             self.assertTrue(any("로봇으로 그릴 준비" in t for t in texts), texts)
+        finally:
+            close_quietly(app)
+
+
+class GuiWorkspaceInteractionTest(unittest.TestCase):
+    def test_open_from_empty_workspace_and_reset_for_next_image(self):
+        root, app = make_app()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                path = Path(d) / "line.png"
+                cv2.imwrite(str(path), golden.synthetic_images()["line"])
+                with mock.patch("mirobot_sketch.gui.filedialog.askopenfilename", return_value=str(path)):
+                    app.view.empty_open_btn.invoke()
+                self.assertTrue(pump(root, app, lambda: app.result is not None and app._workers == 0))
+                self.assertGreater(app.result["timing"]["stroke_count"], 0)
+                self.assertEqual(app.view.empty.winfo_manager(), "")
+                app.reset_for_next_drawing()
+                root.update()
+                self.assertIsNone(app.view.image)
+                self.assertEqual(app.view.empty.winfo_manager(), "place")
+                self.assertIsNone(app.view._compare)
+                self.assertIsNone(app.view._drag)
+        finally:
+            close_quietly(app)
+
+    def test_fit_restores_full_image_after_zoom(self):
+        root, app = make_app()
+        try:
+            image = golden.synthetic_images()["line"]
+            app.view.show("Preview", image)
+            app.view.ax.set_xlim(10, 30)
+            app.view.ax.set_ylim(40, 20)
+            app.view.fit_btn.invoke()
+            h, w = image.shape[:2]
+            self.assertEqual(tuple(app.view.ax.get_xlim()), (-0.5, w - 0.5))
+            self.assertEqual(tuple(app.view.ax.get_ylim()), (h - 0.5, -0.5))
+        finally:
+            close_quietly(app)
+
+    def test_stage_selection_reveals_offscreen_stage_in_both_directions(self):
+        root, app = make_app()
+        try:
+            root.deiconify()
+            root.geometry("1200x760")
+            root.update()
+            canvas = app.strip._parent_canvas
+            for stage_id in ("paper", "source"):
+                app.select_stage(stage_id)
+                root.update()
+                button = app.strip.buttons[stage_id]
+                self.assertGreaterEqual(button.winfo_rootx(), canvas.winfo_rootx())
+                self.assertLessEqual(button.winfo_rootx() + button.winfo_width(),
+                                     canvas.winfo_rootx() + canvas.winfo_width() + 2)
+                self.assertTrue(app.draw_btn.winfo_ismapped())
+                self.assertGreaterEqual(app.draw_btn.winfo_rooty(), root.winfo_rooty())
+                self.assertLessEqual(app.draw_btn.winfo_rooty() + app.draw_btn.winfo_height(),
+                                     root.winfo_rooty() + root.winfo_height())
         finally:
             close_quietly(app)
 

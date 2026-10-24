@@ -81,5 +81,66 @@ class RobotStatusTest(unittest.TestCase):
         self.assertEqual(events[-1], {"state": None, "recent": True})
 
 
+def usb(device, vid=0x1A86, description="USB-SERIAL CH340"):
+    return SimpleNamespace(device=device, vid=vid, description=description, hwid="")
+
+
+BLUETOOTH = SimpleNamespace(device="COM5", vid=None, description="표준 Bluetooth에서 직렬 링크(COM5)",
+                            hwid="BTHENUM\\{00001101}")
+
+
+class RobotPortResolutionTest(unittest.TestCase):
+    def resolve(self, configured, ports):
+        from mirobot_sketch import robot_status
+        return robot_status.resolve_robot_port(configured, ports)
+
+    def test_moved_robot_is_found_when_configured_port_is_gone(self):
+        choice = self.resolve("COM9", [BLUETOOTH, usb("COM7")])
+        self.assertEqual((choice.port, choice.source), ("COM7", "auto"))
+
+    def test_auto_setting_ignores_bluetooth_and_other_usb_serial(self):
+        other = usb("COM3", vid=0x0403, description="USB Serial Port (FTDI)")
+        self.assertEqual(self.resolve("auto", [BLUETOOTH, other, usb("COM8")]).port, "COM8")
+        self.assertEqual(self.resolve("", [BLUETOOTH, other]).source, "missing")
+
+    def test_configured_robot_port_wins_when_several_robot_cables_exist(self):
+        choice = self.resolve("com8", [usb("COM7"), usb("COM8")])
+        self.assertEqual((choice.port, choice.source), ("COM8", "configured"))
+
+    def test_several_robot_cables_without_matching_setting_are_not_guessed(self):
+        choice = self.resolve("COM9", [usb("COM8"), usb("COM7")])
+        self.assertIsNone(choice.port)
+        self.assertEqual((choice.source, choice.candidates), ("ambiguous", ("COM7", "COM8")))
+
+    def test_configured_non_wch_adapter_is_used_only_when_no_robot_cable_exists(self):
+        other = usb("COM3", vid=0x0403, description="USB Serial Port")
+        self.assertEqual(self.resolve("COM3", [other]).port, "COM3")
+        self.assertEqual(self.resolve("COM3", [other, usb("COM7")]).port, "COM7")
+
+    def test_recognises_wch_chip_from_description_when_vid_is_missing(self):
+        port = SimpleNamespace(device="COM4", vid=None, description="USB-SERIAL CH340 (COM4)", hwid="")
+        self.assertEqual(self.resolve("auto", [port]).port, "COM4")
+
+
+class OpenLinkPortTest(unittest.TestCase):
+    def test_opens_detected_port_and_reports_missing_robot(self):
+        from unittest import mock
+
+        from mirobot_sketch import draw_executor as de
+        cfg = {"port": "COM9", "baud": 115200}
+        with mock.patch("serial.tools.list_ports.comports", return_value=[BLUETOOTH, usb("COM7")]), \
+                mock.patch.object(de.MirobotLink, "open", return_value=SimpleNamespace()) as open_:
+            link = de.open_link(cfg)
+        open_.assert_called_once_with("COM7", 115200, False)
+        self.assertEqual(link.port, "COM7")
+        with mock.patch("serial.tools.list_ports.comports", return_value=[BLUETOOTH]), \
+                mock.patch.object(de.MirobotLink, "open") as open_:
+            with self.assertRaises(de.DrawError) as err:
+                de.open_link(cfg)
+        open_.assert_not_called()
+        self.assertEqual(err.exception.step, "connect")
+        self.assertIn("찾지 못했습니다", err.exception.message)
+
+
 if __name__ == "__main__":
     unittest.main()
