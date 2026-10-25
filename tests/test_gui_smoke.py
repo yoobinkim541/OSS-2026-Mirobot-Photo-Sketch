@@ -600,6 +600,10 @@ class GuiSmokeTest(unittest.TestCase):
                     cv2.imwrite(str(p), golden.synthetic_images()["line"])
                     app.load_image(p)
                     self.assertTrue(pump(root, app, lambda: app.result is not None and app._workers == 0))
+                    app.session.update_params({"box_mm": 60})              # 커밋된 설정의 허용 범위(±40mm) 안
+                    app._schedule_recompute(0)
+                    self.assertTrue(pump(root, app, lambda: app._workers == 0 and
+                                         app.result["params"]["box_mm"] == 60))
                     w = app.open_draw_window(launch_rviz=lambda *a, **k: None)
                     self.assertTrue(w.start_pose_var.get())                         # 기본으로 켜짐
                     w.virtual_var.set(True)
