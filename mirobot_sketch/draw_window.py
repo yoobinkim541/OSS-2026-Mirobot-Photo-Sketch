@@ -8,8 +8,8 @@ from tkinter import messagebox, simpledialog
 
 import cv2
 import customtkinter as ctk
-
 from . import camera, draw_executor as de
+from .draw_job import DrawJob
 
 from .theme import ACCENT as ACT_C, BAD as BAD_C, BORDER, CARD, MUTED as IDLE_C, OK as OK_C, SURFACE, TEXT
 SPEEDS = ["1×", "5×", "20×", "50×", "500×"]
