@@ -6,10 +6,10 @@
 
 from tkinter import messagebox, simpledialog
 
+import cv2
 import customtkinter as ctk
 
-from . import draw_executor as de
-from .draw_job import DrawJob
+from . import camera, draw_executor as de
 
 from .theme import ACCENT as ACT_C, BAD as BAD_C, BORDER, CARD, MUTED as IDLE_C, OK as OK_C, SURFACE, TEXT
 SPEEDS = ["1×", "5×", "20×", "50×", "500×"]
@@ -37,15 +37,21 @@ class DrawWindow(ctk.CTkToplevel):
         # 닫을 때 작업이 끝나길 기다리는 시간: 로봇이 명령 응답을 기다리는 최대 시간 + 여유
         self.close_timeout = float(cfg.get("ack_timeout_s", 15)) + 5
         self.title("로봇으로 그리기")
-        self.geometry("780x680")
-        self.minsize(780, 680)
-        ctk.CTkLabel(self, text="드로잉 컨트롤", font=font(22, "bold"), anchor="w").pack(
+        self.geometry("1120x680")
+        self.minsize(980, 680)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_columnconfigure(1, weight=0)
+        self.grid_rowconfigure(0, weight=1)
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.grid(row=0, column=0, sticky="nsew")
+        self._build_camera()
+        ctk.CTkLabel(body, text="드로잉 컨트롤", font=font(22, "bold"), anchor="w").pack(
             fill="x", padx=20, pady=(18, 0))
-        ctk.CTkLabel(self, text="연결부터 완료까지, 안전 절차를 한 단계씩 확인합니다.",
+        ctk.CTkLabel(body, text="연결부터 완료까지, 안전 절차를 한 단계씩 확인합니다.",
                      font=font(12), text_color=IDLE_C, anchor="w").pack(fill="x", padx=20, pady=(2, 8))
         self.protocol("WM_DELETE_WINDOW", self.close)
 
-        bar = ctk.CTkFrame(self, fg_color=CARD, border_width=1, border_color=BORDER)
+        bar = ctk.CTkFrame(body, fg_color=CARD, border_width=1, border_color=BORDER)
         bar.pack(fill="x", padx=16, pady=(4, 8), ipady=8)
         self.steps = {}
         for k, (sid, name, _who) in enumerate(de.DRAW_STEPS):
@@ -54,13 +60,13 @@ class DrawWindow(ctk.CTkToplevel):
             lb = ctk.CTkLabel(bar, text=f"○ {NUMS[k]} {name}", font=font(12), text_color=IDLE_C)
             lb.pack(side="left", padx=4)
             self.steps[sid] = lb
-        self.todo = ctk.CTkLabel(self, text="연결 방식을 고르고 [연결 시작]을 누르세요", font=font(14, "bold"),
+        self.todo = ctk.CTkLabel(body, text="연결 방식을 고르고 [연결 시작]을 누르세요", font=font(14, "bold"),
                                  anchor="w", justify="left", wraplength=740)
         self.todo.pack(fill="x", padx=16, pady=(10, 2))
-        self.detail = ctk.CTkLabel(self, text="", font=font(12), anchor="w", justify="left", wraplength=740)
+        self.detail = ctk.CTkLabel(body, text="", font=font(12), anchor="w", justify="left", wraplength=740)
         self.detail.pack(fill="x", padx=16)
 
-        opts = ctk.CTkFrame(self, fg_color="transparent")
+        opts = ctk.CTkFrame(body, fg_color="transparent")
         opts.pack(fill="x", padx=16, pady=8)
         self.virtual_var = ctk.BooleanVar(value=True)
         self.robot_radio = ctk.CTkRadioButton(opts, text=f"로봇 ({app.robot_port_label})", variable=self.virtual_var,
@@ -86,7 +92,7 @@ class DrawWindow(ctk.CTkToplevel):
                         variable=self.start_pose_var, font=font(12)).grid(row=6, column=0, columnspan=3, sticky="w", pady=4)
 
         # ③ 시작 자세 맞추기 패널 (작업이 start_pose 이벤트를 보낼 때만 보임)
-        self.jog_frame = ctk.CTkFrame(self)
+        self.jog_frame = ctk.CTkFrame(body)
         self._jog_vec, self._jog_after = None, None
         pad = ctk.CTkFrame(self.jog_frame, fg_color="transparent")
         pad.grid(row=0, column=0, rowspan=3, padx=(10, 16), pady=8)
@@ -106,7 +112,7 @@ class DrawWindow(ctk.CTkToplevel):
         self.jog_accept_btn = ctk.CTkButton(self.jog_frame, text="이 위치 기억하고 계속", command=self.on_accept_start_pose,
                                             font=font(13, "bold"), fg_color=OK_C, hover_color="#15803d")
         self.jog_accept_btn.grid(row=2, column=1, columnspan=2, sticky="w", pady=(4, 8))
-        self.jog_msg = ctk.CTkLabel(self, text="", font=font(12), anchor="w", justify="left", wraplength=740,
+        self.jog_msg = ctk.CTkLabel(body, text="", font=font(12), anchor="w", justify="left", wraplength=740,
                                     text_color=BAD_C)
         self.bind("<KeyPress>", self._on_jog_key, add="+")
         self.clear_var = ctk.BooleanVar(value=True)
@@ -120,13 +126,13 @@ class DrawWindow(ctk.CTkToplevel):
                                          font=font(12, "bold"), command=self._on_check, state="disabled")
         self.check_box.grid(row=3, column=0, columnspan=3, sticky="w", pady=4)
 
-        self.progress = ctk.CTkProgressBar(self, height=6)
+        self.progress = ctk.CTkProgressBar(body, height=6)
         self.progress.pack(fill="x", padx=16, pady=(8, 2))
         self.progress.set(0)
-        self.prog_text = ctk.CTkLabel(self, text="", font=font(12), anchor="w")
+        self.prog_text = ctk.CTkLabel(body, text="", font=font(12), anchor="w")
         self.prog_text.pack(fill="x", padx=16)
 
-        btns = ctk.CTkFrame(self, fg_color="transparent")
+        btns = ctk.CTkFrame(body, fg_color="transparent")
         btns.pack(fill="x", padx=16, pady=12, side="bottom")
         self.begin_btn = ctk.CTkButton(btns, text="연결 시작", command=self.begin, font=font(13, "bold"), height=38)
         self.begin_btn.pack(side="left")
@@ -140,6 +146,60 @@ class DrawWindow(ctk.CTkToplevel):
         self.start_btn = ctk.CTkButton(btns, text="시작", command=self.on_start, font=font(13, "bold"),
                                        state="disabled")
         self.start_btn.pack(side="right", padx=8)
+
+
+    def _build_camera(self):
+        """오른쪽 실시간 보기. 카메라를 못 열어도 왼쪽 그리기 절차는 그대로입니다."""
+        side = ctk.CTkFrame(self, fg_color=CARD, border_width=1, border_color=BORDER, width=250)
+        side.grid(row=0, column=1, sticky="ns", padx=(0, 16), pady=16)
+        side.grid_propagate(False)
+        ctk.CTkLabel(side, text="카메라", font=self.font(14, "bold"), anchor="w").pack(
+            fill="x", padx=12, pady=(12, 4))
+        self.camera_status = ctk.CTkLabel(side, text="꺼짐", font=self.font(11), text_color=IDLE_C, anchor="w")
+        self.camera_status.pack(fill="x", padx=12)
+        self.camera_on = ctk.BooleanVar(value=camera.preview_allowed())
+        ctk.CTkSwitch(side, text="실시간 보기", variable=self.camera_on, font=self.font(12),
+                      command=self._toggle_camera).pack(anchor="w", padx=12, pady=(6, 8))
+        self.camera_label = ctk.CTkLabel(side, text="", width=220, height=160)
+        self.camera_label.pack(padx=12, pady=(0, 8))
+        ctk.CTkLabel(side, text="노트북을 기울여 팔과 종이가 보이게 두세요. 카메라가 없어도 그리기는 진행됩니다.",
+                     font=self.font(11), text_color=IDLE_C, wraplength=220, justify="left", anchor="w").pack(
+            fill="x", padx=12, pady=(0, 12))
+        self.camera = camera.CameraPreview()
+        self._camera_photo = None
+        self._camera_after = None
+        if self.camera_on.get():
+            self.camera.start()
+            self.camera_status.configure(text="찾는 중")
+        self._tick_camera()
+
+    def _toggle_camera(self):
+        if self.camera_on.get():
+            self.camera.start()
+            self.camera_status.configure(text="찾는 중", text_color=IDLE_C)
+        else:
+            self.camera.stop()
+            self.camera_status.configure(text="꺼짐", text_color=IDLE_C)
+            self._show_camera_frame(camera.blank_preview())
+
+    def _tick_camera(self):
+        if not self.winfo_exists():
+            return
+        frame = self.camera.latest()
+        if frame is not None:
+            self._show_camera_frame(frame)
+            name = f"카메라 {self.camera.index}" if self.camera.index is not None else "연결됨"
+            self.camera_status.configure(text=name, text_color=OK_C)
+        elif self.camera.error:
+            self.camera_status.configure(text=self.camera.error, text_color=BAD_C)
+        self._camera_after = self.after(80, self._tick_camera)
+
+    def _show_camera_frame(self, frame):
+        from PIL import Image
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        image = Image.fromarray(rgb)
+        self._camera_photo = ctk.CTkImage(image, size=(220, max(80, int(220 * image.height / image.width))))
+        self.camera_label.configure(image=self._camera_photo, text="")
 
     def set_robot_port(self, label):
         """USB 감지 결과 (예: COM7, USB 미감지). 연결할 때 포트를 다시 찾으므로 표시용입니다."""
@@ -268,8 +328,18 @@ class DrawWindow(ctk.CTkToplevel):
                                                    "잠시 뒤 다시 닫아 주세요.", parent=self)
                 return False
         self.app.set_drawing(False)
+        self._stop_camera()
         self.destroy()
         return True
+
+    def _stop_camera(self):
+        if self._camera_after is not None:
+            try:
+                self.after_cancel(self._camera_after)
+            except Exception:
+                pass
+            self._camera_after = None
+        self.camera.stop()
 
     # ---------------------------------------------------------------- 작업 이벤트 (메인 스레드)
     def _event(self, kind, d):
