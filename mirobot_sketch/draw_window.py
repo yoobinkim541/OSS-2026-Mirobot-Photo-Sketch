@@ -162,9 +162,14 @@ class DrawWindow(ctk.CTkToplevel):
                       command=self._toggle_camera).pack(anchor="w", padx=12, pady=(6, 8))
         self.camera_label = ctk.CTkLabel(side, text="", width=220, height=160)
         self.camera_label.pack(padx=12, pady=(0, 8))
-        ctk.CTkLabel(side, text="노트북을 기울여 팔과 종이가 보이게 두세요. 카메라가 없어도 그리기는 진행됩니다.",
+        ctk.CTkLabel(side, text="그림마다 모서리에 X를 그리면, 웹캠이 연결됐을 때 [준비 확인]이 나타납니다. 접촉은 보지 않습니다.",
                      font=self.font(11), text_color=IDLE_C, wraplength=220, justify="left", anchor="w").pack(
-            fill="x", padx=12, pady=(0, 12))
+            fill="x", padx=12, pady=(0, 8))
+        self.ready_btn = ctk.CTkButton(side, text="준비 확인", command=self._check_ready, font=self.font(12, "bold"),
+                                       height=32)
+        self.ready_result = ctk.CTkLabel(side, text="", font=self.font(11), text_color=TEXT, wraplength=220,
+                                         justify="left", anchor="w")
+        self._ready_shown = False
         self.camera = camera.CameraPreview()
         self._camera_photo = None
         self._camera_after = None
@@ -186,6 +191,7 @@ class DrawWindow(ctk.CTkToplevel):
         if not self.winfo_exists():
             return
         frame = self.camera.latest()
+        self._sync_ready_button(frame)
         if frame is not None:
             self._show_camera_frame(frame)
             name = f"카메라 {self.camera.index}" if self.camera.index is not None else "연결됨"
@@ -200,6 +206,32 @@ class DrawWindow(ctk.CTkToplevel):
         image = Image.fromarray(rgb)
         self._camera_photo = ctk.CTkImage(image, size=(220, max(80, int(220 * image.height / image.width))))
         self.camera_label.configure(image=self._camera_photo, text="")
+
+    def _sync_ready_button(self, frame):
+        from .camera_marks import ready_button_visible
+        show = self.camera_on.get() and ready_button_visible(self.camera.index, frame)
+        if show and not self._ready_shown:
+            self.ready_btn.pack(fill="x", padx=12, pady=(0, 6))
+            self.ready_result.pack(fill="x", padx=12, pady=(0, 8))
+            self._ready_shown = True
+        elif not show and self._ready_shown:
+            self.ready_btn.pack_forget()
+            self.ready_result.pack_forget()
+            self._ready_shown = False
+
+    def _check_ready(self):
+        """기존 준비 안내에 USB·카메라 관찰만 얹어 보여 줍니다. 설정을 바꾸지 않습니다."""
+        from . import robot_status
+        from .camera_marks import attach_camera_check, observe_setup, ready_text
+        frame = self.camera.latest()
+        if frame is None:
+            return
+        try:
+            choice = robot_status.detect_robot_port(self.cfg.get("port"))
+        except Exception:
+            choice = robot_status.PortChoice(None, "missing", ())
+        report = attach_camera_check(self.session.robot_guide(), choice, observe_setup(frame))
+        self.ready_result.configure(text=ready_text(report))
 
     def set_robot_port(self, label):
         """USB 감지 결과 (예: COM7, USB 미감지). 연결할 때 포트를 다시 찾으므로 표시용입니다."""
