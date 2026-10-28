@@ -16,8 +16,8 @@ DETAIL_PRESETS = {
 IMAGE_TYPES = {
     "photo": {
         "label": "실사 사진",
-        "detail": "high", "rembg": True, "median": 0,
-        "why": "배경 빛망울·무늬를 rembg로 지워 인물 윤곽만 남김",
+        "detail": "high", "rembg": True, "median": 0, "lineart": True,
+        "why": "실사를 선화로 바꾼 뒤 얼굴·모자·실루엣만 따고, 배경은 rembg로 지움",
     },
     "illustration": {
         "label": "컬러 일러스트",

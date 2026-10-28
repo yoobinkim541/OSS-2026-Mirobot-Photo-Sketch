@@ -101,7 +101,9 @@ class SketchSession:
                 t = presets.IMAGE_TYPES[image_type]
                 self.image_type = image_type
                 self.detail = t["detail"]
-                self.params.update(rembg=t["rembg"], median_ksize=t["median"])
+                self.params.update(rembg=t["rembg"], median_ksize=t["median"],
+                                   lineart=bool(t.get("lineart", False)),
+                                   face_detail=not t.get("lineart", False))
             if detail:
                 if detail not in presets.DETAIL_PRESETS:
                     raise SessionError(f"알 수 없는 상세도: {detail} (가능: low, medium, high)")

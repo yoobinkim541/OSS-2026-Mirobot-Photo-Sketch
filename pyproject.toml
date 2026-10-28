@@ -26,6 +26,7 @@ dependencies = [
     "pillow>=10",
     "pyserial>=3.5",
     "customtkinter>=5.2",
+    "onnxruntime>=1.16",
 ]
 
 [project.optional-dependencies]

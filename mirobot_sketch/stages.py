@@ -107,12 +107,19 @@ def _run_prep(prev, p):
 
 def _run_edges(prev, p):
     # 블러는 전처리에서 했으므로 여기서는 1(끔)
+    color, gray = prev["prep_color"], prev["prep_gray"]
+    if p.get("lineart"):
+        from . import lineart
+        color = lineart.line_drawing(prev["color"])
+        gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
+        e = (gray < lineart.INK_THRESHOLD).astype(np.uint8) * 255
+        return {**prev, "prep_color": color, "prep_gray": gray, "edges": e}
     if p["edge_mode"] == "dark":
-        e = sp.compute_dark_mask(prev["prep_gray"], 1)
+        e = sp.compute_dark_mask(gray, 1)
     elif p["edge_mode"] == "lab":
-        e = sp.compute_edges_lab(prev["prep_color"], p["canny_low"], p["canny_high"], 1)
+        e = sp.compute_edges_lab(color, p["canny_low"], p["canny_high"], 1)
     else:
-        e = sp.compute_edges(prev["prep_gray"], p["canny_low"], p["canny_high"], 1)
+        e = sp.compute_edges(gray, p["canny_low"], p["canny_high"], 1)
     return {**prev, "edges": e}
 
 
@@ -255,8 +262,10 @@ STAGES = (
                   help="클수록 잔선이 줄고 윤곽이 부드러워짐")),
         _run_prep, lambda o: _bgr(o["prep_gray"])),
     Stage("edges", "선 검출", (
+        ParamSpec("lineart", "실사 선화로 바꾼 뒤 따기", "bool", False,
+                  help="실사만. 얼굴·모자·실루엣을 남기고 결·그물 같은 잔선은 줄인 뒤 어두운 선으로 추적"),
         ParamSpec("edge_mode", "방식", "choice", "luma", choices=EDGE_MODES,
-                  help="밝기=흑백 Canny, 색 차이=Lab Canny(밝기가 같은 색 경계도 찾음), 어두운 선=선화 중심선"),
+                  help="선화를 끈 때: 밝기=흑백 Canny, 색 차이=Lab Canny, 어두운 선=선화 중심선"),
         ParamSpec("canny_low", "약한 선 민감도 (Canny 하한)", "int", _hi[0], 0, 255, help="낮을수록 약한 선도 잡음"),
         ParamSpec("canny_high", "강한 선 기준 (Canny 상한)", "int", _hi[1], 0, 400, help="선이 시작되는 강한 경계 기준")),
         _run_edges, lambda o: _bgr(255 - o["edges"])),
