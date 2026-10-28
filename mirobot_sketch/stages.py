@@ -113,6 +113,7 @@ def _run_edges(prev, p):
         color = lineart.line_drawing(prev["color"])
         gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
         e = (gray < lineart.INK_THRESHOLD).astype(np.uint8) * 255
+        e = cv2.morphologyEx(e, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
         return {**prev, "prep_color": color, "prep_gray": gray, "edges": e}
     if p["edge_mode"] == "dark":
         e = sp.compute_dark_mask(gray, 1)
@@ -137,11 +138,44 @@ def _run_dedupe(prev, p):
     return {**prev, "strokes": st, "discarded_dedupe": disc}
 
 
-def _run_merge(prev, p):
-    if not p["merge_join_px"]:
-        return dict(prev)
-    return {**prev, "strokes": sp.merge_strokes(prev["strokes"], p["merge_join_px"])}
+def _tidy_portrait(strokes, faces):
+    """선화에서 코 옆·입가에 붙는 짧은 잔선만 지웁니다. 긴 윤곽과 머리카락은 남깁니다."""
+    if not faces:
+        return strokes
+    kept = []
+    for raw in strokes:
+        s = np.asarray(raw, np.float64)
+        if len(s) < 2:
+            continue
+        mid = s[len(s) // 2]
+        length = sp.polyline_length(s)
+        drop = False
+        for face in faces:
+            width = float(face.box[2])
+            nose, mouth_r, mouth_l = face.landmarks[2], face.landmarks[3], face.landmarks[4]
+            mouth = (mouth_r + mouth_l) / 2
+            nose_d = np.linalg.norm(s - nose, axis=1)
+            if np.median(nose_d) < 0.14 * width and np.max(nose_d) < 0.32 * width:
+                drop = True
+            mouth_d = np.linalg.norm(s - mouth, axis=1)
+            if np.median(mouth_d) < 0.12 * width and length < 0.45 * width:
+                reaches_lip = (np.min(np.linalg.norm(s - mouth_r, axis=1)) < 0.1 * width
+                               and np.min(np.linalg.norm(s - mouth_l, axis=1)) < 0.1 * width)
+                drop = drop or not reaches_lip
+        if not drop:
+            kept.append(s)
+    return kept
 
+
+def _run_merge(prev, p):
+    strokes = prev["strokes"]
+    if p["merge_join_px"]:
+        join = p["merge_join_px"] * (2.5 if p.get("lineart") else 1)
+        strokes = sp.merge_strokes(strokes, join)
+    if p.get("lineart"):
+        strokes = sp.smooth_strokes(strokes, 4.0)
+        strokes = _tidy_portrait(strokes, prev.get("faces") or [])
+    return {**prev, "strokes": strokes}
 
 FACE_REASON = "얼굴 세밀 처리로 교체"
 GREEN = (40, 160, 40)

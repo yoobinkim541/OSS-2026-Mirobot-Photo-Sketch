@@ -11,7 +11,7 @@ import numpy as np
 
 MODEL_NAME = "informative_drawings.onnx"
 MAX_SIDE = 768
-INK_THRESHOLD = 170   # 선화의 옅은 윤곽까지 획으로 남김. Otsu는 흰 바탕에서 이 선을 지운다.
+INK_THRESHOLD = 170   # 얼굴 피부의 옅은 잡선은 버림
 
 _session = None
 
