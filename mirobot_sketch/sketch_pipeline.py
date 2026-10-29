@@ -401,6 +401,79 @@ def dedupe_strokes(strokes, shape, dist_px=4, min_keep_px=8, overlap_px=2, disca
     return out
 
 
+def drop_ink_twins(strokes, gray, gap_px, ink_max=200, turn=0.85, min_keep_px=8, discarded=None,
+                   protect_xy=None, protect_px=0):
+    """사이가 먹인 나란한 두 경계만 지운다. 굵은 선은 양쪽 가장자리가 따로 잡혀 같은 선을 두 번 긋게 된다.
+    사이가 밝은 가까운 선(눈, 머리카락)은 gap_px 안이어도 남긴다. 긴 획을 먼저 남긴다."""
+    from scipy.spatial import cKDTree
+
+    gray = np.asarray(gray)
+    h, w = gray.shape[:2]
+    strokes = [np.asarray(s, np.float64) for s in strokes if len(np.asarray(s)) >= 2]
+    if gap_px < 1 or not strokes:
+        return strokes
+    dens = [_densify(s).astype(np.float64) for s in strokes]
+    order = sorted(range(len(dens)), key=lambda i: -polyline_length(dens[i]))
+    step = max(1, int(gap_px // 2))
+    samples, owners, tangents = [], [], []
+    for i, pts in enumerate(dens):
+        for k in range(0, len(pts), step):
+            samples.append(pts[k])
+            owners.append(i)
+            a, b = max(0, k - step), min(len(pts) - 1, k + step)
+            v = pts[b] - pts[a]
+            n = np.hypot(*v)
+            tangents.append(v / n if n > 1e-6 else np.zeros(2))
+    tree = cKDTree(np.asarray(samples))
+    accepted = set()
+    out = []
+    for i in order:
+        pts = dens[i]
+        twin = np.zeros(len(pts), bool)
+        if accepted:
+            near_face = None
+            if protect_xy is not None and protect_px > 0:
+                lm = np.asarray(protect_xy, np.float64)
+                near_face = np.min(np.linalg.norm(pts[:, None, :] - lm[None, :, :], axis=2), axis=1) <= protect_px
+            for k in range(len(pts)):
+                if near_face is not None and near_face[k]:
+                    continue                                    # 눈·코·입 근처는 붙어 있어도 둘 다 남김
+                for j in tree.query_ball_point(pts[k], gap_px):
+                    if owners[j] not in accepted:
+                        continue
+                    a, b = max(0, k - step), min(len(pts) - 1, k + step)
+                    v = pts[b] - pts[a]
+                    nrm = np.hypot(*v)
+                    if nrm < 1e-6 or abs(float((v / nrm) @ tangents[j])) < turn:
+                        continue
+                    a_pt, b_pt = pts[k], samples[j]
+                    steps = max(2, int(np.hypot(*(b_pt - a_pt))))
+                    t = np.linspace(0, 1, steps)
+                    xs = np.clip(np.round(a_pt[0] + (b_pt[0] - a_pt[0]) * t).astype(int), 0, w - 1)
+                    ys = np.clip(np.round(a_pt[1] + (b_pt[1] - a_pt[1]) * t).astype(int), 0, h - 1)
+                    if int(gray[ys, xs].min()) <= ink_max:   # 사이 어딘가 먹 = 한 굵은 선의 양쪽
+                        twin[k] = True
+                        break
+        keep = ~twin
+        k = 0
+        n = len(pts)
+        while k < n:
+            if not keep[k]:
+                k += 1
+                continue
+            j = k
+            while j < n and keep[j]:
+                j += 1
+            if j - k >= min_keep_px:
+                out.append(pts[k:j])
+            k = j
+        if discarded is not None and twin.any():
+            discarded.append((pts[twin], "ink-twin"))
+        if keep.mean() >= 0.5:
+            accepted.add(i)
+    return out
+
+
 def merge_strokes(strokes, join_px=2.0, tangent_px=5):
     """끝점이 만나는 획들을 펜을 떼지 않는 긴 획으로 이어 붙입니다.
 

@@ -138,11 +138,19 @@ def _run_dedupe(prev, p):
         return {**prev, "discarded_dedupe": []}
     disc = []
     st = sp.dedupe_strokes(prev["strokes"], prev["edges"].shape, int(p["dedupe_px"]), discarded=disc)
+    gray = prev.get("prep_gray", prev.get("gray"))
+    if gray is not None:
+        gap = _px_per_mm(prev, p) * INK_TWIN_MM          # 종이에서 이 거리(mm) 안, 사이가 먹인 쌍만
+        faces = prev.get("faces") or []
+        protect = np.vstack([np.asarray(f.landmarks, np.float64) for f in faces]) if faces else None
+        protect_px = 0.14 * max(float(f.box[2]) for f in faces) if faces else 0
+        st = sp.drop_ink_twins(st, gray, gap, discarded=disc, protect_xy=protect, protect_px=protect_px)
     return {**prev, "strokes": st, "discarded_dedupe": disc}
 
 
 LINEART_GAP_PX = 12.0      # 선화의 점선처럼 끊긴 선을 이을 끝점 거리 (작업 이미지 px)
 LINEART_MIN_PX = 14.0      # 이었는데도 이보다 짧은 열린 토막은 버림 (펜으로 그리면 지저분한 점선이 됨)
+INK_TWIN_MM = 2.0          # 굵은 선 양쪽 경계를 하나로 보는 종이 거리 (1.2 mm보다 넓게, 사이가 밝은 선은 남김)
 
 
 def _run_merge(prev, p):
@@ -171,6 +179,12 @@ def _near_features(strokes, faces):
 
 FACE_REASON = "얼굴 세밀 처리로 교체"
 GREEN = (40, 160, 40)
+def _px_per_mm(prev, p):
+    """작업 이미지에서 종이 1 mm가 몇 px인지. 구도로 줄어든 실제 크기를 쓴다."""
+    h, w = prev["gray"].shape[:2] if "gray" in prev else prev["prep_gray"].shape[:2]
+    region = prev.get("region")
+    long_mm = limits.effective_long_mm(region, p["box_mm"], w, h) if region is not None and "box_mm" in p else float(p.get("box_mm", 100))
+    return max(h, w) / max(long_mm, 1.0)
 
 
 def _face_strokes(crop, face, p, pen_px):
@@ -303,7 +317,7 @@ STAGES = (
         _run_trace, lambda o: draw_strokes_colored(o["strokes"], o["gray"].shape, o["discarded_trace"])),
     Stage("dedupe", "겹침 제거", (
         ParamSpec("dedupe_px", "겹친 선 합치기 (px, 0=끔)", "int", presets.DEFAULT_DEDUPE_PX, 0, 8,
-                  help="이 거리 안에서 겹치는 선은 하나만 남김"),),
+                  help="이 거리 안에서 겹치는 선은 하나만 남김. 사이가 먹인 굵은 선 양쪽은 종이 2 mm까지 하나로 합치고, 사이가 밝은 선과 눈·입은 남김"),),
         _run_dedupe, lambda o: draw_strokes_colored(o["strokes"], o["gray"].shape, o["discarded_dedupe"])),
     Stage("merge", "이어 붙이기", (
         ParamSpec("merge_join_px", "끊긴 선 이어 붙이기 (px, 0=끔)", "float", presets.DEFAULT_MERGE_JOIN_PX, 0, 8, 0.5,
