@@ -238,8 +238,24 @@ def drawing_config_from_recorded_contact(cfg):
                                              "tcp": sample.get("tcp_mm"), "abc_deg": sample.get("abc_deg")})
 
 
+def _move_joints(link, cfg, target, should_stop, what):
+    """관절 이동 하나를 보내고 Idle·도착 관절을 확인한다."""
+    from .draw_executor import parse_status
+
+    if should_stop():
+        raise StartPoseError("취소했습니다.")
+    link.send_and_ack(joint_line(target, settings(cfg)["joint_feed"]), cfg["ack_timeout_s"])
+    link.wait_idle(cfg["idle_timeout_s"])
+    status = parse_status(link.query_status()[2])
+    actual = status.get("joints_deg")
+    if status["state"] != "Idle" or actual is None or max(abs(a - b) for a, b in zip(actual, target)) > 1.0:
+        raise StartPoseError(f"{what} 위치를 확인하지 못했습니다.")
+    return status
+
+
 def execute_requested_return(link, cfg, should_stop=lambda: False):
-    """현재 관절 상태에서 검사된 경로를 통해 저장된 대기 자세로 돌아간다."""
+    """그림이 끝난 자세에서 저장된 대기 자세(1번)로, 이어서 시작할 때의 경로를 거꾸로 밟아 호밍 자세(관절 0)로 돌아간다.
+    바로 다음 그림을 같은 시작 순서(호밍 자세 → 1번)로 시작할 수 있게."""
     from .draw_executor import parse_status
 
     requested = cfg.get("requested_start_pose") or {}
@@ -252,22 +268,17 @@ def execute_requested_return(link, cfg, should_stop=lambda: False):
     target = np.asarray(requested.get("joints_deg"), dtype=float)
     if status["state"] != "Idle" or actual is None or target.shape != (6,) or not np.all(np.isfinite(target)):
         raise StartPoseError("복귀 전 Idle 관절 상태 또는 대기 자세를 확인하지 못했습니다.")
-    if max(abs(a - b) for a, b in zip(actual, target)) <= 1.0:
-        return status
-    s = settings(cfg)
-    s.update(paper_x_mm=_paper_x(requested),
-             pen_len_max_mm=float(requested["pen_length_mm"]), clearance_mm=0.0)
-    if "tool_offset_mm" in requested:
-        s["tool_offset_mm"] = requested["tool_offset_mm"]
-    _check_segments([np.radians(actual), np.radians(target)], s)
-    if should_stop():
-        raise StartPoseError("취소했습니다.")
-    link.send_and_ack(joint_line(target, s["joint_feed"]), cfg["ack_timeout_s"])
-    link.wait_idle(cfg["idle_timeout_s"])
-    status = parse_status(link.query_status()[2])
-    actual = status.get("joints_deg")
-    if status["state"] != "Idle" or actual is None or max(abs(a-b) for a, b in zip(actual, target)) > 1.0:
-        raise StartPoseError("대기 자세 복귀 위치를 확인하지 못했습니다.")
+    back = plan_requested_start(cfg)["joints_deg"][-2::-1] + [[0.0] * 6]     # 옆으로 돌기 → 옆에서 손목 풀기 → 정면(관절 0)
+    if max(abs(a - b) for a, b in zip(actual, target)) > 1.0:
+        s = settings(cfg)
+        s.update(paper_x_mm=_paper_x(requested),
+                 pen_len_max_mm=float(requested["pen_length_mm"]), clearance_mm=0.0)
+        if "tool_offset_mm" in requested:
+            s["tool_offset_mm"] = requested["tool_offset_mm"]
+        _check_segments([np.radians(actual), np.radians(target)], s)
+        status = _move_joints(link, cfg, target.tolist(), should_stop, "대기 자세 복귀")
+    for q in back:
+        status = _move_joints(link, cfg, q, should_stop, "호밍 자세 복귀")
     return status
 
 

@@ -462,12 +462,12 @@ class DrawJob:
         자동 복구는 하지 않는다: 멈춤·오류가 나면 그 자리에서 멈추고 사람에게 알린다."""
         if self.cfg.get("requested_start_pose"):
             from . import start_pose as sp
-            self._step("drawing", "active", "저장된 대기 자세로 복귀하는 중입니다")
+            self._step("drawing", "active", "대기 자세를 거쳐 호밍 자세로 돌아가는 중입니다")
             try:
                 sp.execute_requested_return(self.link, self.cfg, should_stop=self._stop.is_set)
                 return True, ""
             except (sp.StartPoseError, de.ControllerError) as e:
-                return False, f"대기 자세 복귀 실패: {e}"
+                return False, f"호밍 자세 복귀 실패: {e}"
         cmds = planner.return_to_origin()
         if not cmds:
             return None, ""

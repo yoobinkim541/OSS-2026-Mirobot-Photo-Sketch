@@ -465,7 +465,7 @@ class DrawWindow(ctk.CTkToplevel):
             self.stop_btn.configure(state="disabled")
             r = d["result"]["result"]
             returned = d["result"].get("returned_to_origin")      # True 돌아옴 / False 못 돌아옴 / None 해당 없음
-            return_name = "대기 자세" if self.cfg.get("requested_start_pose") and self.start_pose_var.get() else "처음 위치(종이 중심)"
+            return_name = "호밍 자세" if self.cfg.get("requested_start_pose") and self.start_pose_var.get() else "처음 위치(종이 중심)"
             done_text = "완료했습니다" + {True: f". 로봇이 {return_name}로 돌아왔습니다.",
                                         False: " — 다만 펜이 처음 위치로 돌아가지 못했습니다.",
                                         None: ""}[returned]

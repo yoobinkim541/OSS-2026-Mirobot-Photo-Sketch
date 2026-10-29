@@ -21,7 +21,9 @@ from mirobot_sketch.virtual_robot import VirtualMirobotLink  # noqa: E402
 
 import golden  # noqa: E402
 
+HOME = [0.0] * 6
 STANDBY = [0.0, 0.0, 0.0, 0.0, -128.0, 0.0]
+PRESS_MM = 7.0                          # 사용자 요청: 접촉점보다 1 mm → 최소 6 mm 더 앞으로 (총 7 mm)
 CONTACT = [0.0, 8.0, -8.0, 0.0, -128.0, 0.0]
 CONTACT_TCP = [232.84, 0.0, 268.888]     # 사용자가 보낸 컨트롤러 상태 응답
 CONTACT_LINE = "X0.000 Y8.000 Z-8.000 A0.000 B-128.000 C0.000"
@@ -36,7 +38,7 @@ def requested_cfg(verified=False, first_gap_mm=18.0):
         "joints_deg": STANDBY, "contact_joints_deg": CONTACT,
         "wall_distance_mm": 270.0, "pen_length_mm": 110.0, "tool_offset_mm": [-33.68, 1.76, 17.1],
         "first_pose_paper_gap_mm": first_gap_mm,
-        "tool_offset_verified": verified, "requested_pen_down_extra_mm": 1.0,
+        "tool_offset_verified": verified, "requested_pen_down_extra_mm": PRESS_MM,
         "contact_status_sample": {"joints_deg": [0, 8.002, -8, 0, -127.992, 0],
                                   "tcp_mm": CONTACT_TCP, "abc_deg": [0, -127.99, 0]}}
     return cfg
@@ -93,12 +95,15 @@ class RequestedFlowTest(unittest.TestCase):
         contact = next(i for i, line in enumerate(link.sent) if CONTACT_LINE in line)
         drawing = [i for i, line in enumerate(link.sent) if line.startswith("M20")]
         self.assertLess(contact, drawing[0])                                         # 2번 접촉 자세에서 그리기 시작
-        self.assertTrue(link.sent[-1].startswith("M21"))                             # 끝나면 1번 자세로 복귀
-        self.assertEqual(link.joints, STANDBY)
+        standby = next(i for i, line in enumerate(link.sent) if i > drawing[-1] and "X0.000 Y0.000 Z0.000 A0.000 B-128" in line)
+        self.assertLess(drawing[-1], standby)                                        # 끝나면 1번 자세를 거쳐
+        self.assertEqual(link.joints, HOME)                                          # 호밍 자세(관절 0)로
         contact_x = float(ms.fk(np.radians(CONTACT))[0][0, 3])                    # 접촉 자세에서 보고된 TCP
         xs = [float(M20_X.match(line).group(1)) for line in link.sent if M20_X.match(line)]
-        self.assertAlmostEqual(max(xs), contact_x + 1.0, places=2)                  # 접촉점보다 1 mm 더 눌러 그림
-        self.assertAlmostEqual(max(xs) - min(xs), 10.0, places=2)                   # 획 사이에는 10 mm 뒤로 뗌
+        self.assertAlmostEqual(max(xs), contact_x + PRESS_MM, places=2)             # 접촉점보다 더 눌러 그림
+        self.assertAlmostEqual(min(xs), contact_x - 10.0, places=2)                 # 획 사이에는 종이 면에서 10 mm 뗌
+        descend = [float(M20_X.match(line).group(1)) for line in link.sent if M20_X.match(line) and "F600" in line]
+        self.assertLess(max(descend), contact_x)                                     # 종이 면 앞에서부터는 느리게 접근
 
     def test_virtual_moves_standby_then_contact_draws_and_returns(self):
         result, link, _, _ = self.run_job(requested_cfg())
@@ -110,7 +115,7 @@ class RequestedFlowTest(unittest.TestCase):
         result, link, _, _ = self.run_job(requested_cfg(), air=True)
         self.assertEqual(result["result"], "completed")
         self.assertFalse(any(CONTACT_LINE in line for line in link.sent))
-        self.assertEqual(link.joints, STANDBY)
+        self.assertEqual(link.joints, HOME)
 
     def test_unverified_real_robot_stops_before_opening_the_port(self):
         result, _, opened, failed = self.run_job(requested_cfg(verified=False), virtual=False)
