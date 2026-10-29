@@ -294,15 +294,23 @@ class MirobotLink:
         return state, tcp, buf
 
     def wait_idle(self, timeout):
+        return self._wait_settled(timeout, None, None)
+
+    def wait_until_x(self, target_x, timeout, tol=1.5):
+        """Idle이고 보고된 X가 목표에 닿을 때까지. ok 직후 Idle만으로는 빼기가 안 끝난 경우가 있다."""
+        return self._wait_settled(timeout, float(target_x), float(tol))
+
+    def _wait_settled(self, timeout, target_x, tol):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             state, tcp, raw = self.query_status()
-            if state == "Idle":
-                return tcp
             if any(t in raw.lower() for t in ERROR_TOKENS):
                 raise ControllerError(f"Idle 대기 중 오류 상태: {raw}")
-            time.sleep(0.5)
-        raise ControllerError("Idle 대기 시간 초과")
+            x_ok = target_x is None or tcp is None or abs(tcp[0] - target_x) <= tol
+            if state == "Idle" and x_ok:
+                return tcp
+            time.sleep(0.05)
+        raise ControllerError("펜을 뒤로 뺀 위치를 확인하지 못했습니다" if target_x is not None else "Idle 대기 시간 초과")
 
     def send_and_ack(self, line, timeout, should_stop=None):
         """한 줄을 보내고 ok를 기다립니다. 오류 응답이나 타임아웃이면 ControllerError.
@@ -472,9 +480,13 @@ def execute(link, cmds, cfg, progress=print, on_ack=None, should_stop=None):
                 on_ack(sent, len(cmds))
             if label.endswith("pen-down") or i == len(cmds) - 1:
                 progress(f"  [{sent}/{len(cmds)}] {label}")
-            # ok는 동작이 끝나기 전에 온다. 펜을 그 자리에서 다 뺀 뒤에 옆 이동을 보내야 빠지면서 미끄러지지 않는다.
+            # ok는 동작이 끝나기 전에 온다. X가 뺀 위치일 때만 옆 이동을 보낸다.
             if label.endswith("pen-up"):
-                link.wait_idle(cfg["idle_timeout_s"])
+                target_x = float(re.search(r"X([-\d.]+)", line).group(1))
+                if hasattr(link, "wait_until_x"):
+                    link.wait_until_x(target_x, cfg["idle_timeout_s"])
+                else:
+                    link.wait_idle(cfg["idle_timeout_s"])
         link.wait_idle(cfg["idle_timeout_s"])
         return {"result": "completed", "commands_sent": sent, "elapsed_s": round(time.monotonic() - started, 1)}
     except StopRequested:

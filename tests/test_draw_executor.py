@@ -35,12 +35,16 @@ class FakeSerial:
         self.fail_at = fail_at
         self.fail_msg = fail_msg
         self.written = []
+        self.x = "198.668"
 
     def write(self, data):
         text = data.decode().strip()
         self.written.append(text)
+        mx = re.search(r"^M20 .*X([-\d.]+)", text)
+        if mx:
+            self.x = mx.group(1)
         if text == "?":
-            self.pending.append(self.IDLE)
+            self.pending.append(self.IDLE.replace("198.668", self.x, 1))
             return
         n = sum(1 for w in self.written if w != "?")
         self.pending.append(self.fail_msg if n == self.fail_at else "ok")
