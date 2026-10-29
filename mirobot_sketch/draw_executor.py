@@ -298,13 +298,14 @@ class MirobotLink:
 
     def wait_until_x(self, target_x, timeout, tol=1.5):
         """뺀 X가 보고될 때까지. 좌표가 없는 Idle은 통과하지 않는다.
-        첫 샘플이 이미 목표면 ok 전에 끝난 것으로 본다. 아니면 Run을 한 번 본 뒤의 Idle만 인정한다."""
+        첫 샘플이 이미 목표면 끝난 것으로 본다. 좌표가 목표와 달랐거나 Idle이 아닌
+        상태를 본 뒤 목표 Idle이면, Run이라는 문자열 없이도 통과한다."""
         return self._wait_settled(timeout, float(target_x), float(tol))
 
     def _wait_settled(self, timeout, target_x, tol):
         deadline = time.monotonic() + timeout
         first = True
-        saw_run = False
+        saw_move = False
         while time.monotonic() < deadline:
             state, tcp, raw = self.query_status()
             if any(t in raw.lower() for t in ERROR_TOKENS):
@@ -314,9 +315,9 @@ class MirobotLink:
                     return tcp
             else:
                 at_target = tcp is not None and abs(tcp[0] - target_x) <= tol
-                if state == "Run":
-                    saw_run = True
-                if state == "Idle" and at_target and (first or saw_run):
+                if state != "Idle" or (tcp is not None and not at_target):
+                    saw_move = True
+                if state == "Idle" and at_target and (first or saw_move):
                     return tcp
             first = False
             time.sleep(0.05)

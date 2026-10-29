@@ -402,13 +402,12 @@ class RetractConfirmTest(unittest.TestCase):
         with self.assertRaises(de.ControllerError):
             self._run([_status("Idle")] * 30)
 
-    def test_later_idle_without_run_does_not_pass(self):
-        # 첫 샘플은 아직 눌린 X. Run 없이 목표 Idle만 이어져도 조기 통과하면 안 된다.
-        with self.assertRaises(de.ControllerError):
-            self._run([_status("Idle", 218.0)] + [_status("Idle", 190.0)] * 30)
+    def test_x_that_left_the_target_then_returns_passes_without_run(self):
+        tcp = self._run([_status("Idle", 218.0), _status("Idle", 190.0)])
+        self.assertEqual(tcp[0], 190.0)
 
-    def test_run_then_idle_at_target_passes(self):
-        tcp = self._run([_status("Idle"), _status("Run", 218.0), _status("Idle", 190.0)])
+    def test_non_idle_state_counts_as_motion(self):
+        tcp = self._run([_status("Idle"), _status("Jog", 218.0), _status("Idle", 190.0)])
         self.assertEqual(tcp[0], 190.0)
 
 
