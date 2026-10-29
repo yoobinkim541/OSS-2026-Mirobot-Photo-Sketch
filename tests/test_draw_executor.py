@@ -87,6 +87,34 @@ class PlannerTest(unittest.TestCase):
         self.assertEqual(yz(up), yz(draw))
         labels = [label for _, label in cmds]
         self.assertLess(labels.index("stroke 0 pen-up"), labels.index("return center pen-up"))
+
+    def test_travel_between_strokes_stays_off_the_paper(self):
+        cfg = self._high_pen_up_cfg(20.0)
+        cfg["pen"]["down_extra_mm"] = 8.0
+        cfg["plane_compensation"]["b_per_mm_z"] = 0.05
+        strokes = [[(0.0, 0.0), (10.0, 0.0)], [(0.0, 30.0), (10.0, 30.0)]]
+        planner = de.Planner(cfg)
+        cmds = planner.plan(strokes)
+        labels = [label for _, label in cmds]
+        up_at = labels.index("stroke 0 pen-up")
+        self.assertEqual(labels[up_at + 1], "stroke 1 travel")
+        self.assertLess(labels.index("stroke 1 travel"), labels.index("stroke 1 pen-down"))
+        x_of = lambda line: float(re.search(r"X([-\d.]+)", line).group(1))
+        yz = lambda line: re.search(r"Y([-\d.]+) Z([-\d.]+)", line).groups()
+        sign = cfg["pen"]["retract_x_sign"]
+        up = next(line for line, label in cmds if label == "stroke 0 pen-up")
+        travel = next(line for line, label in cmds if label == "stroke 1 travel")
+        arrive = planner.pose(0.0, 30.0, False)
+        self.assertNotAlmostEqual(x_of(up), arrive[0], places=2)
+        self.assertEqual(yz(travel), (f"{arrive[1]:.3f}", f"{arrive[2]:.3f}"))
+        self.assertAlmostEqual(x_of(travel), planner._farther_x(x_of(up), arrive[0]), places=3)
+        self.assertGreaterEqual(sign * (x_of(travel) - x_of(up)), -1e-6)
+        last = next(line for line, label in cmds if label == "stroke 1 pen-up")
+        back = next(line for line, label in cmds if label == "return center pen-up")
+        home = planner.pose(0.0, 0.0, False)
+        self.assertEqual(yz(back), (f"{home[1]:.3f}", f"{home[2]:.3f}"))
+        self.assertAlmostEqual(x_of(back), planner._farther_x(x_of(last), home[0]), places=3)
+        self.assertGreaterEqual(sign * (x_of(back) - x_of(last)), -1e-6)
     def _high_pen_up_cfg(self, up=10.0):
         cfg = copy.deepcopy(CFG)
         cfg["pen"]["up_clearance_mm"] = up

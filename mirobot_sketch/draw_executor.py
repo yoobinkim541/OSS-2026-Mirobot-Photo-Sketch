@@ -149,10 +149,14 @@ class Planner:
         a, b, c = self.abc
         return f"M20 G90 G01 X{x:.3f} Y{y:.3f} Z{z:.3f} A{a:.3f} B{b:.3f} C{c:.3f} F{feed:.0f}"
 
+    def _farther_x(self, current, other):
+        """둘 중 종이에서 더 떨어진 X. 보정 이동은 이 쪽으로만 갱신한다."""
+        sign = self.cfg["pen"]["retract_x_sign"]
+        return current if sign * (current - other) >= 0 else other
+
     def return_to_origin(self):
         """그림을 다 그린 뒤 펜을 처음 상태(종이 중심, 펜 끝이 종이에 살짝 닿음)로 되돌리는 명령들.
-        plan()이 끝나는 자세(종이 중심 펜업)에서 이어 보낸다. 다음 그림이 같은 시작 자세를 가정할 수 있게 하기 위한 것.
-        공중 모드는 종이에 닿지 않고 처음 자세도 펜업 높이이므로 없음."""
+        plan()이 종이 중심 위에서 펜업으로 끝난 뒤 이어 보낸다. 공중 모드는 해당 없음."""
         if self.air:
             return []
         f = self.feeds
@@ -163,12 +167,16 @@ class Planner:
         return cmds
 
     def plan(self, strokes):
-        """[(gcode, 설명)] 리스트. 종이 중심 펜업에서 시작해 종이 중심 펜업으로 끝납니다."""
+        """[(gcode, 설명)] 리스트. 획이 끝나면 그 자리에서 펜업하고, 그 X를 유지한 채 다음 위치로 간 뒤에만 내린다."""
         f = self.feeds
-        cmds = [(self.gcode(self.pose(0, 0, False), f["approach"]), "center pen-up")]
+        home = self.pose(0, 0, False)
+        cmds = [(self.gcode(home, f["approach"]), "center pen-up")]
+        held_x = home[0]
         for i, s in enumerate(strokes):
             x0, y0 = s[0]
-            cmds.append((self.gcode(self.pose(x0, y0, False), f["travel"]), f"stroke {i} travel"))
+            up = self.pose(x0, y0, False)
+            travel_x = self._farther_x(held_x, up[0])
+            cmds.append((self.gcode((travel_x, up[1], up[2]), f["travel"]), f"stroke {i} travel"))
             if self.two_stage:   # 높이 띄운 곳에서 빠르게 내려오다 접촉 직전부터 천천히
                 cmds.append((self.gcode(self.pose_slow_zone(x0, y0), f["travel"]), f"stroke {i} descend"))
             cmds.append((self.gcode(self.pose(x0, y0, True), f["approach"]), f"stroke {i} pen-down"))
@@ -178,9 +186,13 @@ class Planner:
             # 그 자리(같은 Y·Z)에서만 뒤로 뺀다. 옆으로 가는 명령은 이 다음이다.
             if self.two_stage and self.down_extra:
                 cmds.append((self.gcode(self.pose_slow_zone(x1, y1), f["approach"]), f"stroke {i} lift"))
-            cmds.append((self.gcode(self.pose(x1, y1, False), f["travel"] if self.two_stage else f["approach"]),
+            end_up = self.pose(x1, y1, False)
+            cmds.append((self.gcode(end_up, f["travel"] if self.two_stage else f["approach"]),
                          f"stroke {i} pen-up"))
-        cmds.append((self.gcode(self.pose(0, 0, False), f["travel"]), "return center pen-up"))
+            held_x = end_up[0]
+        back = self.pose(0, 0, False)
+        cmds.append((self.gcode((self._farther_x(held_x, back[0]), back[1], back[2]), f["travel"]),
+                     "return center pen-up"))
         return cmds
 
 
