@@ -17,7 +17,7 @@ IMAGE_TYPES = {
     "photo": {
         "label": "실사 사진",
         "detail": "high", "rembg": True, "median": 0, "lineart": True,
-        "why": "실사를 선화로 바꾼 뒤 얼굴·모자·실루엣만 따고, 배경은 rembg로 지움",
+        "why": "실사를 선화로 바꾼 뒤 그 선을 그대로 따라 그리고, 배경은 rembg로 지움",
     },
     "illustration": {
         "label": "컬러 일러스트",

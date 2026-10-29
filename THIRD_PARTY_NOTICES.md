@@ -33,18 +33,10 @@ SOFTWARE.
 
 ## Informative Drawings 선화 모델
 
-- **파일:** `mirobot_sketch/data/informative_drawings.onnx`
+- **파일:** 저장소·설치 파일에 들어 있지 않습니다. 앱이 처음 실사 사진을 처리할 때 이 프로젝트의 GitHub Releases(`models-v1`의 `informative_drawings.onnx`)에서 내려받아 SHA256을 확인한 뒤 캐시 폴더(`out/cache/models/`, 설치판은 사용자 폴더의 `cache/models/`)에 둡니다.
 - **출처:** Caroline Chan, Frédo Durand, Phillip Isola, "Learning to generate line drawings that convey geometry and semantics", CVPR 2022. 코드 https://github.com/carolineec/informative-drawings (MIT License). ONNX 변환본 https://huggingface.co/rocca/informative-drawings-line-art-onnx (`model.onnx`)
 - **SHA256:** `1fef40b8f7126d827e30fbebccf95ae9b0b391795df926bf9366a821bad4f498`
 - **용도:** 실사 사진을 선화로 바꾼 뒤 획을 땁니다 (`mirobot_sketch/lineart.py`).
-
-## 얼굴 부위 분할 모델 (BiSeNet ResNet18)
-
-- **파일:** `mirobot_sketch/data/face_parsing_resnet18.onnx`
-- **출처:** https://github.com/yakhyo/face-parsing (MIT License), releases `weights/resnet18.onnx`
-- **SHA256:** `0d9bd318e46987c3bdbfacae9e2c0f461cae1c6ac6ea6d43bbe541a91727e33f`
-- **학습 데이터:** CelebAMask-HQ. 이 데이터셋은 비상업적 연구·교육 용도로만 쓸 수 있습니다(https://github.com/switchablenorms/CelebAMask-HQ). 가중치를 상업적으로 쓰려면 이 조건을 따로 확인해야 합니다.
-- **용도:** 모자·머리카락·눈·눈썹·귀·입술·옷을 나눠 부위마다 다르게 그립니다 (`mirobot_sketch/parsing.py`, `mirobot_sketch/portrait.py`).
 
 ## 예시 사진 (README·문서 스크린샷)
 

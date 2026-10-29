@@ -1,47 +1,78 @@
 """실사 사진을 선화로 바꿉니다. Informative Drawings (Chan, Durand, Isola, CVPR 2022).
 
 로봇 경로는 만들지 않습니다. 나온 흑백 선화를 기존 어두운 선 단계가 획으로 추적합니다.
-가중치: https://huggingface.co/rocca/informative-drawings-line-art-onnx (model.onnx)
+가중치(17 MB)는 저장소에 넣지 않고, 처음 쓸 때 이 프로젝트의 GitHub Releases에서 내려받아
+SHA256을 확인한 뒤 캐시 폴더(paths.cache_dir()/models)에 둡니다.
+원본: https://huggingface.co/rocca/informative-drawings-line-art-onnx (model.onnx)
 """
 
-from pathlib import Path
+import hashlib
+import os
+import urllib.request
 
 import cv2
 import numpy as np
 
 MODEL_NAME = "informative_drawings.onnx"
+MODEL_URL = ("https://github.com/yoobinkim541/OSS-2026-Mirobot-Photo-Sketch/releases/download/"
+             "models-v1/informative_drawings.onnx")
+MODEL_SHA256 = "1fef40b8f7126d827e30fbebccf95ae9b0b391795df926bf9366a821bad4f498"
+DOWNLOAD_TIMEOUT_S = 60
 MAX_SIDE = 768
-INK_THRESHOLD = 170   # 진한 선 (단독 기준으로 쓸 때)
-STRONG_INK = 150      # 이 이상 진한 점이 있는 선만 남기고 (잡결 제거)
-WEAK_INK = 215        # 그 선을 따라 옅은 끝부분까지 이어 남김 (속눈썹·입술처럼 가는 선이 끊기지 않게)
-UPSCALE = 1.5         # 모델은 사진을 키워 넣을수록 눈·입 같은 작은 부분을 더 자세히 그림
+STRONG_INK = 165      # 이 이상 진한 점이 있는 선만 남기고 (잡결 제거)
+WEAK_INK = 225        # 그 선을 따라 옅은 끝부분까지 이어 남김 (속눈썹·입술처럼 가는 선이 끊기지 않게)
+HOLLOW_PX = 2.0       # 이보다 두꺼운 먹 덩어리(눈동자 등)는 속을 비워 테두리로 그림 (뼈대로 따면 짧은 토막이 되어 사라짐)
 
 _session = None
 
 
+class LineartUnavailable(RuntimeError):
+    """선화 모델을 쓸 수 없음 (onnxruntime 없음, 내려받기 실패, 파일 손상)."""
+
+
 def model_path():
     from . import paths
-    bundled = paths.asset(MODEL_NAME) if hasattr(paths, "asset") else None
-    here = Path(__file__).resolve().parent / "data" / MODEL_NAME
-    if here.exists():
-        return here
-    if bundled is not None and Path(bundled).exists():
-        return Path(bundled)
-    return here
+    return paths.cache_dir() / "models" / MODEL_NAME
 
 
-def available():
-    return model_path().exists()
+def _sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def ensure_model(url=MODEL_URL, timeout=DOWNLOAD_TIMEOUT_S):
+    """모델 파일 경로. 없으면 내려받고, 받은 파일의 SHA256이 다르면 버리고 LineartUnavailable."""
+    path = model_path()
+    if path.exists():
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    part = path.with_suffix(".part")
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp, open(part, "wb") as out:
+            for block in iter(lambda: resp.read(1 << 20), b""):
+                out.write(block)
+        if _sha256(part) != MODEL_SHA256:
+            raise LineartUnavailable("내려받은 선화 모델이 손상됐습니다 (SHA256 불일치).")
+        os.replace(part, path)
+    except OSError as e:          # 인터넷 없음, 시간 초과, 디스크 오류 (URLError도 OSError)
+        raise LineartUnavailable(f"선화 모델을 내려받지 못했습니다: {e}") from None
+    finally:
+        if part.exists():
+            part.unlink()
+    return path
 
 
 def _load():
     global _session
     if _session is None:
-        import onnxruntime as ort
-        path = model_path()
-        if not path.exists():
-            raise FileNotFoundError(f"선화 모델이 없습니다: {path}")
-        _session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+        try:
+            import onnxruntime as ort
+        except ImportError:
+            raise LineartUnavailable("onnxruntime이 설치되어 있지 않습니다.") from None
+        _session = ort.InferenceSession(str(ensure_model()), providers=["CPUExecutionProvider"])
     return _session
 
 
@@ -75,11 +106,17 @@ def hysteresis(gray, strong=STRONG_INK, weak=WEAK_INK):
     return np.isin(labels, seeds[seeds > 0]).astype(np.uint8) * 255
 
 
-def ink_mask(bgr, upscale=UPSCALE):
-    """(선화 BGR, 선 마스크) — 둘 다 입력과 같은 크기. 모델은 키운 사진에 돌리고 마스크만 다시 줄임."""
-    h, w = bgr.shape[:2]
-    big = cv2.resize(bgr, (round(w * upscale), round(h * upscale)), interpolation=cv2.INTER_CUBIC)
-    art = line_drawing(big, max_side=max(big.shape[:2]))
-    mask = hysteresis(cv2.cvtColor(art, cv2.COLOR_BGR2GRAY)).astype(np.float32) / 255.0
-    small = cv2.resize(mask, (w, h), interpolation=cv2.INTER_AREA) > 0.3
-    return cv2.resize(art, (w, h), interpolation=cv2.INTER_AREA), small.astype(np.uint8) * 255
+def hollow(mask, keep_px=HOLLOW_PX):
+    """두꺼운 덩어리의 속을 비움: 경계에서 keep_px 안쪽까지만 남김. 가는 선은 그대로."""
+    inside = (cv2.distanceTransform((mask > 0).astype(np.uint8), cv2.DIST_L2, 3) > keep_px).astype(np.uint8)
+    inside = cv2.morphologyEx(inside, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    out = mask.copy()
+    out[inside > 0] = 0
+    return out
+
+
+def ink_mask(bgr):
+    """(선화 BGR, 선 마스크) — 둘 다 입력과 같은 크기. 선화는 사진을 키우지 않고 긴 변 MAX_SIDE로 그린 것을 씀
+    (키워 넣으면 니트 결 같은 잔선이 더 촘촘해져 펜으로 그리면 덩어리가 됨)."""
+    art = line_drawing(bgr)
+    return art, hollow(hysteresis(cv2.cvtColor(art, cv2.COLOR_BGR2GRAY)))

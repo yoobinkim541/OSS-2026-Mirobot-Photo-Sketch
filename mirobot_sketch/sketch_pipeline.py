@@ -532,6 +532,50 @@ def clip_to_ellipse(strokes, center, axes, inside=True):
     return out
 
 
+def _end_tangent(s, at_start, k=5):
+    m = min(k, len(s) - 1)
+    v = (s[m] - s[0]) if at_start else (s[-1] - s[-1 - m])
+    n = np.hypot(*v)
+    return v / n if n > 0 else np.zeros(2)
+
+
+def join_gaps(strokes, gap=10.0, turn=0.85):
+    """점선처럼 끊긴 선을 잇기: 끝점이 gap 이내이고 진행 방향이 거의 같으면(코사인 turn 이상) 한 획으로.
+    직각으로 꺾이는 두 선은 잇지 않음."""
+    from scipy.spatial import cKDTree
+
+    strokes = [np.asarray(s, np.float64) for s in strokes if len(s) >= 2]
+    alive = [True] * len(strokes)
+    while True:
+        ends, owners = [], []
+        for i, s in enumerate(strokes):
+            if alive[i] and not is_closed(s):
+                ends += [s[0], s[-1]]
+                owners += [(i, True), (i, False)]
+        if len(ends) < 2:
+            break
+        best = None
+        for a, b in cKDTree(np.asarray(ends)).query_pairs(gap):
+            (i, ia), (j, jb) = owners[a], owners[b]
+            if i == j:
+                continue
+            out_i = -_end_tangent(strokes[i], True) if ia else _end_tangent(strokes[i], False)   # i에서 나가는 방향
+            into_j = _end_tangent(strokes[j], True) if jb else -_end_tangent(strokes[j], False)  # j로 들어가는 방향
+            bridge = np.asarray(ends[b]) - np.asarray(ends[a])
+            d = float(np.hypot(*bridge))
+            if out_i @ into_j > turn and (d < 1.5 or (bridge / d) @ out_i > turn) and (best is None or d < best[0]):
+                best = (d, i, ia, j, jb)
+        if best is None:
+            break
+        _, i, ia, j, jb = best
+        si = strokes[i][::-1] if ia else strokes[i]
+        sj = strokes[j] if jb else strokes[j][::-1]
+        strokes[i] = np.vstack([si, sj])
+        alive[j] = False
+    return [s for s, a in zip(strokes, alive) if a]
+
+
+
 def smooth_strokes(strokes, sigma_px=2.0):
     """획을 따라 가우시안으로 매끄럽게 (1px 계단·흔들림 제거). 열린 획은 끝점 고정, 닫힌 획은 고리째.
     뼈대에서 따라간 촘촘한 획(점 간격 1px)에 씁니다. sigma_px=0이면 그대로."""

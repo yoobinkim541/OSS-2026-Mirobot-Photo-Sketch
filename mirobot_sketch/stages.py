@@ -108,18 +108,23 @@ def _run_prep(prev, p):
 def _run_edges(prev, p):
     # 블러는 전처리에서 했으므로 여기서는 1(끔)
     color, gray = prev["prep_color"], prev["prep_gray"]
+    missing = {}
     if p.get("lineart"):
         from . import lineart
-        color, e = lineart.ink_mask(prev["color"])
-        gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
-        return {**prev, "prep_color": color, "prep_gray": gray, "edges": e, "lineart_used": True}
+        try:
+            art, e = lineart.ink_mask(prev["color"])
+        except lineart.LineartUnavailable as why:     # 오프라인 첫 실행 등: 기존 선 검출로 그리고 이유를 알림
+            missing = {"lineart_missing": f"{why} 선화 대신 기본 선 검출로 그렸습니다."}
+        else:
+            gray = cv2.cvtColor(art, cv2.COLOR_BGR2GRAY)
+            return {**prev, "prep_color": art, "prep_gray": gray, "edges": e, "lineart_used": True}
     if p["edge_mode"] == "dark":
         e = sp.compute_dark_mask(gray, 1)
     elif p["edge_mode"] == "lab":
         e = sp.compute_edges_lab(color, p["canny_low"], p["canny_high"], 1)
     else:
         e = sp.compute_edges(gray, p["canny_low"], p["canny_high"], 1)
-    return {**prev, "edges": e}
+    return {**prev, "edges": e, **missing}
 
 
 def _run_trace(prev, p):
@@ -136,23 +141,32 @@ def _run_dedupe(prev, p):
     return {**prev, "strokes": st, "discarded_dedupe": disc}
 
 
+LINEART_GAP_PX = 12.0      # 선화의 점선처럼 끊긴 선을 이을 끝점 거리 (작업 이미지 px)
+LINEART_MIN_PX = 14.0      # 이었는데도 이보다 짧은 열린 토막은 버림 (펜으로 그리면 지저분한 점선이 됨)
+
+
 def _run_merge(prev, p):
     strokes = prev["strokes"]
     if p["merge_join_px"]:
         strokes = sp.merge_strokes(strokes, p["merge_join_px"])
-    if prev.get("lineart_used"):
-        from . import hair, portrait
-        found = prev.get("faces") or []
-        strokes = sp.smooth_strokes(strokes, 3.0)
-        parts = portrait.compose(strokes, prev["color"], found)
-        if parts is not None:                       # 얼굴 분할로 부위별로 다시 그림
-            return {**prev, "strokes": parts, "parts_drawn": True}
-        strokes = portrait.tidy_face(strokes, found, prev["color"])
-        mask = hair.hair_mask(prev["color"], found)
-        if mask.any():
-            strokes, structure = hair.split_fragments(strokes, mask)
-            strokes = strokes + sp.smooth_strokes(hair.hair_strokes(prev["color"], mask, structure), 2.0)
+    if prev.get("lineart_used"):                    # 선화를 그대로 따라 그림: 점선처럼 끊긴 선만 잇고 짧은 토막은 버림
+        strokes = sp.join_gaps(strokes, LINEART_GAP_PX)
+        near = _near_features(strokes, prev.get("faces") or [])
+        strokes = [q for q, keep in zip(strokes, near)
+                   if keep or sp.is_closed(q) or sp.polyline_length(q) >= LINEART_MIN_PX]
+        # 짧은 획(눈동자 고리 등)은 세게 펴면 점으로 오그라듦: 길이에 맞춰 약하게
+        strokes = [sp.smooth_strokes([q], min(3.0, sp.polyline_length(q) / 20.0))[0] for q in strokes]
     return {**prev, "strokes": strokes}
+
+
+def _near_features(strokes, faces):
+    """획마다 눈·코·입 랜드마크 가까이(얼굴 폭의 12% 이내)에 닿는지. 작은 눈·콧구멍은 짧아도 남기기 위함."""
+    marks = [(np.asarray(f.landmarks, np.float64), 0.12 * float(f.box[2])) for f in faces]
+    out = []
+    for q in strokes:
+        q = np.asarray(q, np.float64)
+        out.append(any(np.min(np.linalg.norm(q[:, None, :] - lm[None, :, :], axis=2)) <= r for lm, r in marks))
+    return out
 
 
 FACE_REASON = "얼굴 세밀 처리로 교체"
@@ -189,42 +203,12 @@ def _face_pen_px(prev, p):
     return p["pen_mm"] / (long_mm / max(h, w))
 
 
-def _feature_zones(face):
-    """눈·입 영역 타원 ((중심), (반축)) — 작업 좌표. 옆얼굴은 눈 랜드마크 하나가 콧대 뒤에 있어 둘을 함께 덮음."""
-    lm = np.asarray(face.landmarks, np.float64)
-    w = float(face.box[2])
-    zones = []
-    for a, b, pad_y in ((lm[0], lm[1], 0.14), (lm[3], lm[4], 0.12)):
-        c = (a + b) / 2
-        half = np.abs(b - a) / 2
-        zones.append(((float(c[0]), float(c[1])), (float(half[0] + 0.16 * w), float(half[1] + pad_y * w))))
-    return zones
-
-
-
-def _run_face_lineart(prev, p):
-    """선화 경로: 눈·입 영역만 얼굴 조각의 원본 해상도 경계로 바꿔 넣음 (나머지 얼굴 윤곽은 선화 그대로).
-    선화 모델은 눈매·입술을 옅은 잔선 다발로 그려, 그대로 획으로 따면 낙서처럼 보임."""
-    found = prev.get("faces") or []
-    pen_px = _face_pen_px(prev, p)
-    strokes, gone = list(prev["strokes"]), []
-    for face, crop in zip(found, prev.get("face_crops") or []):
-        fine = _face_strokes(crop, face, p, pen_px)
-        for center, axes in _feature_zones(face):
-            gone += [(q, FACE_REASON) for q in sp.clip_to_ellipse(strokes, center, axes, inside=True)]
-            strokes = (sp.clip_to_ellipse(strokes, center, axes, inside=False)
-                       + sp.clip_to_ellipse(fine, center, axes, inside=True))
-    return {**prev, "strokes": strokes, "discarded_face": gone, "faces_used": len(found)}
-
-
 def _run_face(prev, p):
     found = prev.get("faces") or []
     if not found or not p["face_detail"]:
         return {**prev, "discarded_face": [], "faces_used": 0, "uses_deps": False}
-    if prev.get("parts_drawn"):                     # 눈·입은 부위별 그리기에서 이미 그림
-        return {**prev, "discarded_face": [], "faces_used": len(found)}
-    if prev.get("lineart_used"):
-        return _run_face_lineart(prev, p)
+    if prev.get("lineart_used"):                    # 선화가 눈·입까지 그리므로 얼굴만 따로 다시 따지 않음
+        return {**prev, "discarded_face": [], "faces_used": 0, "uses_deps": False}
     pen_px = _face_pen_px(prev, p)
     strokes, gone = list(prev["strokes"]), []
     for face, crop in zip(found, prev["face_crops"]):
@@ -307,7 +291,7 @@ STAGES = (
         _run_prep, lambda o: _bgr(o["prep_gray"])),
     Stage("edges", "선 검출", (
         ParamSpec("lineart", "실사 선화로 바꾼 뒤 따기", "bool", False,
-                  help="실사만. 얼굴·모자·실루엣을 남기고 결·그물 같은 잔선은 줄인 뒤 어두운 선으로 추적"),
+                  help="실사만. 선화 모델(처음 한 번 내려받음)이 그린 선을 그대로 따라 그림. 모델을 못 쓰면 아래 방식으로"),
         ParamSpec("edge_mode", "방식", "choice", "luma", choices=EDGE_MODES,
                   help="선화를 끈 때: 밝기=흑백 Canny, 색 차이=Lab Canny, 어두운 선=선화 중심선"),
         ParamSpec("canny_low", "약한 선 민감도 (Canny 하한)", "int", _hi[0], 0, 255, help="낮을수록 약한 선도 잡음"),

@@ -318,6 +318,8 @@ class SketchSession:
                             self.notice = "구도가 바뀌어 편집 기록을 초기화했습니다"
                         if fr["notice"]:
                             self.notice += f" · {fr['notice']}"
+                        if outs["edges"].get("lineart_missing"):
+                            self.notice += f" · {outs['edges']['lineart_missing']}"
                         self._last_simplify = outs["simplify"]
                         self._fit_outline = [e["poly"] for e in self.table.values() if e["kind"] == "stroke"]
                     # 명암 빗금은 윤곽과 함께 배치를 정함 (빗금 설정만 바뀌어도 다시 맞춤)

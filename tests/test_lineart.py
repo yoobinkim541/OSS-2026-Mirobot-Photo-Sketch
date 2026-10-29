@@ -1,17 +1,18 @@
-"""실사 선화 경로: 선화로 선을 따고, 부위(모자·머리카락·눈·입술·귀)마다 화가처럼 다시 그린다."""
+"""실사 선화 경로: 선화를 그대로 따라 그린다 (부위별로 다시 그리지 않음)."""
 
+import hashlib
 import sys
+import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
-import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from mirobot_sketch import hair, parsing, portrait, stages  # noqa: E402
+from mirobot_sketch import lineart, stages  # noqa: E402
+from mirobot_sketch import sketch_pipeline as sp  # noqa: E402
 
 
 class LineartEdgeTest(unittest.TestCase):
@@ -30,77 +31,71 @@ class LineartEdgeTest(unittest.TestCase):
         self.assertEqual(int(out["edges"][0, 0]), 0)
         self.assertTrue(out["lineart_used"])
 
+    def test_thick_blob_becomes_an_outline_but_thin_line_stays(self):
+        mask = np.zeros((60, 80), np.uint8)
+        mask[20:40, 10:30] = 255                 # 눈동자처럼 두꺼운 먹 덩어리
+        mask[10:50, 60:62] = 255                 # 가는 선
+        out = lineart.hollow(mask)
+        self.assertEqual(int(out[30, 20]), 0)    # 속은 비우고
+        self.assertEqual(int(out[20, 20]), 255)  # 테두리는 남김
+        self.assertTrue((out[10:50, 60:62] == 255).all())
 
-def face_at(x, y, w, h):
-    lm = np.array([[x + 0.3 * w, y + 0.4 * h], [x + 0.5 * w, y + 0.4 * h], [x + 0.15 * w, y + 0.6 * h],
-                   [x + 0.25 * w, y + 0.8 * h], [x + 0.45 * w, y + 0.8 * h]])   # 왼쪽을 보는 옆얼굴
-    return SimpleNamespace(box=np.array([x, y, w, h], float), landmarks=lm)
-
-
-class HairFlowTest(unittest.TestCase):
-    def test_strands_follow_the_hair_direction_inside_the_dark_mass(self):
-        img = np.full((300, 300, 3), (200, 210, 230), np.uint8)
-        hair_area = np.zeros((300, 300), bool)
-        hair_area[20:290, 170:290] = True
-        stripes = ((np.arange(300) // 3) % 2 == 0)[None, :].repeat(300, 0)   # 세로 결
-        img[hair_area & stripes] = (20, 20, 20)
-        img[hair_area & ~stripes] = (45, 45, 45)
-        face = face_at(60, 120, 100, 120)        # 코가 왼쪽 -> 뒤통수(머리카락)는 오른쪽
-        mask = hair.hair_mask(img, [face])
-        self.assertGreater(mask[150, 230], 0)
-        strands = hair.hair_strokes(img, mask)
-        self.assertGreater(len(strands), 3)
-        vertical = [abs(d[1]) > 2 * abs(d[0]) for d in (s[-1] - s[0] for s in strands)]
-        self.assertGreaterEqual(sum(vertical) / len(vertical), 0.8)     # 대부분 세로 결을 따라감
+    def test_unavailable_model_falls_back_to_basic_edges_with_a_reason(self):
+        color = np.full((40, 60, 3), 230, np.uint8)
+        color[:, 30:] = 40                       # 세로 경계 하나
+        gray = color[:, :, 0]
+        params = {**stages.default_params(), "lineart": True}
+        prev = {"color": color, "gray": gray, "prep_color": color, "prep_gray": gray}
+        with mock.patch("mirobot_sketch.lineart.ink_mask", side_effect=lineart.LineartUnavailable("인터넷 없음.")):
+            out = stages._run_edges(prev, params)
+        self.assertFalse(out.get("lineart_used"))
+        self.assertIn("인터넷 없음", out["lineart_missing"])
+        self.assertTrue(out["edges"][:, 28:32].any())                    # 기본 선 검출이 경계를 찾음
 
 
-class SkinShadingTest(unittest.TestCase):
-    def colors(self, img):
-        b = cv2.GaussianBlur(img, (0, 0), 1.2)
-        return (cv2.cvtColor(b, cv2.COLOR_BGR2LAB).astype(np.float32),
-                cv2.cvtColor(b, cv2.COLOR_BGR2YCrCb).astype(np.float32))
+class ModelDownloadTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.src = self.root / "release.onnx"
+        self.src.write_bytes(b"model-bytes")
+        patcher = mock.patch("mirobot_sketch.paths.cache_dir", return_value=self.root / "cache")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
-    def test_brightness_step_on_skin_is_shading_but_lip_edge_is_not(self):
-        line = np.array([[50.0, y] for y in range(10, 90)])
-        skin = np.zeros((100, 100, 3), np.uint8)
-        skin[:, :50] = (150, 170, 230)
-        skin[:, 50:] = (110, 125, 175)          # 같은 피부색, 그늘
-        self.assertTrue(portrait.is_skin_shading(line, *self.colors(skin)))
-        lip = skin.copy()
-        lip[:, 50:] = (90, 60, 200)             # 붉은 입술
-        self.assertFalse(portrait.is_skin_shading(line, *self.colors(lip)))
+    def test_verified_download_is_kept(self):
+        good = hashlib.sha256(b"model-bytes").hexdigest()
+        with mock.patch.object(lineart, "MODEL_SHA256", good):
+            path = lineart.ensure_model(url=self.src.as_uri())
+        self.assertEqual(path.read_bytes(), b"model-bytes")
+        self.assertEqual(lineart.ensure_model(url="http://invalid.invalid/x"), path)   # 있으면 다시 받지 않음
+
+    def test_corrupt_or_failed_download_leaves_no_file(self):
+        with self.assertRaises(lineart.LineartUnavailable):
+            lineart.ensure_model(url=self.src.as_uri())                 # SHA256 불일치
+        with self.assertRaises(lineart.LineartUnavailable):
+            lineart.ensure_model(url=(self.root / "missing.onnx").as_uri())
+        self.assertEqual(list((self.root / "cache" / "models").iterdir()), [])
 
 
-class PortraitPartsTest(unittest.TestCase):
+class LineartMergeTest(unittest.TestCase):
+    def test_dashed_line_is_joined_and_stray_dash_dropped(self):
+        dashes = [np.array([[x, 50.0] for x in range(x0, x0 + 20)]) for x0 in (0, 26, 52)]
+        stray = np.array([[x, 10.0] for x in range(100, 108)])            # 홀로 떨어진 짧은 토막
+        params = stages.default_params()
+        out = stages._run_merge({"strokes": dashes + [stray], "lineart_used": True}, {**params, "merge_join_px": 0})
+        self.assertEqual(len(out["strokes"]), 1)
+        self.assertGreater(sp.polyline_length(out["strokes"][0]), 65)
+
+
+class JoinGapsTest(unittest.TestCase):
     def test_dashed_line_is_joined_but_a_corner_is_not(self):
         dashes = [np.array([[x, 50.0] for x in range(x0, x0 + 20)]) for x0 in (0, 26, 52)]
-        self.assertEqual(len(portrait.join_gaps(dashes)), 1)                  # 점선 -> 한 줄
+        self.assertEqual(len(sp.join_gaps(dashes)), 1)                     # 점선 -> 한 줄
         corner = [np.array([[x, 50.0] for x in range(0, 20)]), np.array([[24.0, y] for y in range(55, 80)])]
-        self.assertEqual(len(portrait.join_gaps(corner)), 2)                  # 직각으로 꺾이면 잇지 않음
+        self.assertEqual(len(sp.join_gaps(corner)), 2)                     # 직각으로 꺾이면 잇지 않음
 
-    def test_outline_skips_the_part_cut_by_the_photo_edge(self):
-        mask = np.zeros((100, 100), np.uint8)
-        mask[0:40, 20:80] = 255                                               # 사진 위 끝에서 잘린 모자
-        for s in portrait._contours(mask, sigma=0):
-            self.assertGreater(float(np.min(s[:, 1])), 1.0)                   # 위 가장자리는 긋지 않음
 
-    def test_only_red_lips_are_drawn(self):
-        labels = np.zeros((80, 80), np.uint8)
-        labels[:, :] = parsing.PARTS.index("skin")
-        labels[30:40, 20:50] = parsing.PARTS.index("u_lip")
-        color = np.full((80, 80, 3), (150, 170, 220), np.uint8)               # 피부
-        color[30:40, 20:50] = (80, 60, 210)                                    # 붉은 입술
-        strokes, area = portrait._lips(labels, color)
-        self.assertTrue(strokes)
-        color[30:40, 20:50] = (150, 170, 220)                                  # 입을 가린 손가락(피부색)
-        strokes, area = portrait._lips(labels, color)
-        self.assertEqual(strokes, [])
-        self.assertFalse(area.any())
-
-    def test_thick_brow_is_treated_as_bangs(self):
-        brow = np.zeros((120, 120), np.uint8)
-        brow[20:50, 10:100] = 255                                              # 두꺼움: 앞머리
-        brow[80:84, 30:80] = 255                                               # 가늚: 눈썹
-        strokes, bangs = portrait._brows(brow, face_w=100.0)
-        self.assertTrue(bangs[30, 50] > 0 and bangs[82, 50] == 0)
-        self.assertEqual(len(strokes), 1)
+if __name__ == "__main__":
+    unittest.main()
