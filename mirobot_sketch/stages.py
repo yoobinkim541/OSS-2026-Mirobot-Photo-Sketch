@@ -139,7 +139,7 @@ def _run_dedupe(prev, p):
     disc = []
     st = sp.dedupe_strokes(prev["strokes"], prev["edges"].shape, int(p["dedupe_px"]), discarded=disc)
     gray = prev.get("prep_gray", prev.get("gray"))
-    if gray is not None:
+    if gray is not None and prev.get("region") is not None:
         gap = _px_per_mm(prev, p) * INK_TWIN_MM          # 종이에서 이 거리(mm) 안, 사이가 먹인 쌍만
         faces = prev.get("faces") or []
         protect = np.vstack([np.asarray(f.landmarks, np.float64) for f in faces]) if faces else None

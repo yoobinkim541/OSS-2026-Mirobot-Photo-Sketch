@@ -447,11 +447,11 @@ def drop_ink_twins(strokes, gray, gap_px, ink_max=200, turn=0.85, min_keep_px=8,
                     if nrm < 1e-6 or abs(float((v / nrm) @ tangents[j])) < turn:
                         continue
                     a_pt, b_pt = pts[k], samples[j]
-                    steps = max(2, int(np.hypot(*(b_pt - a_pt))))
-                    t = np.linspace(0, 1, steps)
+                    steps = max(3, int(np.hypot(*(b_pt - a_pt))))
+                    t = np.linspace(0, 1, steps)[1:-1]
                     xs = np.clip(np.round(a_pt[0] + (b_pt[0] - a_pt[0]) * t).astype(int), 0, w - 1)
                     ys = np.clip(np.round(a_pt[1] + (b_pt[1] - a_pt[1]) * t).astype(int), 0, h - 1)
-                    if int(gray[ys, xs].min()) <= ink_max:   # 사이 어딘가 먹 = 한 굵은 선의 양쪽
+                    if len(xs) and int(gray[ys, xs].min()) <= ink_max:
                         twin[k] = True
                         break
         keep = ~twin
@@ -468,7 +468,7 @@ def drop_ink_twins(strokes, gray, gap_px, ink_max=200, turn=0.85, min_keep_px=8,
                 out.append(pts[k:j])
             k = j
         if discarded is not None and twin.any():
-            discarded.append((pts[twin], "ink-twin"))
+            discarded.append((pts[twin], "overlap"))
         if keep.mean() >= 0.5:
             accepted.add(i)
     return out
