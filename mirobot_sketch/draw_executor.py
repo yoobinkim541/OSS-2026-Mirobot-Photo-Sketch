@@ -503,13 +503,9 @@ def _segment_s(from_x, line):
     return abs(from_x - x) / feed * 60.0 if feed > 0 else 0.0
 
 
-def pen_up_pause_s(last_up_yz, contact_line, lift_line, pen_up_line, tol=1.0):
-    """직전 빼기와 Y·Z가 1 mm 안이면 상태만으로 구분되지 않는다.
-    접촉 X에서 펜업 X까지, 이미 큐에 들어간 lift와 펜업의 시간을 더한 초를 반환한다."""
-    if last_up_yz is None or not contact_line:
-        return 0.0
-    xyz = [float(v) for v in re.search(r"X([-\d.]+) Y([-\d.]+) Z([-\d.]+)", pen_up_line).groups()]
-    if abs(last_up_yz[0] - xyz[1]) > tol or abs(last_up_yz[1] - xyz[2]) > tol:
+def pen_up_pause_s(contact_line, lift_line, pen_up_line):
+    """옆 이동 전에 들기와 펜업이 끝날 시간(초). 상태 확인이 일찍 통과해도 이 시간만큼 명령을 보내지 않는다."""
+    if not contact_line:
         return 0.0
     x = float(re.search(r"X([-\d.]+)", contact_line).group(1))
     total = 0.0
@@ -529,7 +525,6 @@ def execute(link, cmds, cfg, progress=print, on_ack=None, should_stop=None):
     contact_sign = -float(cfg["pen"]["retract_x_sign"])
     contact_line = None
     lift_line = None
-    last_up_yz = None
     try:
         for i, (line, label) in enumerate(cmds):
             if stop():
@@ -558,10 +553,9 @@ def execute(link, cmds, cfg, progress=print, on_ack=None, should_stop=None):
                     link.wait_until_x(pose[0], cfg["idle_timeout_s"])
                 else:
                     link.wait_idle(cfg["idle_timeout_s"])
-                pause = pen_up_pause_s(last_up_yz, contact_line, lift_line, line)
+                pause = pen_up_pause_s(contact_line, lift_line, line)
                 if pause > 0 and not getattr(link, "virtual", False):
                     time.sleep(pause)   # 컨트롤러에는 명령을 더 넣지 않는다. G4도 보내지 않는다.
-                last_up_yz = (pose[1], pose[2])
         link.wait_idle(cfg["idle_timeout_s"])
         return {"result": "completed", "commands_sent": sent, "elapsed_s": round(time.monotonic() - started, 1)}
     except StopRequested:
