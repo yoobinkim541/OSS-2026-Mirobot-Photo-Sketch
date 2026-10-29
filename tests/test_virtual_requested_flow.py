@@ -101,9 +101,12 @@ class RequestedFlowTest(unittest.TestCase):
         contact_x = float(ms.fk(np.radians(CONTACT))[0][0, 3])                    # 접촉 자세에서 보고된 TCP
         xs = [float(M20_X.match(line).group(1)) for line in link.sent if M20_X.match(line)]
         self.assertAlmostEqual(max(xs), contact_x + PRESS_MM, places=2)             # 접촉점보다 더 눌러 그림
-        self.assertAlmostEqual(min(xs), contact_x - 10.0, places=2)                 # 획 사이에는 종이 면에서 10 mm 뗌
+        self.assertAlmostEqual(min(xs), contact_x - 20.0, places=2)                 # 획 사이에는 종이 면에서 20 mm 뗌
         descend = [float(M20_X.match(line).group(1)) for line in link.sent if M20_X.match(line) and "F600" in line]
         self.assertLess(max(descend), contact_x)                                     # 종이 면 앞에서부터는 느리게 접근
+        lifts = [line for line in link.sent if line.startswith("M20") and "F200" in line]
+        self.assertTrue(lifts)                                                       # 뗄 때는 접근 속도로 천천히
+        self.assertLess(float(M20_X.match(lifts[0]).group(1)), contact_x)            # 종이 면을 지난 뒤에야 빠르게 이동
 
     def test_virtual_moves_standby_then_contact_draws_and_returns(self):
         result, link, _, _ = self.run_job(requested_cfg())

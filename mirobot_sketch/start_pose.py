@@ -219,7 +219,7 @@ def drawing_config_from_contact(cfg, status):
     result["paper_center_tcp_mm"] = dict(zip(("x", "y", "z"), tcp.tolist()))
     result["orientation_deg"] = dict(zip(("a", "b", "c"), abc.tolist()))
     result["simulation_start_joints_deg"] = joints.tolist()
-    result["pen"]["up_clearance_mm"] = 10.0                 # 획 사이에는 접촉점에서 10 mm 뒤로 뗀다
+    result["pen"]["up_clearance_mm"] = 20.0                # 획 사이에는 종이 면에서 20 mm 뒤로 뗀 뒤에 이동
     # 사용자가 정한 대로 접촉점보다 조금 더 눌러 그린다 (없으면 기존 설정값)
     result["pen"]["down_extra_mm"] = float(cfg["requested_start_pose"].get(
         "requested_pen_down_extra_mm", result["pen"].get("down_extra_mm", 0.0)))

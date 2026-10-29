@@ -71,6 +71,18 @@ class PlannerTest(unittest.TestCase):
         self.assertAlmostEqual(down_x, CFG["paper_center_tcp_mm"]["x"])
         self.assertAlmostEqual(down_x - up_x, CFG["pen"]["up_clearance_mm"])  # 펜업은 벽에서 멀어짐
 
+    def test_pen_lifts_in_place_before_the_next_move(self):
+        cfg = self._high_pen_up_cfg(20.0)
+        cfg["pen"]["down_extra_mm"] = 8.0
+        cmds = de.Planner(cfg).plan(SQUARE)
+        yz = lambda line: re.search(r"Y([-\d.]+) Z([-\d.]+)", line).groups()
+        draw = next(line for line, label in reversed(cmds) if label == "stroke 0 draw")
+        lift = next(line for line, label in cmds if label == "stroke 0 lift")
+        up = next(line for line, label in cmds if label == "stroke 0 pen-up")
+        self.assertEqual(yz(lift), yz(draw))          # 뗄 때 Y·Z는 그대로, X만 뒤로
+        self.assertEqual(yz(up), yz(draw))
+        labels = [label for _, label in cmds]
+        self.assertLess(labels.index("stroke 0 pen-up"), labels.index("return center pen-up"))
     def _high_pen_up_cfg(self, up=10.0):
         cfg = copy.deepcopy(CFG)
         cfg["pen"]["up_clearance_mm"] = up
@@ -309,6 +321,12 @@ class ExecuteTest(unittest.TestCase):
         self.assertEqual(result["result"], "completed")
         self.assertEqual(result["commands_sent"], len(self.cmds))
 
+    def test_pen_up_waits_until_idle_before_the_next_move(self):
+        fake = FakeSerial()
+        de.execute(de.MirobotLink(fake), self.cmds, self.cfg, progress=lambda *_: None)
+        pen_up = next(line for line, label in self.cmds if label == "stroke 0 pen-up")
+        i = fake.written.index(pen_up)
+        self.assertEqual(fake.written[i + 1], "?")          # 펜업 ok 다음, 옆 이동 전에 Idle 확인
     def test_stops_immediately_on_soft_limit(self):
         fake = FakeSerial(fail_at=4)
         result = de.execute(de.MirobotLink(fake), self.cmds, self.cfg, progress=lambda *_: None)

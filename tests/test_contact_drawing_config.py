@@ -13,7 +13,7 @@ class ContactDrawingConfigTest(unittest.TestCase):
         self.assertEqual(new['orientation_deg'], {'a':0,'b':-128,'c':0})
         self.assertEqual(new['simulation_start_joints_deg'], [0,8,-8,0,-128,0])
         self.assertNotEqual(cfg['paper_center_tcp_mm'], new['paper_center_tcp_mm'])
-        self.assertEqual(new['pen']['up_clearance_mm'], 10.0)
+        self.assertEqual(new['pen']['up_clearance_mm'], 20.0)
 
     def test_wrong_contact_or_missing_status_is_rejected(self):
         cfg = cfg_for_test()

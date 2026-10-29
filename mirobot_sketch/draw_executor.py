@@ -175,6 +175,9 @@ class Planner:
             for x, y in s[1:]:
                 cmds.append((self.gcode(self.pose(x, y, True), f["draw"]), f"stroke {i} draw"))
             x1, y1 = s[-1]
+            # 그 자리(같은 Y·Z)에서만 뒤로 뺀다. 옆으로 가는 명령은 이 다음이다.
+            if self.two_stage and self.down_extra:
+                cmds.append((self.gcode(self.pose_slow_zone(x1, y1), f["approach"]), f"stroke {i} lift"))
             cmds.append((self.gcode(self.pose(x1, y1, False), f["travel"] if self.two_stage else f["approach"]),
                          f"stroke {i} pen-up"))
         cmds.append((self.gcode(self.pose(0, 0, False), f["travel"]), "return center pen-up"))
@@ -208,14 +211,18 @@ def estimate_time(strokes, cfg, air=False):
     press = float(cfg["pen"].get("down_extra_mm", 0.0))
     lift = clear + press                                   # 누른 점에서 펜업 높이까지 (Planner.up_dx)
     two_stage = (not air) and clear > slow + 1e-9        # Planner.two_stage와 같은 조건
+    slow_lift = two_stage and press > 0          # 누른 뒤에는 종이에서 천천히 든 다음 빠르게 올림
     if air:
         pen_lift_s = max(clear, float(cfg["pen"].get("air_clearance_mm", 8.0))) / f["approach"] * 60.0
+    elif slow_lift:
+        pen_lift_s = (lift / f["approach"] + n * (2 * (clear - slow) / f["travel"]
+                                                  + 2 * (slow + press) / f["approach"])) * 60.0
     elif two_stage:   # 처음 중심 펜업(approach) + 획마다 [빠른 하강 + 느린 접촉·누름 구간 + 빠른 올림(travel)]
         pen_lift_s = (lift / f["approach"] + n * ((clear - slow) / f["travel"] + (slow + press) / f["approach"]
                                                   + lift / f["travel"])) * 60.0
     else:
         pen_lift_s = lift * (2 * n + 1) / f["approach"] * 60.0
-    command_count = 2 + sum(len(s) + 2 for s in strokes) + (n if two_stage else 0)  # Planner.plan과 같은 수
+    command_count = 2 + sum(len(s) + 2 for s in strokes) + (n if two_stage else 0) + (n if slow_lift else 0)
     latency = cfg.get("timing", {}).get("assumed_command_latency_s", 0.0)
     motion_s = draw_s + travel_s + pen_lift_s
     return {
@@ -465,6 +472,9 @@ def execute(link, cmds, cfg, progress=print, on_ack=None, should_stop=None):
                 on_ack(sent, len(cmds))
             if label.endswith("pen-down") or i == len(cmds) - 1:
                 progress(f"  [{sent}/{len(cmds)}] {label}")
+            # ok는 동작이 끝나기 전에 온다. 펜을 그 자리에서 다 뺀 뒤에 옆 이동을 보내야 빠지면서 미끄러지지 않는다.
+            if label.endswith("pen-up"):
+                link.wait_idle(cfg["idle_timeout_s"])
         link.wait_idle(cfg["idle_timeout_s"])
         return {"result": "completed", "commands_sent": sent, "elapsed_s": round(time.monotonic() - started, 1)}
     except StopRequested:

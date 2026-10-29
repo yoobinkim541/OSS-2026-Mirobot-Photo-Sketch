@@ -18,7 +18,7 @@ class ContactPreparationTest(unittest.TestCase):
         result = sp.prepare_requested_drawing(robot, cfg)
         self.assertEqual(robot.joints, cfg['requested_start_pose']['contact_joints_deg'])
         self.assertEqual(result['simulation_start_joints_deg'], robot.joints)
-        self.assertEqual(result['pen']['up_clearance_mm'], 10.0)
+        self.assertEqual(result['pen']['up_clearance_mm'], 20.0)
         from mirobot_sketch import mirobot_sim as ms
         t, _ = ms.fk(np.radians(robot.joints))
         np.testing.assert_allclose(ms.controller_rotation(list(result['orientation_deg'].values())),
