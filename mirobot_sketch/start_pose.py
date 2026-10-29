@@ -75,15 +75,26 @@ def joint_line(q_deg, feed):
     return f"M21 G90 G01 X{j[0]} Y{j[1]} Z{j[2]} A{j[3]} B{j[4]} C{j[5]} F{feed:.0f}"
 
 
+def _paper_x(requested):
+    """모델 좌표의 종이 면 X. 접촉 자세가 있으면 그 자세의 펜 끝이 곧 종이 면이다(사용자가 펜이 닿는 것을 확인한 자세).
+    없으면 설정의 wall_distance_mm."""
+    if "contact_joints_deg" not in requested:
+        return float(requested["wall_distance_mm"])
+    q = np.asarray(requested["contact_joints_deg"], dtype=float)
+    if q.shape != (6,) or not np.all(np.isfinite(q)):
+        raise ValueError("contact_joints_deg")
+    return float(_tip(np.radians(q), float(requested["pen_length_mm"]), requested.get("tool_offset_mm"))[0])
+
+
 def plan_requested_start(cfg):
     """검증된 벽 거리·펜 길이로 호밍 자세에서 요청 관절 자세까지 계획."""
     requested = cfg.get("requested_start_pose") or {}
     try:
         q = np.asarray(requested["joints_deg"], dtype=float)
-        wall = float(requested["wall_distance_mm"])
+        wall = _paper_x(requested)
         pen_len = float(requested["pen_length_mm"])
     except (KeyError, TypeError, ValueError):
-        raise StartPoseError("시작 자세의 6개 관절각, 벽 거리와 펜 길이가 필요합니다.") from None
+        raise StartPoseError("시작 자세의 6개 관절각, 종이 위치(접촉 자세 또는 벽 거리)와 펜 길이가 필요합니다.") from None
     if q.shape != (6,) or not np.all(np.isfinite(q)) or not np.isfinite(wall) or not np.isfinite(pen_len) or wall <= 0 or pen_len < 0:
         raise StartPoseError("관절각, 벽 거리 또는 펜 길이가 올바르지 않습니다.")
     s = settings(cfg)
@@ -95,10 +106,12 @@ def plan_requested_start(cfg):
         s["tool_offset_mm"] = offset
     target = np.radians(q)
     if "first_pose_paper_gap_mm" in requested and "tool_offset_mm" in s:
+        # 사용자는 간격을 펜 방향(플랜지 z, 종이 면에 비스듬함)으로 잰다: 수평 간격을 펜 방향 길이로 바꿔 비교
         measured = float(requested["first_pose_paper_gap_mm"])
-        calculated = wall - float(_tip(target, pen_len, s["tool_offset_mm"])[0])
+        along = abs(float(ms.fk(target)[0][0, 2]))
+        calculated = (wall - float(_tip(target, pen_len, s["tool_offset_mm"])[0])) / max(along, 1e-6)
         if not np.isfinite(measured) or measured < 0 or abs(calculated - measured) > 3.0:
-            raise StartPoseError(f"첫 자세 펜 간격이 실측 {measured:.1f} mm, 모델 {calculated:.1f} mm로 다릅니다.")
+            raise StartPoseError(f"첫 자세 펜 간격(펜 방향)이 실측 {measured:.1f} mm, 모델 {calculated:.1f} mm로 다릅니다.")
     side = np.radians(float(s["side_j1_deg"]))
     poses = [np.zeros(6), np.array([side, 0, 0, 0, 0, 0]),
              np.array([side, *target[1:]]), target]
@@ -143,11 +156,8 @@ def plan_requested_contact(cfg):
         raise StartPoseError("종이 접촉 자세의 관절각이 올바르지 않습니다.")
     start = np.radians(requested["joints_deg"])
     finish = np.radians(target)
-    wall, length = float(requested["wall_distance_mm"]), float(requested["pen_length_mm"])
+    wall, length = _paper_x(requested), float(requested["pen_length_mm"])
     offset = requested.get("tool_offset_mm")
-    gap = wall - float(_tip(finish, length, offset)[0])
-    if abs(gap) > 1.0:
-        raise StartPoseError(f"종이 접촉 자세의 모델 간격이 {gap:.1f} mm입니다. 벽 거리·펜 길이·실제 자세를 다시 확인하세요.")
     s = settings(cfg)
     s.update(paper_x_mm=wall, pen_len_max_mm=length, clearance_mm=0.0)
     if offset is not None:
@@ -155,7 +165,7 @@ def plan_requested_contact(cfg):
     margin, minimum_gap = _check_segments([start, finish], s)
     degrees = target.round(3).tolist()
     return {"command": joint_line(degrees, s["joint_feed"]), "joints_deg": degrees,
-            "min_joint_margin_deg": margin, "min_tip_clearance_mm": minimum_gap, "contact_gap_mm": gap}
+            "min_joint_margin_deg": margin, "min_tip_clearance_mm": minimum_gap}
 
 
 def requested_motion_blocker(cfg):
@@ -245,7 +255,7 @@ def execute_requested_return(link, cfg, should_stop=lambda: False):
     if max(abs(a - b) for a, b in zip(actual, target)) <= 1.0:
         return status
     s = settings(cfg)
-    s.update(paper_x_mm=float(requested["wall_distance_mm"]),
+    s.update(paper_x_mm=_paper_x(requested),
              pen_len_max_mm=float(requested["pen_length_mm"]), clearance_mm=0.0)
     if "tool_offset_mm" in requested:
         s["tool_offset_mm"] = requested["tool_offset_mm"]

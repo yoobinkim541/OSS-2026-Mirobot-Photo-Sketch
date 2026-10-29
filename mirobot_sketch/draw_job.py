@@ -209,13 +209,7 @@ class DrawJob:
             requested_mode = bool(self._start_pose and self.cfg.get("requested_start_pose"))
             if requested_mode:
                 from . import start_pose as sp
-                import numpy as np
                 self.cfg = sp.drawing_config_from_recorded_contact(self.cfg)
-                if self._virtual:
-                    # 가상 환경에서만 접촉 샘플을 시뮬레이터의 종이 면으로 사용한다.
-                    rq = self.cfg["requested_start_pose"]
-                    rq["wall_distance_mm"] = float(sp._tip(np.radians(rq["contact_joints_deg"]),
-                                                             rq["pen_length_mm"], rq.get("tool_offset_mm"))[0])
                 s.cfg = self.cfg
                 s.sim = None
             if not self._virtual and self.cfg.get("requested_start_pose") and not requested_mode:

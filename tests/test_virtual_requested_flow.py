@@ -15,7 +15,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from mirobot_sketch import draw_executor as de  # noqa: E402
 from mirobot_sketch import mirobot_sim as ms  # noqa: E402
-from mirobot_sketch import start_pose as sp  # noqa: E402
 from mirobot_sketch.draw_job import DrawJob  # noqa: E402
 from mirobot_sketch.session import SketchSession  # noqa: E402
 from mirobot_sketch.virtual_robot import VirtualMirobotLink  # noqa: E402
@@ -29,18 +28,17 @@ CONTACT_LINE = "X0.000 Y8.000 Z-8.000 A0.000 B-128.000 C0.000"
 M20_X = re.compile(r"^M20 G90 G0[01] X(-?[\d.]+)")
 
 
-def requested_cfg(verified=False, consistent=False):
-    """사용자가 2026-10-29에 측정한 대기·접촉 자세 (컨트롤러 상태 응답 포함)."""
+def requested_cfg(verified=False, first_gap_mm=18.0):
+    """사용자가 2026-10-29에 측정한 대기·접촉 자세 (컨트롤러 상태 응답 포함). 1번 자세 펜 간격은 펜 방향으로 잰 값."""
     cfg = golden.default_cfg()
     cfg["plane_compensation"].update(a_per_mm_y=0.0, b_per_mm_z=0.0)
-    rq = {"joints_deg": STANDBY, "contact_joints_deg": CONTACT,
-          "wall_distance_mm": 270.0, "pen_length_mm": 110.0, "tool_offset_mm": [-33.68, 1.76, 17.1],
-          "tool_offset_verified": verified, "requested_pen_down_extra_mm": 1.0,
-          "contact_status_sample": {"joints_deg": [0, 8.002, -8, 0, -127.992, 0],
-                                    "tcp_mm": CONTACT_TCP, "abc_deg": [0, -127.99, 0]}}
-    if consistent:          # 모델 펜 끝이 접촉 자세에서 정확히 종이에 닿는 설치
-        rq["wall_distance_mm"] = float(sp._tip(np.radians(CONTACT), rq["pen_length_mm"], rq["tool_offset_mm"])[0])
-    cfg["requested_start_pose"] = rq
+    cfg["requested_start_pose"] = {
+        "joints_deg": STANDBY, "contact_joints_deg": CONTACT,
+        "wall_distance_mm": 270.0, "pen_length_mm": 110.0, "tool_offset_mm": [-33.68, 1.76, 17.1],
+        "first_pose_paper_gap_mm": first_gap_mm,
+        "tool_offset_verified": verified, "requested_pen_down_extra_mm": 1.0,
+        "contact_status_sample": {"joints_deg": [0, 8.002, -8, 0, -127.992, 0],
+                                  "tcp_mm": CONTACT_TCP, "abc_deg": [0, -127.99, 0]}}
     return cfg
 
 
@@ -120,27 +118,27 @@ class RequestedFlowTest(unittest.TestCase):
         opened.assert_not_called()
         self.assertIn("움직이지 않았습니다", failed[0])
 
-    def test_model_gap_mismatch_stops_real_robot_even_when_marked_verified(self):
-        result, _, opened, failed = self.run_job(requested_cfg(verified=True), virtual=False)
+    def test_first_pose_gap_mismatch_stops_real_robot_even_when_marked_verified(self):
+        result, _, opened, failed = self.run_job(requested_cfg(verified=True, first_gap_mm=30.0), virtual=False)
         self.assertEqual(result["result"], "not_started")
         opened.assert_not_called()
-        self.assertIn("모델 간격", failed[0])
+        self.assertIn("첫 자세 펜 간격", failed[0])
 
     def test_recalibration_is_refused_before_connecting(self):
-        result, _, opened, _ = self.run_job(requested_cfg(verified=True, consistent=True), virtual=False,
+        result, _, opened, _ = self.run_job(requested_cfg(verified=True), virtual=False,
                                             recalibrate=True)
         self.assertEqual(result["result"], "not_started")
         opened.assert_not_called()
 
     def test_verified_real_path_runs_the_same_sequence(self):
-        result, link, opened, _ = self.run_job(requested_cfg(verified=True, consistent=True), virtual=False)
+        result, link, opened, _ = self.run_job(requested_cfg(verified=True), virtual=False)
         opened.assert_called_once()
         self.assertEqual(result["result"], "completed")
         self.assertTrue(result["returned_to_origin"])
         self.assert_standby_contact_draw_return(link)
 
     def test_out_of_range_drawing_stops_before_touching_the_paper(self):
-        result, link, _, _ = self.run_job(requested_cfg(verified=True, consistent=True), virtual=False,
+        result, link, _, _ = self.run_job(requested_cfg(verified=True), virtual=False,
                                           outside=True)
         self.assertEqual(result["result"], "not_started")
         self.assertFalse(any(CONTACT_LINE in line for line in link.sent))

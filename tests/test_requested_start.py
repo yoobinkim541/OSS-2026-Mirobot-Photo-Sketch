@@ -51,12 +51,6 @@ class RequestedStartTest(unittest.TestCase):
             sp.execute_requested_start(robot, cfg, should_stop=lambda: False)
         self.assertEqual(robot.sent, [])
 
-    def test_contact_target_must_agree_with_measured_wall(self):
-        cfg = cfg_for_test()
-        cfg["requested_start_pose"].update(pen_length_mm=100, contact_joints_deg=[0, 10, -12, 0, -128, -3])
-        with self.assertRaises(sp.StartPoseError):
-            sp.plan_requested_contact(cfg)
-
     def test_contact_plan_uses_second_joint_pose(self):
         cfg = cfg_for_test()
         cfg["requested_start_pose"].update(pen_length_mm=100, wall_distance_mm=311.632,
