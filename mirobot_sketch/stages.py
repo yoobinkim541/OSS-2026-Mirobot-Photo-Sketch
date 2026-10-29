@@ -136,75 +136,24 @@ def _run_dedupe(prev, p):
     return {**prev, "strokes": st, "discarded_dedupe": disc}
 
 
-SHADING_AB = 8.0     # 선 양쪽의 색(Lab a·b) 차이가 이보다 작고 양쪽 다 피부면 조명 경계로 봄
-
-
-def _is_skin_shading(s, lab, ycc):
-    """선 양쪽이 모두 피부색이고 색은 같고 밝기만 다르면 (턱·볼의 조명 경계) True. 화가는 이런 선을 긋지 않음."""
-    if len(s) < 3:
-        return False
-    h, w = lab.shape[:2]
-    d = np.gradient(s, axis=0)
-    n = np.stack([-d[:, 1], d[:, 0]], 1)
-    n /= np.linalg.norm(n, axis=1, keepdims=True) + 1e-9
-
-    def at(img, pts):
-        xi = np.clip(np.round(pts[:, 0]).astype(int), 0, w - 1)
-        yi = np.clip(np.round(pts[:, 1]).astype(int), 0, h - 1)
-        return img[yi, xi]
-
-    a, b = at(lab, s + 4 * n), at(lab, s - 4 * n)
-    ya, yb = at(ycc, s + 4 * n), at(ycc, s - 4 * n)
-    skin = lambda y: ((y[:, 1] > 135) & (y[:, 1] < 185) & (y[:, 2] > 100) & (y[:, 2] < 135)).mean() > 0.8
-    return skin(ya) and skin(yb) and float(np.linalg.norm(a[:, 1:] - b[:, 1:], axis=1).mean()) < SHADING_AB
-
-
-def _tidy_portrait(strokes, faces, color):
-    """선화 얼굴 정리: 코 안의 잔선, 입가의 짧은 잔선, 피부 위 조명 경계선을 지움. 윤곽과 머리카락은 남김."""
-    if not faces:
-        return strokes
-    blurred = cv2.GaussianBlur(color, (0, 0), 1.2)
-    lab = cv2.cvtColor(blurred, cv2.COLOR_BGR2LAB).astype(np.float32)
-    ycc = cv2.cvtColor(blurred, cv2.COLOR_BGR2YCrCb).astype(np.float32)
-    kept = []
-    for raw in strokes:
-        s = np.asarray(raw, np.float64)
-        if len(s) < 2:
-            continue
-        length = sp.polyline_length(s)
-        drop = False
-        for face in faces:
-            width = float(face.box[2])
-            nose, mouth_r, mouth_l = face.landmarks[2], face.landmarks[3], face.landmarks[4]
-            mouth = (mouth_r + mouth_l) / 2
-            nose_d = np.linalg.norm(s - nose, axis=1)
-            if np.median(nose_d) < 0.14 * width and np.max(nose_d) < 0.32 * width:
-                drop = True
-            mouth_d = np.linalg.norm(s - mouth, axis=1)
-            if np.median(mouth_d) < 0.12 * width and length < 0.45 * width:
-                reaches_lip = (np.min(np.linalg.norm(s - mouth_r, axis=1)) < 0.1 * width
-                               and np.min(np.linalg.norm(s - mouth_l, axis=1)) < 0.1 * width)
-                drop = drop or not reaches_lip
-            if np.min(nose_d) < 1.2 * width and _is_skin_shading(s, lab, ycc):
-                drop = True
-        if not drop:
-            kept.append(s)
-    return kept
-
-
 def _run_merge(prev, p):
     strokes = prev["strokes"]
     if p["merge_join_px"]:
         strokes = sp.merge_strokes(strokes, p["merge_join_px"])
     if prev.get("lineart_used"):
-        from . import hair
+        from . import hair, portrait
         found = prev.get("faces") or []
-        strokes = _tidy_portrait(sp.smooth_strokes(strokes, 3.0), found, prev["color"])
+        strokes = sp.smooth_strokes(strokes, 3.0)
+        parts = portrait.compose(strokes, prev["color"], found)
+        if parts is not None:                       # 얼굴 분할로 부위별로 다시 그림
+            return {**prev, "strokes": parts, "parts_drawn": True}
+        strokes = portrait.tidy_face(strokes, found, prev["color"])
         mask = hair.hair_mask(prev["color"], found)
         if mask.any():
             strokes, structure = hair.split_fragments(strokes, mask)
             strokes = strokes + sp.smooth_strokes(hair.hair_strokes(prev["color"], mask, structure), 2.0)
     return {**prev, "strokes": strokes}
+
 
 FACE_REASON = "얼굴 세밀 처리로 교체"
 GREEN = (40, 160, 40)
@@ -272,6 +221,8 @@ def _run_face(prev, p):
     found = prev.get("faces") or []
     if not found or not p["face_detail"]:
         return {**prev, "discarded_face": [], "faces_used": 0, "uses_deps": False}
+    if prev.get("parts_drawn"):                     # 눈·입은 부위별 그리기에서 이미 그림
+        return {**prev, "discarded_face": [], "faces_used": len(found)}
     if prev.get("lineart_used"):
         return _run_face_lineart(prev, p)
     pen_px = _face_pen_px(prev, p)
