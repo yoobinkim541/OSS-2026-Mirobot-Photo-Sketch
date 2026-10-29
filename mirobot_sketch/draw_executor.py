@@ -297,18 +297,28 @@ class MirobotLink:
         return self._wait_settled(timeout, None, None)
 
     def wait_until_x(self, target_x, timeout, tol=1.5):
-        """Idle이고 보고된 X가 목표에 닿을 때까지. ok 직후 Idle만으로는 빼기가 안 끝난 경우가 있다."""
+        """뺀 X가 보고될 때까지. 좌표가 없는 Idle은 통과하지 않는다.
+        첫 샘플이 이미 목표면 ok 전에 끝난 것으로 본다. 아니면 Run을 한 번 본 뒤의 Idle만 인정한다."""
         return self._wait_settled(timeout, float(target_x), float(tol))
 
     def _wait_settled(self, timeout, target_x, tol):
         deadline = time.monotonic() + timeout
+        first = True
+        saw_run = False
         while time.monotonic() < deadline:
             state, tcp, raw = self.query_status()
             if any(t in raw.lower() for t in ERROR_TOKENS):
                 raise ControllerError(f"Idle 대기 중 오류 상태: {raw}")
-            x_ok = target_x is None or tcp is None or abs(tcp[0] - target_x) <= tol
-            if state == "Idle" and x_ok:
-                return tcp
+            if target_x is None:
+                if state == "Idle":
+                    return tcp
+            else:
+                at_target = tcp is not None and abs(tcp[0] - target_x) <= tol
+                if state == "Run":
+                    saw_run = True
+                if state == "Idle" and at_target and (first or saw_run):
+                    return tcp
+            first = False
             time.sleep(0.05)
         raise ControllerError("펜을 뒤로 뺀 위치를 확인하지 못했습니다" if target_x is not None else "Idle 대기 시간 초과")
 

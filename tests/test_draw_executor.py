@@ -331,6 +331,7 @@ class ExecuteTest(unittest.TestCase):
         pen_up = next(line for line, label in self.cmds if label == "stroke 0 pen-up")
         i = fake.written.index(pen_up)
         self.assertEqual(fake.written[i + 1], "?")          # 펜업 ok 다음, 옆 이동 전에 Idle 확인
+
     def test_stops_immediately_on_soft_limit(self):
         fake = FakeSerial(fail_at=4)
         result = de.execute(de.MirobotLink(fake), self.cmds, self.cfg, progress=lambda *_: None)
@@ -344,6 +345,71 @@ class ExecuteTest(unittest.TestCase):
         fake.readline = lambda: b""
         result = de.execute(de.MirobotLink(fake), self.cmds, self.cfg, progress=lambda *_: None)
         self.assertEqual(result["result"], "stopped_on_error")
+
+
+def _status(state, x=None):
+    if x is None:
+        return f"<{state},Angle(ABCDXYZ):0,0,0,0,0,0,0>"
+    return (f"<{state},Angle(ABCDXYZ):0,0,0,0,0,0,0,"
+            f"Cartesian coordinate(XYZ RxRyRz):{x:.3f},0.000,230.477,0.000,0.000,0.000>")
+
+
+class ScriptedStatus:
+    """? 마다 정해 둔 상태 줄을 돌려준다."""
+
+    def __init__(self, statuses):
+        self.statuses = list(statuses)
+        self.last = self.statuses[-1] if self.statuses else "<Idle>"
+        self.pending = []
+        self.written = []
+
+    def write(self, data):
+        text = data.decode().strip()
+        self.written.append(text)
+        if text == "?":
+            self.pending.append(self.statuses.pop(0) if self.statuses else self.last)
+            if self.statuses:
+                self.last = self.statuses[0]
+        else:
+            self.pending.append("ok")
+
+    def readline(self):
+        return (self.pending.pop(0) + "\r\n").encode() if self.pending else b""
+
+    def reset_input_buffer(self):
+        self.pending.clear()
+
+
+class RetractConfirmTest(unittest.TestCase):
+    def _run(self, statuses, timeout=1.0):
+        clock = {"t": 0.0}
+
+        def monotonic():
+            return clock["t"]
+
+        def sleep(dt):
+            clock["t"] += dt
+
+        link = de.MirobotLink(ScriptedStatus(statuses))
+        with mock.patch.object(de.time, "monotonic", monotonic), mock.patch.object(de.time, "sleep", sleep):
+            return link.wait_until_x(190.0, timeout)
+
+    def test_first_sample_already_at_target_passes_without_run(self):
+        tcp = self._run([_status("Idle", 190.0)])
+        self.assertEqual(tcp[0], 190.0)
+
+    def test_idle_without_coordinates_does_not_pass(self):
+        with self.assertRaises(de.ControllerError):
+            self._run([_status("Idle")] * 30)
+
+    def test_later_idle_without_run_does_not_pass(self):
+        # 첫 샘플은 아직 눌린 X. Run 없이 목표 Idle만 이어져도 조기 통과하면 안 된다.
+        with self.assertRaises(de.ControllerError):
+            self._run([_status("Idle", 218.0)] + [_status("Idle", 190.0)] * 30)
+
+    def test_run_then_idle_at_target_passes(self):
+        tcp = self._run([_status("Idle"), _status("Run", 218.0), _status("Idle", 190.0)])
+        self.assertEqual(tcp[0], 190.0)
 
 
 class OrientationTestFileTest(unittest.TestCase):
