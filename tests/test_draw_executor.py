@@ -471,6 +471,14 @@ class RetractConfirmTest(unittest.TestCase):
         ], (190.0, -6.9, 266.1))
         self.assertEqual(tcp[0], 190.0)
 
+    def test_close_pen_up_waits_for_lift_and_pen_up(self):
+        contact = "M20 G90 G01 X240.000 Y-6.900 Z266.100 A0.000 B-128.000 C0.000 F300"
+        lift = "M20 G90 G01 X231.000 Y-6.900 Z266.100 A0.000 B-128.000 C0.000 F200"
+        up = "M20 G90 G01 X213.000 Y-6.500 Z266.400 A0.000 B-128.000 C0.000 F600"
+        self.assertAlmostEqual(de.pen_up_pause_s((-6.9, 266.1), contact, lift, up), 4.5)
+        self.assertEqual(de.pen_up_pause_s(None, contact, lift, up), 0.0)
+        far = "M20 G90 G01 X213.000 Y-20.000 Z250.000 A0.000 B-128.000 C0.000 F600"
+        self.assertEqual(de.pen_up_pause_s((-6.9, 266.1), contact, lift, far), 0.0)
 
 class OrientationTestFileTest(unittest.TestCase):
     def test_orientation_file_is_valid_and_in_limits(self):

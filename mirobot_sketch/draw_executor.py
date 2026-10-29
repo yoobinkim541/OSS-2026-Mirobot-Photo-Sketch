@@ -312,15 +312,19 @@ class MirobotLink:
         """뺀 X가 보고될 때까지. 좌표가 없는 Idle은 통과하지 않는다."""
         return self._wait_settled(timeout, float(target_x), float(tol))
 
-    def wait_until_pose(self, pose, timeout, tol=1.5, yz_tol=1.0):
-        """이번 빼기 명령의 X·Y·Z가 보고될 때까지. X만 맞으면 직전 빼기로 통과할 수 있다."""
+    def wait_until_pose(self, pose, timeout, tol=1.5, yz_tol=1.0, contact_sign=1.0):
+        """이번 빼기 명령의 위치가 보고될 때까지.
+        첫 샘플이 이번 X·Y·Z와 맞으면 끝난 것으로 본다. 아니면 접촉 쪽 X를 한 번 본 뒤,
+        Idle이고 X가 목표일 때만 통과한다."""
         x, y, z = pose
-        return self._wait_settled(timeout, float(x), float(tol), (float(y), float(z)), float(yz_tol))
+        return self._wait_settled(timeout, float(x), float(tol), (float(y), float(z)), float(yz_tol),
+                                  float(contact_sign))
 
-    def _wait_settled(self, timeout, target_x, tol, target_yz=None, yz_tol=1.0):
+    def _wait_settled(self, timeout, target_x, tol, target_yz=None, yz_tol=1.0, contact_sign=1.0):
         deadline = time.monotonic() + timeout
         first = True
         saw_move = False
+        saw_contact = False
         while time.monotonic() < deadline:
             state, tcp, raw = self.query_status()
             if any(t in raw.lower() for t in ERROR_TOKENS):
@@ -329,13 +333,17 @@ class MirobotLink:
                 if state == "Idle":
                     return tcp
             else:
-                at_target = tcp is not None and abs(tcp[0] - target_x) <= tol
-                if at_target and target_yz is not None:
-                    at_target = (abs(tcp[1] - target_yz[0]) <= yz_tol
-                                 and abs(tcp[2] - target_yz[1]) <= yz_tol)
-                if state != "Idle" or (tcp is not None and not at_target):
-                    saw_move = True
-                if state == "Idle" and at_target and (first or saw_move):
+                x_ok = tcp is not None and abs(tcp[0] - target_x) <= tol
+                pose_ok = x_ok and target_yz is not None and (
+                    abs(tcp[1] - target_yz[0]) <= yz_tol and abs(tcp[2] - target_yz[1]) <= yz_tol)
+                if tcp is not None and (tcp[0] - target_x) * contact_sign >= 5.0:
+                    saw_contact = True
+                if target_yz is None:
+                    if state != "Idle" or (tcp is not None and not x_ok):
+                        saw_move = True
+                    if state == "Idle" and x_ok and (first or saw_move):
+                        return tcp
+                elif state == "Idle" and ((first and pose_ok) or (saw_contact and x_ok)):
                     return tcp
             first = False
             time.sleep(0.05)
@@ -489,6 +497,28 @@ def write_run_record(meta, result, cfg):
     return path
 
 
+def _segment_s(from_x, line):
+    x = float(re.search(r"X([-\d.]+)", line).group(1))
+    feed = float(re.search(r"F([\d.]+)", line).group(1))
+    return abs(from_x - x) / feed * 60.0 if feed > 0 else 0.0
+
+
+def pen_up_pause_s(last_up_yz, contact_line, lift_line, pen_up_line, tol=1.0):
+    """직전 빼기와 Y·Z가 1 mm 안이면 상태만으로 구분되지 않는다.
+    접촉 X에서 펜업 X까지, 이미 큐에 들어간 lift와 펜업의 시간을 더한 초를 반환한다."""
+    if last_up_yz is None or not contact_line:
+        return 0.0
+    xyz = [float(v) for v in re.search(r"X([-\d.]+) Y([-\d.]+) Z([-\d.]+)", pen_up_line).groups()]
+    if abs(last_up_yz[0] - xyz[1]) > tol or abs(last_up_yz[1] - xyz[2]) > tol:
+        return 0.0
+    x = float(re.search(r"X([-\d.]+)", contact_line).group(1))
+    total = 0.0
+    if lift_line:
+        total += _segment_s(x, lift_line)
+        x = float(re.search(r"X([-\d.]+)", lift_line).group(1))
+    return total + _segment_s(x, pen_up_line)
+
+
 def execute(link, cmds, cfg, progress=print, on_ack=None, should_stop=None):
     """계획된 명령을 순서대로 보냅니다. 반환: 실행 결과 dict. 오류·멈춤 시 즉시 멈춥니다(자동 복구 없음).
     on_ack(보낸 수, 전체 수): ok마다 호출 (GUI 진행 표시·RViz 따라가기).
@@ -496,6 +526,10 @@ def execute(link, cmds, cfg, progress=print, on_ack=None, should_stop=None):
     started = time.monotonic()
     sent = 0
     stop = should_stop or (lambda: False)
+    contact_sign = -float(cfg["pen"]["retract_x_sign"])
+    contact_line = None
+    lift_line = None
+    last_up_yz = None
     try:
         for i, (line, label) in enumerate(cmds):
             if stop():
@@ -509,16 +543,25 @@ def execute(link, cmds, cfg, progress=print, on_ack=None, should_stop=None):
                 on_ack(sent, len(cmds))
             if label.endswith("pen-down") or i == len(cmds) - 1:
                 progress(f"  [{sent}/{len(cmds)}] {label}")
-            # ok는 동작이 끝나기 전에 온다. 이번 빼기 위치(X·Y·Z)가 보고된 뒤에만 옆 이동을 보낸다.
+            if label.endswith("pen-down") or label.endswith("draw"):
+                contact_line = line
+                lift_line = None
+            elif label.endswith("lift"):
+                lift_line = line
+            # ok는 동작이 끝나기 전에 온다. 이번 빼기 위치가 보고된 뒤에만 옆 이동을 보낸다.
             if label.endswith("pen-up"):
                 pose = tuple(float(v) for v in re.search(
                     r"X([-\d.]+) Y([-\d.]+) Z([-\d.]+)", line).groups())
                 if hasattr(link, "wait_until_pose"):
-                    link.wait_until_pose(pose, cfg["idle_timeout_s"])
+                    link.wait_until_pose(pose, cfg["idle_timeout_s"], contact_sign=contact_sign)
                 elif hasattr(link, "wait_until_x"):
                     link.wait_until_x(pose[0], cfg["idle_timeout_s"])
                 else:
                     link.wait_idle(cfg["idle_timeout_s"])
+                pause = pen_up_pause_s(last_up_yz, contact_line, lift_line, line)
+                if pause > 0 and not getattr(link, "virtual", False):
+                    time.sleep(pause)   # 컨트롤러에는 명령을 더 넣지 않는다. G4도 보내지 않는다.
+                last_up_yz = (pose[1], pose[2])
         link.wait_idle(cfg["idle_timeout_s"])
         return {"result": "completed", "commands_sent": sent, "elapsed_s": round(time.monotonic() - started, 1)}
     except StopRequested:

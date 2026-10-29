@@ -110,7 +110,7 @@ class VirtualMirobotLink:
     def wait_until_x(self, target_x, timeout, tol=1.5):
         return self.pos
 
-    def wait_until_pose(self, pose, timeout, tol=1.5, yz_tol=1.0):
+    def wait_until_pose(self, pose, timeout, tol=1.5, yz_tol=1.0, contact_sign=1.0):
         return self.pos
 
     def close(self):
