@@ -309,12 +309,15 @@ class MirobotLink:
         return self._wait_settled(timeout, None, None)
 
     def wait_until_x(self, target_x, timeout, tol=1.5):
-        """뺀 X가 보고될 때까지. 좌표가 없는 Idle은 통과하지 않는다.
-        첫 샘플이 이미 목표면 끝난 것으로 본다. 좌표가 목표와 달랐거나 Idle이 아닌
-        상태를 본 뒤 목표 Idle이면, Run이라는 문자열 없이도 통과한다."""
+        """뺀 X가 보고될 때까지. 좌표가 없는 Idle은 통과하지 않는다."""
         return self._wait_settled(timeout, float(target_x), float(tol))
 
-    def _wait_settled(self, timeout, target_x, tol):
+    def wait_until_pose(self, pose, timeout, tol=1.5, yz_tol=1.0):
+        """이번 빼기 명령의 X·Y·Z가 보고될 때까지. X만 맞으면 직전 빼기로 통과할 수 있다."""
+        x, y, z = pose
+        return self._wait_settled(timeout, float(x), float(tol), (float(y), float(z)), float(yz_tol))
+
+    def _wait_settled(self, timeout, target_x, tol, target_yz=None, yz_tol=1.0):
         deadline = time.monotonic() + timeout
         first = True
         saw_move = False
@@ -327,6 +330,9 @@ class MirobotLink:
                     return tcp
             else:
                 at_target = tcp is not None and abs(tcp[0] - target_x) <= tol
+                if at_target and target_yz is not None:
+                    at_target = (abs(tcp[1] - target_yz[0]) <= yz_tol
+                                 and abs(tcp[2] - target_yz[1]) <= yz_tol)
                 if state != "Idle" or (tcp is not None and not at_target):
                     saw_move = True
                 if state == "Idle" and at_target and (first or saw_move):
@@ -503,11 +509,14 @@ def execute(link, cmds, cfg, progress=print, on_ack=None, should_stop=None):
                 on_ack(sent, len(cmds))
             if label.endswith("pen-down") or i == len(cmds) - 1:
                 progress(f"  [{sent}/{len(cmds)}] {label}")
-            # ok는 동작이 끝나기 전에 온다. X가 뺀 위치일 때만 옆 이동을 보낸다.
+            # ok는 동작이 끝나기 전에 온다. 이번 빼기 위치(X·Y·Z)가 보고된 뒤에만 옆 이동을 보낸다.
             if label.endswith("pen-up"):
-                target_x = float(re.search(r"X([-\d.]+)", line).group(1))
-                if hasattr(link, "wait_until_x"):
-                    link.wait_until_x(target_x, cfg["idle_timeout_s"])
+                pose = tuple(float(v) for v in re.search(
+                    r"X([-\d.]+) Y([-\d.]+) Z([-\d.]+)", line).groups())
+                if hasattr(link, "wait_until_pose"):
+                    link.wait_until_pose(pose, cfg["idle_timeout_s"])
+                elif hasattr(link, "wait_until_x"):
+                    link.wait_until_x(pose[0], cfg["idle_timeout_s"])
                 else:
                     link.wait_idle(cfg["idle_timeout_s"])
         link.wait_idle(cfg["idle_timeout_s"])

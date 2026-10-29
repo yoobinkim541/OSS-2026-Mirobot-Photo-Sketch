@@ -35,16 +35,21 @@ class FakeSerial:
         self.fail_at = fail_at
         self.fail_msg = fail_msg
         self.written = []
-        self.x = "198.668"
+        self.x, self.y, self.z = "198.668", "0.000", "230.477"
+
+    def _idle(self):
+        return ("<Idle,Angle(ABCDXYZ):0,0,0,0,0,0,0,"
+                f"Cartesian coordinate(XYZ RxRyRz):{self.x},{self.y},{self.z},0.000,0.000,0.000,"
+                "Pump PWM:0,Valve PWM:0,Motion_MODE:0>")
 
     def write(self, data):
         text = data.decode().strip()
         self.written.append(text)
-        mx = re.search(r"^M20 .*X([-\d.]+)", text)
-        if mx:
-            self.x = mx.group(1)
+        m = re.search(r"^M20 .*X([-\d.]+) Y([-\d.]+) Z([-\d.]+)", text)
+        if m:
+            self.x, self.y, self.z = m.groups()
         if text == "?":
-            self.pending.append(self.IDLE.replace("198.668", self.x, 1))
+            self.pending.append(self._idle())
             return
         n = sum(1 for w in self.written if w != "?")
         self.pending.append(self.fail_msg if n == self.fail_at else "ok")
@@ -375,11 +380,11 @@ class ExecuteTest(unittest.TestCase):
         self.assertEqual(result["result"], "stopped_on_error")
 
 
-def _status(state, x=None):
+def _status(state, x=None, y=0.0, z=230.477):
     if x is None:
         return f"<{state},Angle(ABCDXYZ):0,0,0,0,0,0,0>"
     return (f"<{state},Angle(ABCDXYZ):0,0,0,0,0,0,0,"
-            f"Cartesian coordinate(XYZ RxRyRz):{x:.3f},0.000,230.477,0.000,0.000,0.000>")
+            f"Cartesian coordinate(XYZ RxRyRz):{x:.3f},{y:.3f},{z:.3f},0.000,0.000,0.000>")
 
 
 class ScriptedStatus:
@@ -436,6 +441,34 @@ class RetractConfirmTest(unittest.TestCase):
 
     def test_non_idle_state_counts_as_motion(self):
         tcp = self._run([_status("Idle"), _status("Jog", 218.0), _status("Idle", 190.0)])
+        self.assertEqual(tcp[0], 190.0)
+
+    def _pose(self, statuses, pose, timeout=1.0):
+        clock = {"t": 0.0}
+
+        def monotonic():
+            return clock["t"]
+
+        def sleep(dt):
+            clock["t"] += dt
+
+        link = de.MirobotLink(ScriptedStatus(statuses))
+        with mock.patch.object(de.time, "monotonic", monotonic), mock.patch.object(de.time, "sleep", sleep):
+            return link.wait_until_pose(pose, timeout)
+
+    def test_previous_pen_up_x_does_not_pass_for_this_pose(self):
+        with self.assertRaises(de.ControllerError):
+            self._pose([_status("Idle", 190.2, y=-8.0, z=266.0)] * 30, (190.0, -6.9, 266.1))
+
+    def test_this_pen_up_pose_passes_on_the_first_sample(self):
+        tcp = self._pose([_status("Idle", 190.0, y=-6.9, z=266.1)], (190.0, -6.9, 266.1))
+        self.assertEqual(tcp[:3], (190.0, -6.9, 266.1))
+
+    def test_contact_then_this_pose_passes_without_run(self):
+        tcp = self._pose([
+            _status("Idle", 218.0, y=-6.9, z=266.1),
+            _status("Idle", 190.0, y=-6.9, z=266.1),
+        ], (190.0, -6.9, 266.1))
         self.assertEqual(tcp[0], 190.0)
 
 
