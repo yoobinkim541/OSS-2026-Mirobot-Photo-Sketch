@@ -5,6 +5,7 @@ MirobotLink와 같은 메서드를 가집니다. 명령마다 실제로 걸릴 �
 기다렸다가 ok를 돌려주며, speed(배속)로 줄일 수 있습니다. 오류 상황도 흉내 냅니다.
 """
 
+import math
 import re
 import time
 
@@ -12,6 +13,7 @@ from .draw_executor import ControllerError, StopRequested
 
 _XYZ = re.compile(r"X([-\d.]+) Y([-\d.]+) Z([-\d.]+)")
 _F = re.compile(r"F([\d.]+)")
+_JOINTS = re.compile(r"X([-\d.]+) Y([-\d.]+) Z([-\d.]+) A([-\d.]+) B([-\d.]+) C([-\d.]+)")
 POLL_S = 0.02     # 기다리는 동안 멈춤 확인 간격
 
 
@@ -26,6 +28,8 @@ class VirtualMirobotLink:
         c = cfg["paper_center_tcp_mm"]
         self.pos = (c["x"], c["y"], c["z"] + float(start_offset_mm))
         self.state = "Alarm"
+        self.joints = [0.0] * 6     # 관절 이동(M21) 기준. 직교 이동은 이 값을 바꾸지 않음
+        self.abc = (0.0, 0.0, 0.0)
         self.sent = []
         self.latency = cfg.get("timing", {}).get("assumed_command_latency_s", 0.1)
 
@@ -55,7 +59,11 @@ class VirtualMirobotLink:
         return self.state, None
 
     def query_status(self, timeout=2.0):
-        return self.state, self.pos, f"<{self.state},virtual>"
+        j, (x, y, z) = self.joints, self.pos     # 실제 컨트롤러와 같은 형식 (Angle은 J4,J5,J6,D,J1,J2,J3 순서)
+        a, b, c = self.abc
+        raw = (f"<{self.state},Angle(ABCDXYZ):{j[3]:.3f},{j[4]:.3f},{j[5]:.3f},0.000,{j[0]:.3f},{j[1]:.3f},{j[2]:.3f},"
+               f"Cartesian coordinate(XYZ RxRyRz):{x:.3f},{y:.3f},{z:.3f},{a:.3f},{b:.3f},{c:.3f},virtual>")
+        return self.state, self.pos, raw
 
     def send_and_ack(self, line, timeout, should_stop=None):
         self.sent.append(line)
@@ -66,14 +74,46 @@ class VirtualMirobotLink:
             self._sleep(timeout, should_stop)
             raise ControllerError(f"ok 응답 시간 초과: {line}")
         m, f = _XYZ.search(line), _F.search(line)
-        if m:
+        if m and line.startswith("M21"):     # 관절 이동: X~C = J1~J6 각도(°). 걸리는 시간은 가장 많이 도는 관절 기준
+            q = [float(v) for v in _JOINTS.search(line).groups()]
+            turn = max(abs(a - b) for a, b in zip(q, self.joints))
+            feed = float(f.group(1)) if f else 1000.0
+            self._sleep((turn / (feed / 60.0) + self.latency) / self.speed, should_stop)
+            from .mirobot_sim import fk, HOME_ROT
+            from scipy.spatial.transform import Rotation
+            self.joints = q
+            transform = fk([math.radians(v) for v in q])[0]
+            self.pos = tuple(float(v) for v in transform[:3, 3])
+            self.abc = tuple(float(v) for v in Rotation.from_matrix(transform[:3, :3] @ HOME_ROT.T).as_euler('xyz', degrees=True))
+        elif m:
             target = tuple(float(v) for v in m.groups())
             dist = sum((a - b) ** 2 for a, b in zip(target, self.pos)) ** 0.5
             feed = float(f.group(1)) if f else 1000.0
             self._sleep((dist / (feed / 60.0) + self.latency) / self.speed, should_stop)
+            if self.cfg.get("requested_start_pose") and line.startswith("M20"):
+                from .mirobot_sim import ik, controller_rotation
+                joints = _JOINTS.search(line)
+                if not joints:
+                    raise ControllerError("가상 로봇이 직교 명령의 방향을 읽지 못했습니다")
+                values = [float(v) for v in joints.groups()]
+                abc = values[3:]
+                q, _, ok = ik(target, [math.radians(v) for v in self.joints], r_goal=controller_rotation(abc))
+                if not ok:
+                    raise ControllerError("가상 로봇이 목표 위치에 도달할 수 없습니다")
+                self.joints = [math.degrees(float(v)) for v in q]
+                self.abc = tuple(abc)
             self.pos = target
 
     def wait_idle(self, timeout):
+        return self.pos
+
+    def wait_until_x(self, target_x, timeout, tol=1.5):
+        return self.pos
+
+    def wait_until_pose(self, pose, timeout, tol=1.5, yz_tol=1.0, contact_sign=1.0):
+        return self.pos
+
+    def wait_until_left_contact(self, contact_x, timeout, retract_sign=-1.0, min_mm=5.0):
         return self.pos
 
     def close(self):

@@ -134,7 +134,20 @@ class DedupeTest(unittest.TestCase):
         _, st_off = sp.run_pipeline(img, dedupe_px=0)
         self.assertGreater(sum(sp.polyline_length(s) for s in st_off), 450)
 
-
+    def test_ink_between_parallel_edges_become_one_but_a_light_gap_stays(self):
+        gray = np.full((80, 300), 240, np.uint8)
+        gray[46:54, 20:280] = 20                          # 8px 굵은 먹. 양쪽 경계 사이는 어둡다
+        edges = np.zeros_like(gray)
+        edges[46, 20:280] = 255
+        edges[53, 20:280] = 255
+        twins = sp.drop_ink_twins(sp.trace_strokes(edges, 5), gray, gap_px=12)
+        self.assertLess(sum(sp.polyline_length(s) for s in twins), 320)
+        light = np.full((80, 300), 240, np.uint8)       # 사이가 밝은 두 선 (머리카락)
+        edges2 = np.zeros_like(light)
+        edges2[40, 20:280] = 255
+        edges2[48, 20:280] = 255
+        kept = sp.drop_ink_twins(sp.trace_strokes(edges2, 5), light, gap_px=12)
+        self.assertGreater(sum(sp.polyline_length(s) for s in kept), 480)
 class ResizeTest(unittest.TestCase):
     def test_small_image_is_upscaled_to_max_side(self):
         # 저해상도 원본도 긴 변 800px로 맞춰야 px 파라미터 의미가 같고 선이 매끄러움

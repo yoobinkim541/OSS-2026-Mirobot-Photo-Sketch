@@ -11,29 +11,27 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from PIL import Image
 
-ACCENT = ("#2563eb", "#3b82f6")
-BORDER = ("#dde2ea", "#303644")
-TEXT = ("#1f2937", "#e5e7eb")
-MUTED = ("#9aa3b2", "#6b7280")
-THUMB_H, THUMB_W = 60, 88
+from .theme import ACCENT, BG, BORDER, CARD, MUTED, SELECTED, SURFACE, TEXT
+THUMB_H, THUMB_W = 44, 72
 
 
 class StageStrip(ctk.CTkScrollableFrame):
     """단계 썸네일 띠. 누르면 on_select(stage_id). 다시 계산될 단계는 글자를 흐리게."""
 
     def __init__(self, master, stages, on_select, font, titles=None):
-        super().__init__(master, orientation="horizontal", height=THUMB_H + 60, fg_color="transparent")
+        super().__init__(master, orientation="horizontal", height=THUMB_H + 54,
+                         fg_color=CARD, corner_radius=14, border_width=1, border_color=BORDER)
         self.buttons, self._imgs, self.selected = {}, {}, None
         self.titles = titles or {st.id: st.label for st in stages}
-        for i, st in enumerate(stages):
-            if i:
-                ctk.CTkLabel(self, text="→", font=font(12), text_color=MUTED).pack(side="left", padx=1)
-            b = ctk.CTkButton(self, text=self.titles[st.id], compound="top", width=THUMB_W + 34, height=THUMB_H + 50,
-                              font=font(11), fg_color="transparent", border_width=2, border_color=BORDER,
-                              text_color=TEXT, hover_color=("#e8ecf3", "#2a2f3a"),
+        for st in stages:
+            b = ctk.CTkButton(self, text=self.titles[st.id], compound="top", width=THUMB_W + 42,
+                              height=THUMB_H + 46, corner_radius=10, font=font(11),
+                              fg_color="transparent", border_width=1, border_color=BORDER,
+                              text_color=TEXT, hover_color=SURFACE,
                               command=lambda sid=st.id: on_select(sid))
-            b.pack(side="left", pady=2)
+            b.pack(side="left", padx=4, pady=5)
             self.buttons[st.id] = b
+        self._parent_canvas.bind("<Configure>", lambda _e: self._reveal_selected(), add="+")
 
     def set_thumbnail(self, stage_id, img_bgr):
         h, w = img_bgr.shape[:2]
@@ -58,7 +56,24 @@ class StageStrip(ctk.CTkScrollableFrame):
     def select(self, stage_id):
         self.selected = stage_id
         for sid, b in self.buttons.items():
-            b.configure(border_color=ACCENT if sid == stage_id else BORDER)
+            b.configure(border_color=ACCENT if sid == stage_id else BORDER,
+                        fg_color=SELECTED if sid == stage_id else "transparent",
+                        border_width=2 if sid == stage_id else 1)
+        self._reveal_selected()
+
+    def _reveal_selected(self):
+        """Reveal selection after layout and when the workspace is resized."""
+        if self.selected is None:
+            return
+        button = self.buttons[self.selected]
+        canvas = self._parent_canvas
+        width = max(self.winfo_width(), 1)
+        left, right = canvas.xview()
+        start, end = button.winfo_x() / width, (button.winfo_x() + button.winfo_width()) / width
+        if start < left:
+            canvas.xview_moveto(start)
+        elif end > right:
+            canvas.xview_moveto(end - (right - left))
 
     def set_stale(self, stage_ids):
         stale = set(stage_ids)
@@ -70,31 +85,58 @@ class BigView(ctk.CTkFrame):
     """선택한 단계를 크게. 휠=확대, 왼쪽 끌기=이동, 더블클릭=맞춤. 원본 겹치기(투명도)."""
 
     def __init__(self, master, font, theme_colors):
-        super().__init__(master, fg_color="transparent")
+        super().__init__(master, fg_color=CARD, corner_radius=14)
         self.theme_colors = theme_colors
         bar = ctk.CTkFrame(self, fg_color="transparent")
-        bar.pack(fill="x", padx=8, pady=(6, 0))
-        self.title = ctk.CTkLabel(bar, text="", font=font(14, "bold"))
+        bar.pack(fill="x", padx=16, pady=(12, 0))
+        self.title = ctk.CTkLabel(bar, text="미리보기", font=font(14, "bold"))
         self.title.pack(side="left")
-        self.alpha = tk.DoubleVar(value=0.0)
-        ctk.CTkSlider(bar, from_=0, to=1, variable=self.alpha, width=110,
-                      command=lambda _: self.redraw()).pack(side="right")
-        ctk.CTkLabel(bar, text="원본 겹치기", font=font(11)).pack(side="right", padx=4)
-        self.compare_btn = ctk.CTkButton(bar, text="이전 단계와 비교 (누르고 있기)", width=180, height=26,
-                                         font=font(11), fg_color="transparent", border_width=1, text_color=TEXT)
-        self.compare_btn.pack(side="right", padx=(8, 0))
+        self.fit_btn = ctk.CTkButton(bar, text="화면에 맞춤", command=self.fit, width=94, height=28,
+                                     font=font(11), fg_color=SURFACE, hover_color=BORDER, text_color=TEXT,
+                                     state="disabled")
+        self.fit_btn.pack(side="right")
+        self.options_frame = ctk.CTkFrame(bar, fg_color="transparent", height=28)
+        self.subtitle = ctk.CTkLabel(self, text="사진을 선으로 바꾸고, 로봇으로 그려 보세요.",
+                                     font=font(11), text_color=MUTED, anchor="w", justify="left")
+        self.subtitle.pack(fill="x", padx=16, pady=(2, 6))
+        tools = ctk.CTkFrame(self, fg_color="transparent")
+        tools.pack(fill="x", padx=16, pady=(0, 10))
+        self.compare_btn = ctk.CTkButton(tools, text="이전 단계 비교 · 누르고 있기", width=176, height=28,
+                                         font=font(11), fg_color="transparent", border_width=1,
+                                         text_color=TEXT, hover_color=SURFACE, state="disabled")
+        self.compare_btn.pack(side="left")
         self.compare_btn.bind("<ButtonPress-1>", lambda _e: self.hold_compare(True))
         self.compare_btn.bind("<ButtonRelease-1>", lambda _e: self.hold_compare(False))
-        self.options_frame = ctk.CTkFrame(bar, fg_color="transparent", height=28)   # 편집 단계 옵션 자리 (빈 프레임 기본 높이 200px 방지)
-        self.options_frame.pack(side="right", padx=8)
-        self.subtitle = ctk.CTkLabel(self, text="", font=font(12), text_color=MUTED, anchor="w", justify="left")
-        self.subtitle.pack(fill="x", padx=10)
+        self.alpha = tk.DoubleVar(value=0.0)
+        self.overlay_slider = ctk.CTkSlider(tools, from_=0, to=1, variable=self.alpha, width=100,
+                                            state="disabled", command=lambda _: self.redraw())
+        self.overlay_slider.pack(side="right", padx=(8, 0))
+        ctk.CTkLabel(tools, text="원본 겹치기", font=font(11), text_color=MUTED).pack(side="right")
+        footer = ctk.CTkFrame(self, fg_color="transparent", height=26)
+        footer.pack(side="bottom", fill="x", padx=16, pady=(0, 6))
+        ctk.CTkLabel(footer, text="휠로 확대  ·  드래그로 이동  ·  더블클릭으로 맞춤", font=font(10),
+                     text_color=MUTED).pack(side="left")
         self._compare, self._held = None, None
+        canvas_frame = ctk.CTkFrame(self, fg_color=BG, corner_radius=10)
+        canvas_frame.pack(fill="both", expand=True, padx=12, pady=(0, 8))
         self.fig = Figure(figsize=(8, 6))
         self.ax = self.fig.add_axes([0, 0, 1, 1])
         self.ax.axis("off")
-        self.canvas = FigureCanvasTkAgg(self.fig, master=self)
-        self.canvas.get_tk_widget().pack(fill="both", expand=True, padx=8, pady=8)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=canvas_frame)
+        self.canvas.get_tk_widget().pack(fill="both", expand=True, padx=6, pady=6)
+        self.empty = ctk.CTkFrame(canvas_frame, fg_color=BG, corner_radius=0)
+        ctk.CTkLabel(self.empty, text="사진 한 장, 새로운 드로잉", font=font(20, "bold"),
+                     text_color=TEXT).pack(padx=20, pady=(8, 6))
+        ctk.CTkLabel(self.empty, text="이미지를 열면 선 추출부터 종이 배치까지 자동으로 준비합니다.\n"
+                     "로봇 없이도 미리보기와 시뮬레이션을 사용해 보세요.",
+                     font=font(11), text_color=MUTED, justify="center", wraplength=340).pack(
+                         padx=20, pady=(0, 12))
+        self.empty_open_btn = ctk.CTkButton(self.empty, text="+  이미지 열기", width=160, height=36,
+                                            font=font(13, "bold"))
+        self.empty_open_btn.pack(pady=(0, 8))
+        ctk.CTkLabel(self.empty, text="JPG · PNG · WEBP · BMP", font=font(10),
+                     text_color=MUTED).pack(pady=(0, 8))
+        self.empty.place(relx=0.5, rely=0.5, anchor="center")
         self.image = self.original = self.draw_extra = None
         self.on_view_change = None
         self._drag = None
@@ -103,6 +145,7 @@ class BigView(ctk.CTkFrame):
         c.mpl_connect("button_press_event", self._on_press)
         c.mpl_connect("motion_notify_event", self._on_move)
         c.mpl_connect("button_release_event", self._on_release)
+        self.redraw()
 
     def set_info(self, subtitle, compare=None):
         """큰 보기 위 설명 줄과 비교 대상. compare = (이전 단계 제목, 그림을 돌려주는 함수) 또는 None."""
@@ -113,12 +156,15 @@ class BigView(ctk.CTkFrame):
     def clear(self):
         """큰 보기를 빈 화면으로."""
         self.image = self.original = self.draw_extra = self._held = self._compare = None
-        self.title.configure(text="")
-        self.subtitle.configure(text="")
+        self.title.configure(text="미리보기")
+        self.subtitle.configure(text="사진을 선으로 바꾸고, 로봇으로 그려 보세요.")
         self.compare_btn.configure(state="disabled")
-        self.ax.clear()
-        self.ax.axis("off")
-        self.canvas.draw_idle()
+        self.fit_btn.configure(state="disabled")
+        self.overlay_slider.configure(state="disabled")
+        self.alpha.set(0)
+        self._drag = None
+        self.empty.place(relx=0.5, rely=0.5, anchor="center")
+        self.redraw()
 
     def hold_compare(self, on):
         """누르고 있는 동안 이전 단계 그림 (같은 확대 위치), 떼면 원래대로."""
@@ -136,17 +182,23 @@ class BigView(ctk.CTkFrame):
         same = self.image is not None and self.image.shape[:2] == img_bgr.shape[:2]
         lim = (self.ax.get_xlim(), self.ax.get_ylim()) if same else None
         self.image, self.original, self.draw_extra = img_bgr, original_bgr, draw_extra
+        self.empty.place_forget()
+        self.fit_btn.configure(state="normal")
+        self.overlay_slider.configure(state="normal" if original_bgr is not None else "disabled")
         self.title.configure(text=title)
         self.redraw(lim, keep=same)
 
     def redraw(self, lim=None, keep=True):
-        if self.image is None:
-            return
-        if lim is None and keep and self.ax.images:
-            lim = (self.ax.get_xlim(), self.ax.get_ylim())
         bg, _ = self.theme_colors()
         self.fig.set_facecolor(bg)
         self.canvas.get_tk_widget().configure(bg=bg)
+        if self.image is None:
+            self.ax.clear()
+            self.ax.axis("off")
+            self.canvas.draw_idle()
+            return
+        if lim is None and keep and self.ax.images:
+            lim = (self.ax.get_xlim(), self.ax.get_ylim())
         self.ax.clear()
         self.ax.axis("off")
         img = self.image
@@ -256,8 +308,8 @@ class ParamControls(ctk.CTkFrame):
                 self.widgets.append(entry)
                 self.vars[s.key + ":slider"] = w
             if s.help:
-                ctk.CTkLabel(self, text=s.help, font=font(10), text_color=MUTED, anchor="w", justify="left",
-                             wraplength=290).pack(fill="x", padx=14)
+                ctk.CTkLabel(self, text=s.help, font=font(11), text_color=MUTED, anchor="w", justify="left",
+                             wraplength=282).pack(fill="x", padx=14, pady=(2, 4))
             self.vars[s.key] = var
             self.widgets.append(w)
 
@@ -312,7 +364,7 @@ class ProposalBar(ctk.CTkFrame):
     """제안 n건 · 초록 a · 빨강 b [적용] [취소] + 번호 딱지(눌러서 빼기/넣기)."""
 
     def __init__(self, master, font, on_apply, on_discard):
-        super().__init__(master, fg_color=("#f3f6fb", "#1b2029"), corner_radius=12)
+        super().__init__(master, fg_color=SELECTED, corner_radius=12, border_width=1, border_color=BORDER)
         self.font, self.excluded, self.chips, self.epoch = font, set(), {}, None
         top = ctk.CTkFrame(self, fg_color="transparent")
         top.pack(fill="x", padx=10, pady=(8, 2))

@@ -35,12 +35,26 @@ class FakeSerial:
         self.fail_at = fail_at
         self.fail_msg = fail_msg
         self.written = []
+        self.x, self.y, self.z = "198.668", "0.000", "230.477"
+        self.held_x = None
+
+    def _idle(self):
+        x = self.held_x if self.held_x is not None else self.x
+        self.held_x = None
+        return ("<Idle,Angle(ABCDXYZ):0,0,0,0,0,0,0,"
+                f"Cartesian coordinate(XYZ RxRyRz):{x},{self.y},{self.z},0.000,0.000,0.000,"
+                "Pump PWM:0,Valve PWM:0,Motion_MODE:0>")
 
     def write(self, data):
         text = data.decode().strip()
         self.written.append(text)
+        m = re.search(r"^M20 .*X([-\d.]+) Y([-\d.]+) Z([-\d.]+)", text)
+        if m:
+            if m.group(1) != self.x:
+                self.held_x = self.x
+            self.x, self.y, self.z = m.groups()
         if text == "?":
-            self.pending.append(self.IDLE)
+            self.pending.append(self._idle())
             return
         n = sum(1 for w in self.written if w != "?")
         self.pending.append(self.fail_msg if n == self.fail_at else "ok")
@@ -71,6 +85,46 @@ class PlannerTest(unittest.TestCase):
         self.assertAlmostEqual(down_x, CFG["paper_center_tcp_mm"]["x"])
         self.assertAlmostEqual(down_x - up_x, CFG["pen"]["up_clearance_mm"])  # 펜업은 벽에서 멀어짐
 
+    def test_pen_lifts_in_place_before_the_next_move(self):
+        cfg = self._high_pen_up_cfg(20.0)
+        cfg["pen"]["down_extra_mm"] = 8.0
+        cmds = de.Planner(cfg).plan(SQUARE)
+        yz = lambda line: re.search(r"Y([-\d.]+) Z([-\d.]+)", line).groups()
+        draw = next(line for line, label in reversed(cmds) if label == "stroke 0 draw")
+        lift = next(line for line, label in cmds if label == "stroke 0 lift")
+        up = next(line for line, label in cmds if label == "stroke 0 pen-up")
+        self.assertEqual(yz(lift), yz(draw))          # 뗄 때 Y·Z는 그대로, X만 뒤로
+        self.assertEqual(yz(up), yz(draw))
+        labels = [label for _, label in cmds]
+        self.assertLess(labels.index("stroke 0 pen-up"), labels.index("return center pen-up"))
+
+    def test_travel_between_strokes_stays_off_the_paper(self):
+        cfg = self._high_pen_up_cfg(20.0)
+        cfg["pen"]["down_extra_mm"] = 8.0
+        cfg["plane_compensation"]["b_per_mm_z"] = 0.05
+        strokes = [[(0.0, 0.0), (10.0, 0.0)], [(0.0, 30.0), (10.0, 30.0)]]
+        planner = de.Planner(cfg)
+        cmds = planner.plan(strokes)
+        labels = [label for _, label in cmds]
+        up_at = labels.index("stroke 0 pen-up")
+        self.assertEqual(labels[up_at + 1], "stroke 1 travel")
+        self.assertLess(labels.index("stroke 1 travel"), labels.index("stroke 1 pen-down"))
+        x_of = lambda line: float(re.search(r"X([-\d.]+)", line).group(1))
+        yz = lambda line: re.search(r"Y([-\d.]+) Z([-\d.]+)", line).groups()
+        sign = cfg["pen"]["retract_x_sign"]
+        up = next(line for line, label in cmds if label == "stroke 0 pen-up")
+        travel = next(line for line, label in cmds if label == "stroke 1 travel")
+        arrive = planner.pose(0.0, 30.0, False)
+        self.assertNotAlmostEqual(x_of(up), arrive[0], places=2)
+        self.assertEqual(yz(travel), (f"{arrive[1]:.3f}", f"{arrive[2]:.3f}"))
+        self.assertAlmostEqual(x_of(travel), planner._farther_x(x_of(up), arrive[0]), places=3)
+        self.assertGreaterEqual(sign * (x_of(travel) - x_of(up)), -1e-6)
+        last = next(line for line, label in cmds if label == "stroke 1 pen-up")
+        back = next(line for line, label in cmds if label == "return center pen-up")
+        home = planner.pose(0.0, 0.0, False)
+        self.assertEqual(yz(back), (f"{home[1]:.3f}", f"{home[2]:.3f}"))
+        self.assertAlmostEqual(x_of(back), planner._farther_x(x_of(last), home[0]), places=3)
+        self.assertGreaterEqual(sign * (x_of(back) - x_of(last)), -1e-6)
     def _high_pen_up_cfg(self, up=10.0):
         cfg = copy.deepcopy(CFG)
         cfg["pen"]["up_clearance_mm"] = up
@@ -309,6 +363,13 @@ class ExecuteTest(unittest.TestCase):
         self.assertEqual(result["result"], "completed")
         self.assertEqual(result["commands_sent"], len(self.cmds))
 
+    def test_pen_up_waits_until_idle_before_the_next_move(self):
+        fake = FakeSerial()
+        de.execute(de.MirobotLink(fake), self.cmds, self.cfg, progress=lambda *_: None)
+        pen_up = next(line for line, label in self.cmds if label == "stroke 0 pen-up")
+        i = fake.written.index(pen_up)
+        self.assertEqual(fake.written[i + 1], "?")          # 펜업 ok 다음, 옆 이동 전에 Idle 확인
+
     def test_stops_immediately_on_soft_limit(self):
         fake = FakeSerial(fail_at=4)
         result = de.execute(de.MirobotLink(fake), self.cmds, self.cfg, progress=lambda *_: None)
@@ -322,6 +383,95 @@ class ExecuteTest(unittest.TestCase):
         fake.readline = lambda: b""
         result = de.execute(de.MirobotLink(fake), self.cmds, self.cfg, progress=lambda *_: None)
         self.assertEqual(result["result"], "stopped_on_error")
+
+
+def _status(state, x=None, y=0.0, z=230.477):
+    if x is None:
+        return f"<{state},Angle(ABCDXYZ):0,0,0,0,0,0,0>"
+    return (f"<{state},Angle(ABCDXYZ):0,0,0,0,0,0,0,"
+            f"Cartesian coordinate(XYZ RxRyRz):{x:.3f},{y:.3f},{z:.3f},0.000,0.000,0.000>")
+
+
+class ScriptedStatus:
+    """? 마다 정해 둔 상태 줄을 돌려준다."""
+
+    def __init__(self, statuses):
+        self.statuses = list(statuses)
+        self.last = self.statuses[-1] if self.statuses else "<Idle>"
+        self.pending = []
+        self.written = []
+
+    def write(self, data):
+        text = data.decode().strip()
+        self.written.append(text)
+        if text == "?":
+            self.pending.append(self.statuses.pop(0) if self.statuses else self.last)
+            if self.statuses:
+                self.last = self.statuses[0]
+        else:
+            self.pending.append("ok")
+
+    def readline(self):
+        return (self.pending.pop(0) + "\r\n").encode() if self.pending else b""
+
+    def reset_input_buffer(self):
+        self.pending.clear()
+
+
+class RetractConfirmTest(unittest.TestCase):
+    def _run(self, statuses, timeout=1.0):
+        clock = {"t": 0.0}
+
+        def monotonic():
+            return clock["t"]
+
+        def sleep(dt):
+            clock["t"] += dt
+
+        link = de.MirobotLink(ScriptedStatus(statuses))
+        with mock.patch.object(de.time, "monotonic", monotonic), mock.patch.object(de.time, "sleep", sleep):
+            return link.wait_until_x(190.0, timeout)
+
+    def test_first_sample_already_at_target_passes_without_run(self):
+        tcp = self._run([_status("Idle", 190.0)])
+        self.assertEqual(tcp[0], 190.0)
+
+    def test_idle_without_coordinates_does_not_pass(self):
+        with self.assertRaises(de.ControllerError):
+            self._run([_status("Idle")] * 30)
+
+    def test_x_that_left_the_target_then_returns_passes_without_run(self):
+        tcp = self._run([_status("Idle", 218.0), _status("Idle", 190.0)])
+        self.assertEqual(tcp[0], 190.0)
+
+    def test_non_idle_state_counts_as_motion(self):
+        tcp = self._run([_status("Idle"), _status("Jog", 218.0), _status("Idle", 190.0)])
+        self.assertEqual(tcp[0], 190.0)
+
+
+
+
+    def test_target_x_alone_does_not_mean_this_retract_started(self):
+        with self.assertRaises(de.ControllerError):
+            self._left([_status("Idle", 212.0)] * 30, 240.0)
+
+    def test_leaves_after_this_contact_is_seen(self):
+        tcp = self._left([_status("Idle", 240.0), _status("Idle", 220.0)], 240.0, min_mm=5.0)
+        self.assertEqual(tcp[0], 220.0)
+
+    def _left(self, statuses, contact_x, timeout=1.0, min_mm=5.0):
+        clock = {"t": 0.0}
+
+        def monotonic():
+            return clock["t"]
+
+        def sleep(dt):
+            clock["t"] += dt
+
+        link = de.MirobotLink(ScriptedStatus(statuses))
+        with mock.patch.object(de.time, "monotonic", monotonic), mock.patch.object(de.time, "sleep", sleep):
+            return link.wait_until_left_contact(contact_x, timeout, -1.0, min_mm)
+
 
 
 class OrientationTestFileTest(unittest.TestCase):
