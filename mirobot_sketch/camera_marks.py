@@ -53,6 +53,19 @@ def _stable_quad(boxes):
     return float(sizes.max() / max(sizes.min(), 1)) <= 2.5
 
 
+def _quad_center(boxes):
+    """사각형의 대각선 교점: 원근 투영된 종이의 중심."""
+    centers = np.array([[x + (w - 1) / 2, y + (h - 1) / 2] for x, y, w, h in boxes], np.float32)
+    hull = cv2.convexHull(centers).reshape(-1, 2)
+    if len(hull) != 4:
+        return None
+    a, b, c, d = [np.array([*p, 1.0]) for p in hull]
+    p = np.cross(np.cross(a, c), np.cross(b, d))
+    if abs(p[2]) < 1e-8:
+        return None
+    return (float(p[0] / p[2]), float(p[1] / p[2]))
+
+
 def observe_setup(frame_bgr):
     """프레임에서 X 4개와 펜 끝 후보를 봅니다. 접촉·이동량은 반환하지 않습니다."""
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
@@ -73,6 +86,8 @@ def observe_setup(frame_bgr):
         "crosses": len(crosses),
         "crosses_stable": stable,
         "pen_tip_seen": len(pens) == 1,
+        "paper_center_px": _quad_center(crosses) if stable else None,
+        "pen_tip_px": (pens[0][0] + (pens[0][2] - 1) / 2, pens[0][1] + (pens[0][3] - 1) / 2) if len(pens) == 1 else None,
         "contact_checked": False,
         "center_moved": False,
     }

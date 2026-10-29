@@ -117,7 +117,7 @@ class DrawJobTest(unittest.TestCase):
         ready = dict(center)
         ready["x"] -= cfg["pen"]["up_clearance_mm"]
         measurement = {"result": "ready", "center_tcp_mm": center, "ready_tcp_mm": ready,
-                       "samples": [], "selected_half_size_mm": 30.0,
+                       "samples": [], "selected_half_size_mm": [-60.0, -65.0, 60.0, 55.0],
                        "max_residual_mm": 1.0,
                        "plane_fit": {"a_per_mm_y": 0.0, "b_per_mm_z": 0.0,
                                      "max_abs_residual_mm": 0.0}}
@@ -129,11 +129,26 @@ class DrawJobTest(unittest.TestCase):
             job.start(virtual=False, recalibrate=True)
             self.assertTrue(rec.ready.wait(15), rec.events[-5:])
             run.assert_called_once()
+            self.assertEqual(run.call_args.kwargs["target_rect_mm"], (-60.0, -65.0, 60.0, 55.0))
             save.assert_called_once()
             self.assertEqual(cfg["plane_compensation"]["status"], "verified")
             job.cancel()
             self.assertTrue(rec.done.wait(5))
         self.assertTrue(link.closed)
+
+    def test_requested_joint_pose_blocks_real_connection_until_supported(self):
+        cfg = golden.default_cfg()
+        cfg["requested_start_pose"] = {"joints_deg": [0, 0, -3, 0, -128, -3],
+                                       "status": "pending_robot_verification"}
+        rec = Recorder()
+        job = self.job(rec)
+        job.cfg = cfg
+        with mock.patch.object(de, "open_link") as open_link:
+            job.start(virtual=False)
+            self.assertTrue(rec.done.wait(10))
+            open_link.assert_not_called()
+        self.assertTrue(any(k == "step" and d["status"] == "failed" and "관절 시작 자세" in d["message"]
+                            for k, d in rec.events))
 
     def test_stop_during_drawing(self):
         rec = Recorder()
@@ -388,7 +403,7 @@ class DrawJobTest(unittest.TestCase):
         ready = dict(center)
         ready["x"] -= 9.0                        # 사각형 보정은 펜을 벽에서 8 mm 이상 뺀 자세로 끝남 (기존 5 mm 검사에 걸리던 값)
         measurement = {"result": "ready", "center_tcp_mm": center, "ready_tcp_mm": ready,
-                       "samples": [], "selected_half_size_mm": [-61.0, -36.4, 61.0, 36.4],
+                       "samples": [], "selected_half_size_mm": [-60.0, -65.0, 60.0, 55.0],
                        "max_residual_mm": 1.0,
                        "plane_fit": {"a_per_mm_y": cfg["plane_compensation"]["a_per_mm_y"],
                                      "b_per_mm_z": cfg["plane_compensation"]["b_per_mm_z"],
@@ -402,9 +417,9 @@ class DrawJobTest(unittest.TestCase):
                                                             "elapsed_s": 0.1}) as execute:
             job.start(virtual=False, pending=True, recalibrate=True, return_to_origin=False)
             self.assertTrue(rec.ready.wait(25), rec.events[-5:])
-            self.assertEqual(run.call_args.kwargs["target_rect_mm"], (-61.0, -36.4, 61.0, 36.4))
-            self.assertEqual(cfg["limits"], {"x_max_mm": 61.0, "y_min_mm": -36.4,
-                                              "roof_mm": [[0.0, 36.4], [61.0, 36.4]]})
+            self.assertEqual(run.call_args.kwargs["target_rect_mm"], (-60.0, -65.0, 60.0, 55.0))
+            self.assertEqual(cfg["limits"], {"x_max_mm": 60.0, "y_min_mm": -65.0,
+                                              "roof_mm": [[0.0, 55.0], [60.0, 55.0]]})
             job.confirm(air=False, pending=True, checked=True)
             self.assertTrue(rec.done.wait(10), rec.events[-5:])
             execute.assert_called_once()
@@ -478,7 +493,7 @@ class DrawJobTest(unittest.TestCase):
         from mirobot_sketch import mirobot_sim as ms
         real = ms.simulate
 
-        def endless(targets, step_mm=1.0, progress=None):          # 오래 걸리는 계산을 흉내: 취소만 기다림
+        def endless(targets, step_mm=1.0, progress=None, r_goal=None, q0=None):  # 취소만 기다림
             started.set()
             while True:
                 progress(0, 1)

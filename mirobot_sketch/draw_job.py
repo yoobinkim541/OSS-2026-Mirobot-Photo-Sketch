@@ -24,6 +24,7 @@ from . import live_progress as lp
 from . import paths
 
 CANCELLED = "취소했습니다."
+CALIBRATION_RECT_MM = (-60.0, -65.0, 60.0, 55.0)
 
 
 def _floor_tenth(v):
@@ -205,6 +206,30 @@ class DrawJob:
         try:
             # ① 사전 검사
             self._step("preflight", "active", "범위와 로봇 시뮬레이션을 확인합니다")
+            requested_mode = bool(self._start_pose and self.cfg.get("requested_start_pose"))
+            if requested_mode:
+                from . import start_pose as sp
+                import numpy as np
+                self.cfg = sp.drawing_config_from_recorded_contact(self.cfg)
+                if self._virtual:
+                    # 가상 환경에서만 접촉 샘플을 시뮬레이터의 종이 면으로 사용한다.
+                    rq = self.cfg["requested_start_pose"]
+                    rq["wall_distance_mm"] = float(sp._tip(np.radians(rq["contact_joints_deg"]),
+                                                             rq["pen_length_mm"], rq.get("tool_offset_mm"))[0])
+                s.cfg = self.cfg
+                s.sim = None
+            if not self._virtual and self.cfg.get("requested_start_pose") and not requested_mode:
+                raise de.DrawError("preflight", "요청한 관절 시작 자세는 아직 실행 경로와 시뮬레이션에 연결되지 않았습니다.",
+                                   "시작 자세의 실제 관절 상태와 펜·종이 보정을 확인한 뒤 사용하세요.")
+            if requested_mode and not self._virtual:
+                if self._recalibrate:
+                    raise de.DrawError("preflight", "120×120 mm 다시 보정은 저장된 대기·접촉 자세와 함께 쓸 수 없습니다.",
+                                       "'다시 보정'을 끄거나 '호밍 뒤 시작 자세 맞추기'를 끄고 다시 시작하세요.")
+                blocker = sp.requested_motion_blocker(self.cfg)
+                if blocker:
+                    raise de.DrawError("preflight", f"실물 검증 전이라 로봇을 움직이지 않았습니다. {blocker}",
+                                       "펜 홀더 위치와 종이 접촉 간격을 실측해 설정을 맞춘 뒤 다시 시작하세요. "
+                                       "같은 순서는 가상 시뮬레이션으로 확인할 수 있습니다.")
             if s.sim is None:
                 s.simulate()
             # ①에서 그릴 획·시뮬레이션·경로를 한 번에 찍어 둠: 이후 세션이 바뀌어도(편집·이미지 열기)
@@ -243,10 +268,8 @@ class DrawJob:
             from . import calibration
             calibration_path = None
             calibrated = False
-            target_rect = None
-            # 캘리브레이션은 사람이 '다시 보정'을 골랐을 때만: 아니면 바로 호밍 → 그리기 (범위·시작 위치 검사는 그대로)
-            if self._recalibrate and not self._virtual and self._pending and de.check_limits(strokes, self.cfg):
-                target_rect = target_contact_rect(strokes, self.cfg)
+            # 한 번의 120×120 mm 영역 보정. 위쪽 도달 한계를 고려해 중심보다 5 mm 아래에 둔다.
+            # run_calibration이 현재 확장 영역 안인지 확인한 후 이동한다.
             if self._recalibrate and not self._virtual:
                 self._step("connect", "active", "종이 캘리브레이션을 시작합니다")
                 def calibration_progress(message):
@@ -255,10 +278,9 @@ class DrawJob:
                         controller.progress(message)
 
                 try:
-                    kw = {"target_rect_mm": target_rect} if target_rect else {}
                     measured = calibration.run_calibration(
                         self.link, self.cfg, input_fn=self._calibration_input,
-                        output_fn=calibration_progress, **kw)
+                        output_fn=calibration_progress, target_rect_mm=CALIBRATION_RECT_MM)
                 except (calibration.CalibrationError, ValueError) as e:
                     calibration_path = calibration.save_report(
                         {"result": "aborted", "reason": str(e), "samples": []}, paths.config_path())
@@ -294,17 +316,24 @@ class DrawJob:
             # ③ 시작 위치
             self._step("start", "active", "펜 끝 위치를 확인합니다")
             used_start_pose = self._start_pose and not calibrated
-            if used_start_pose:
-                tcp = self._setup_start_pose()
-            if (self._virtual and not used_start_pose) or calibrated:
-                # 방금 캘리브레이션했다면 로봇은 펜을 벽에서 뺀 자세로 끝났으므로 그 자세를 허용해서 검사
-                off = de.check_start(tcp, self.cfg, retracted=calibrated)
-                start_note = f"종이 중심에서 {off:.1f} mm"
+            if requested_mode:
+                try:
+                    sp.execute_requested_start(self.link, self.cfg, should_stop=self._stop.is_set)
+                except sp.StartPoseError as e:
+                    raise de.DrawError("start", str(e), "자동 복구를 하지 않았습니다. 로봇 자세를 확인하세요.") from None
+                start_note = "저장된 대기 자세"
             else:
-                moved = self._use_start_pose_as_paper_center(tcp)
-                self.summary["start_center_shift_mm"] = round(moved, 1)
-                start_note = ("시작 자세를 종이 중심으로 사용" +
-                              (f" (설정 파일 값과 {moved:.1f} mm 차이)" if moved >= 0.05 else ""))
+                if used_start_pose:
+                    tcp = self._setup_start_pose()
+                if (self._virtual and not used_start_pose) or calibrated:
+                    # 방금 캘리브레이션했다면 로봇은 펜을 벽에서 뺀 자세로 끝났으므로 그 자세를 허용해서 검사
+                    off = de.check_start(tcp, self.cfg, retracted=calibrated)
+                    start_note = f"종이 중심에서 {off:.1f} mm"
+                else:
+                    moved = self._use_start_pose_as_paper_center(tcp)
+                    self.summary["start_center_shift_mm"] = round(moved, 1)
+                    start_note = ("시작 자세를 종이 중심으로 사용" +
+                                  (f" (설정 파일 값과 {moved:.1f} mm 차이)" if moved >= 0.05 else ""))
             # 공중 경로의 관절 시뮬레이션은 사람이 ④에서 확인하는 동안 백그라운드에서 돌리고, 공중 모드를 고른 때만 기다린다
             self._start_air_simulation(strokes)
             self._step("start", "done", start_note)
@@ -314,13 +343,27 @@ class DrawJob:
             if self._stop.is_set():
                 raise de.DrawError("confirm", CANCELLED)
             ch = self._choice
-            pre = de.preflight(strokes, self.cfg, pending=ch["pending"], air=ch["air"])
+            # 범위 검사는 접촉 자세로 움직이기 전에: 종이에 닿은 채로 멈추지 않게
             if not self._virtual and not ch["air"]:
                 outside = de.check_limits(strokes, self.cfg)
                 if outside:
                     raise de.DrawError(
                         "confirm", "설정된 펜 접촉 영역 밖에서는 그림을 시작할 수 없습니다.",
                         "공중 모드로 확인하거나, '종이·펜 위치 변경: 다시 보정'을 켜고 다시 시작해 접촉 영역을 측정하세요.")
+            if requested_mode and not ch["air"]:
+                # 공중 모드는 종이에 닿지 않으므로 접촉 자세로 가지 않고 기록된 접촉 샘플 기준으로 그린다
+                try:
+                    updated = sp.prepare_requested_drawing(self.link, self.cfg, should_stop=self._stop.is_set)
+                except sp.StartPoseError as e:
+                    raise de.DrawError("confirm", str(e), "자동 복구를 하지 않았습니다. 로봇 자세를 확인하세요.") from None
+                self.cfg = updated
+                s.cfg = updated
+                sim_summary = s.simulate()
+                if sim_summary["verdict"].startswith("FAIL"):
+                    raise de.DrawError("confirm", f"접촉 자세 경로 시뮬레이션 실패: {sim_summary['verdict']}")
+                with s.lock:
+                    self._snap["sim_raw"] = s.sim["raw"]
+            pre = de.preflight(strokes, self.cfg, pending=ch["pending"], air=ch["air"])
             if ch["air"]:
                 self._wait_air_simulation()
                 if self._air_verdict.startswith("FAIL"):
@@ -357,7 +400,7 @@ class DrawJob:
 
             result = de.execute(self.link, pre["cmds"], self.cfg, progress=lambda *_: None,
                                 on_ack=on_ack, should_stop=self._stop.is_set)
-            if result["result"] == "completed" and self._return_origin and not ch["air"]:
+            if result["result"] == "completed" and self._return_origin and (not ch["air"] or self.cfg.get("requested_start_pose")):
                 ok, why = self._return_to_origin(pre["planner"])
                 result = {**result, "returned_to_origin": ok, **({"return_error": why} if why else {})}
             final = {"completed": "done", "stopped_by_user": "stopped"}.get(result["result"], "error")
@@ -423,6 +466,14 @@ class DrawJob:
     def _return_to_origin(self, planner):
         """완료 뒤 펜을 처음 상태로 되돌림. 반환: (성공 여부 또는 None(공중 모드라 해당 없음), 오류 문구).
         자동 복구는 하지 않는다: 멈춤·오류가 나면 그 자리에서 멈추고 사람에게 알린다."""
+        if self.cfg.get("requested_start_pose"):
+            from . import start_pose as sp
+            self._step("drawing", "active", "저장된 대기 자세로 복귀하는 중입니다")
+            try:
+                sp.execute_requested_return(self.link, self.cfg, should_stop=self._stop.is_set)
+                return True, ""
+            except (sp.StartPoseError, de.ControllerError) as e:
+                return False, f"대기 자세 복귀 실패: {e}"
         cmds = planner.return_to_origin()
         if not cmds:
             return None, ""
@@ -453,7 +504,9 @@ class DrawJob:
 
         def work():
             try:
-                self._air_sim = ms.simulate(ms.plan_targets(pts, cfg, air=True), progress=check_cancel)
+                rotation, q0 = ms.simulation_pose(cfg)
+                self._air_sim = ms.simulate(ms.plan_targets(pts, cfg, air=True), progress=check_cancel,
+                                            r_goal=rotation, q0=q0)
                 self._air_verdict = ms.verdict(self._air_sim)
             except ms.SimulationCancelled:
                 pass

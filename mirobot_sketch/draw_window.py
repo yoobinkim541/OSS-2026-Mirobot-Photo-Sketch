@@ -18,7 +18,8 @@ ACTIVE_STATES = ("preflight", "connect", "start", "confirm", "drawing")
 JOG_STEPS = ["0.5", "2", "10"]          # 조그 한 번 이동량(mm)
 JOG_REPEAT_MS = 150                      # 버튼을 누르고 있는 동안 다시 보내는 간격 (로봇이 바쁘면 작업 쪽에서 버림)
 # 키보드 조그: 로봇 좌표 방향 (X 벽 쪽, Y 종이 왼쪽, Z 위). 종이 오른쪽 = 로봇 -Y (paper_x_to_robot_y_sign = -1)
-JOG_KEYS = {"w": (1, 0, 0), "s": (-1, 0, 0), "Left": (0, 1, 0), "Right": (0, -1, 0), "Up": (0, 0, 1), "Down": (0, 0, -1)}
+JOG_KEYS = {"w": (1, 0, 0), "s": (-1, 0, 0), "a": (0, 1, 0), "d": (0, -1, 0),
+            "Left": (0, 1, 0), "Right": (0, -1, 0), "Up": (0, 0, 1), "Down": (0, 0, -1)}
 
 
 def _fmt(sec):
@@ -97,7 +98,7 @@ class DrawWindow(ctk.CTkToplevel):
         pad = ctk.CTkFrame(self.jog_frame, fg_color="transparent")
         pad.grid(row=0, column=0, rowspan=3, padx=(10, 16), pady=8)
         for r, c, text, vec in ((0, 0, "벽 쪽 (W)", (1, 0, 0)), (2, 0, "뒤로 (S)", (-1, 0, 0)),
-                                (1, 1, "◀ 왼쪽 (←)", (0, 1, 0)), (1, 2, "오른쪽 ▶ (→)", (0, -1, 0)),
+                                (1, 1, "◀ 왼쪽 (A/←)", (0, 1, 0)), (1, 2, "오른쪽 ▶ (D/→)", (0, -1, 0)),
                                 (0, 3, "▲ 위 (↑)", (0, 0, 1)), (2, 3, "▼ 아래 (↓)", (0, 0, -1))):
             b = ctk.CTkButton(pad, text=text, width=104, font=font(12))
             b.grid(row=r, column=c, padx=3, pady=3)
@@ -119,7 +120,7 @@ class DrawWindow(ctk.CTkToplevel):
         ctk.CTkCheckBox(opts, text="그림이 끝나면 사진·작업 내용 비우기 (새 그림을 바로 시작)", variable=self.clear_var,
                         font=font(12)).grid(row=5, column=0, columnspan=3, sticky="w", pady=4)
         self.recalibrate_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(opts, text="종이·펜 위치 변경: 다시 보정", variable=self.recalibrate_var,
+        ctk.CTkCheckBox(opts, text="종이·펜 위치 변경: 120×120 mm 다시 보정", variable=self.recalibrate_var,
                         font=font(12)).grid(row=2, column=0, columnspan=3, sticky="w", pady=4)
         self.check_var = ctk.BooleanVar(value=False)
         self.check_box = ctk.CTkCheckBox(opts, text="펜 끝이 종이 가운데에 닿아 있고 주변을 확인했습니다", variable=self.check_var,
@@ -249,6 +250,15 @@ class DrawWindow(ctk.CTkToplevel):
         if not self.session.result:
             messagebox.showwarning("알림", "먼저 이미지를 열어 처리해 주세요.", parent=self)
             return
+        if (not self.virtual_var.get() and self.start_pose_var.get() and self.cfg.get("requested_start_pose")
+                and not self._requested_blocker()
+                and not messagebox.askokcancel(
+                    "로봇 이동 확인",
+                    "호밍이 끝나면 로봇이 저장된 대기 자세(1번)로 바로 움직입니다. "
+                    "옆으로 90° 돌아 손목을 꺾은 뒤 정면으로 돌아옵니다.\n\n"
+                    "로봇 주변에 사람·물건이 없고, 이동 중 위험하면 로봇의 정지 버튼을 누를 수 있나요?\n"
+                    "(앱의 취소는 이미 보낸 이동을 바로 멈추지 못합니다.)", parent=self)):
+            return
         self.finished = None
         self.failure_message = ""
         self.check_var.set(False)
@@ -273,7 +283,13 @@ class DrawWindow(ctk.CTkToplevel):
                        pending=bool(self.pending_var.get()),
                        recalibrate=bool(self.recalibrate_var.get()),
                        return_to_origin=bool(self.return_var.get()),
-                       start_pose=bool(self.start_pose_var.get()) and (not virtual or self.start_pose_in_virtual))
+                       start_pose=bool(self.start_pose_var.get()) and
+                                  (not virtual or self.start_pose_in_virtual or bool(self.cfg.get("requested_start_pose"))))
+
+    def _requested_blocker(self):
+        """실물 검증이 안 됐으면 그 이유. 그때는 작업이 ① 사전 검사에서 이유를 보여 주고 멈추므로 묻지 않는다."""
+        from . import start_pose as sp
+        return sp.requested_motion_blocker(self.cfg)
 
     # ---------------------------------------------------------------- ③ 시작 자세 조그
     def _show_jog(self):
@@ -392,6 +408,8 @@ class DrawWindow(ctk.CTkToplevel):
                 self.detail.configure(text=d.get("hint", ""))
             if d["id"] == "confirm" and d["status"] == "active":
                 s = self.job.summary
+                if self.cfg.get("requested_start_pose") and self.start_pose_var.get():
+                    self.check_box.configure(text="종이와 주변을 확인했습니다 (시작하면 접촉 자세로 이동)")
                 self.detail.configure(text=f"획 {s['stroke_count']} · 명령 {s['command_count']:,}줄 · "
                                            f"예상 {s['estimated_s'] / 60:.1f}분 · {s['drawing_mm'][0]:.0f}×"
                                            f"{s['drawing_mm'][1]:.0f}mm · {s['port']}"
@@ -447,7 +465,8 @@ class DrawWindow(ctk.CTkToplevel):
             self.stop_btn.configure(state="disabled")
             r = d["result"]["result"]
             returned = d["result"].get("returned_to_origin")      # True 돌아옴 / False 못 돌아옴 / None 해당 없음
-            done_text = "완료했습니다" + {True: ". 펜이 처음 위치(종이 중심)로 돌아왔습니다.",
+            return_name = "대기 자세" if self.cfg.get("requested_start_pose") and self.start_pose_var.get() else "처음 위치(종이 중심)"
+            done_text = "완료했습니다" + {True: f". 로봇이 {return_name}로 돌아왔습니다.",
                                         False: " — 다만 펜이 처음 위치로 돌아가지 못했습니다.",
                                         None: ""}[returned]
             self.todo.configure(text=self.failure_message if r in ("not_started", "error") and self.failure_message

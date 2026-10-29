@@ -23,6 +23,17 @@ def paper(crosses, pen=None):
 
 
 class MarkObservationTest(unittest.TestCase):
+    def test_reports_perspective_correct_center_and_pen_location(self):
+        obs = camera_marks.observe_setup(paper([(80, 80), (520, 90), (90, 380), (500, 370)], pen=(300, 230)))
+        self.assertAlmostEqual(obs["paper_center_px"][0], 304.74, delta=0.1)
+        self.assertAlmostEqual(obs["paper_center_px"][1], 235.18, delta=0.1)
+        self.assertAlmostEqual(obs["pen_tip_px"][0], 300, delta=1)
+        self.assertAlmostEqual(obs["pen_tip_px"][1], 230, delta=1)
+
+    def test_missing_marks_never_reports_a_center(self):
+        obs = camera_marks.observe_setup(paper([(80, 80), (520, 90), (90, 380)], pen=(300, 230)))
+        self.assertIsNone(obs["paper_center_px"])
+
     def test_four_crosses_and_pen_tip_are_seen_without_claiming_contact(self):
         obs = camera_marks.observe_setup(paper([(80, 80), (520, 90), (90, 380), (500, 370)], pen=(300, 230)))
         self.assertTrue(obs["crosses_stable"])

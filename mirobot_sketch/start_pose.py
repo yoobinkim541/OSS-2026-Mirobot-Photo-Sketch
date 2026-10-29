@@ -21,6 +21,7 @@
 계산은 시뮬레이터(URDF 기구학) 기준입니다. 옆으로 도는 쪽에 물건이 없는지는 사람이 확인해야 합니다.
 """
 
+import copy
 import queue
 
 import numpy as np
@@ -74,8 +75,196 @@ def joint_line(q_deg, feed):
     return f"M21 G90 G01 X{j[0]} Y{j[1]} Z{j[2]} A{j[3]} B{j[4]} C{j[5]} F{feed:.0f}"
 
 
-def _tip(q, pen_len):
+def plan_requested_start(cfg):
+    """검증된 벽 거리·펜 길이로 호밍 자세에서 요청 관절 자세까지 계획."""
+    requested = cfg.get("requested_start_pose") or {}
+    try:
+        q = np.asarray(requested["joints_deg"], dtype=float)
+        wall = float(requested["wall_distance_mm"])
+        pen_len = float(requested["pen_length_mm"])
+    except (KeyError, TypeError, ValueError):
+        raise StartPoseError("시작 자세의 6개 관절각, 벽 거리와 펜 길이가 필요합니다.") from None
+    if q.shape != (6,) or not np.all(np.isfinite(q)) or not np.isfinite(wall) or not np.isfinite(pen_len) or wall <= 0 or pen_len < 0:
+        raise StartPoseError("관절각, 벽 거리 또는 펜 길이가 올바르지 않습니다.")
+    s = settings(cfg)
+    s.update(paper_x_mm=wall, pen_len_max_mm=pen_len, pen_mount="along_flange")
+    if "tool_offset_mm" in requested:
+        offset = np.asarray(requested["tool_offset_mm"], dtype=float)
+        if offset.shape != (3,) or not np.all(np.isfinite(offset)):
+            raise StartPoseError("펜 홀더 오프셋이 올바르지 않습니다.")
+        s["tool_offset_mm"] = offset
+    target = np.radians(q)
+    if "first_pose_paper_gap_mm" in requested and "tool_offset_mm" in s:
+        measured = float(requested["first_pose_paper_gap_mm"])
+        calculated = wall - float(_tip(target, pen_len, s["tool_offset_mm"])[0])
+        if not np.isfinite(measured) or measured < 0 or abs(calculated - measured) > 3.0:
+            raise StartPoseError(f"첫 자세 펜 간격이 실측 {measured:.1f} mm, 모델 {calculated:.1f} mm로 다릅니다.")
+    side = np.radians(float(s["side_j1_deg"]))
+    poses = [np.zeros(6), np.array([side, 0, 0, 0, 0, 0]),
+             np.array([side, *target[1:]]), target]
+    margin, gap = _check_segments(poses, s)
+    degrees = [np.degrees(p).round(3).tolist() for p in poses[1:]]
+    return {"commands": [joint_line(p, s["joint_feed"]) for p in degrees],
+            "joints_deg": degrees, "min_joint_margin_deg": margin, "min_tip_clearance_mm": gap}
+
+
+def execute_requested_start(link, cfg, should_stop=lambda: False):
+    """호밍 상태에서 관절 이동 후 각 단계의 컨트롤러 보고값을 확인한다."""
+    from .draw_executor import parse_status
+
+    if not getattr(link, "virtual", False) and not (cfg.get("requested_start_pose") or {}).get("tool_offset_verified", False):
+        raise StartPoseError("펜 홀더 오프셋이 실물 검증되지 않아 이동하지 않았습니다.")
+    plan = plan_requested_start(cfg)
+    status = parse_status(link.query_status()[2])
+    j = status.get("joints_deg")
+    if status["state"] != "Idle" or j is None or max(abs(v) for v in j) > HOME_JOINT_TOL_DEG:
+        raise StartPoseError("Idle 호밍 자세가 아니어서 시작 자세 이동을 중단했습니다.")
+    for command, expected in zip(plan["commands"], plan["joints_deg"]):
+        if should_stop():
+            raise StartPoseError("취소했습니다.")
+        link.send_and_ack(command, cfg["ack_timeout_s"])
+        link.wait_idle(cfg["idle_timeout_s"])
+        status = parse_status(link.query_status()[2])
+        j = status.get("joints_deg")
+        if status["state"] != "Idle" or j is None or max(abs(a-b) for a, b in zip(j, expected)) > 1.0:
+            raise StartPoseError("관절 위치가 계획과 달라 이후 이동을 중단했습니다.")
+    return status
+
+
+def plan_requested_contact(cfg):
+    """첫 자세에서 사용자가 기록한 종이 접촉 자세까지의 관절 경로를 검사한다."""
+    plan_requested_start(cfg)
+    requested = cfg["requested_start_pose"]
+    try:
+        target = np.asarray(requested["contact_joints_deg"], dtype=float)
+    except (KeyError, TypeError, ValueError):
+        raise StartPoseError("종이 접촉 자세의 6개 관절각이 필요합니다.") from None
+    if target.shape != (6,) or not np.all(np.isfinite(target)):
+        raise StartPoseError("종이 접촉 자세의 관절각이 올바르지 않습니다.")
+    start = np.radians(requested["joints_deg"])
+    finish = np.radians(target)
+    wall, length = float(requested["wall_distance_mm"]), float(requested["pen_length_mm"])
+    offset = requested.get("tool_offset_mm")
+    gap = wall - float(_tip(finish, length, offset)[0])
+    if abs(gap) > 1.0:
+        raise StartPoseError(f"종이 접촉 자세의 모델 간격이 {gap:.1f} mm입니다. 벽 거리·펜 길이·실제 자세를 다시 확인하세요.")
+    s = settings(cfg)
+    s.update(paper_x_mm=wall, pen_len_max_mm=length, clearance_mm=0.0)
+    if offset is not None:
+        s["tool_offset_mm"] = offset
+    margin, minimum_gap = _check_segments([start, finish], s)
+    degrees = target.round(3).tolist()
+    return {"command": joint_line(degrees, s["joint_feed"]), "joints_deg": degrees,
+            "min_joint_margin_deg": margin, "min_tip_clearance_mm": minimum_gap, "contact_gap_mm": gap}
+
+
+def requested_motion_blocker(cfg):
+    """실물 로봇을 요청 자세로 움직이면 안 되는 이유(없으면 None). 로봇에는 아무것도 보내지 않는다."""
+    reasons = []
+    if not (cfg.get("requested_start_pose") or {}).get("tool_offset_verified", False):
+        reasons.append("펜 홀더 오프셋이 실물에서 검증되지 않았습니다.")
+    try:
+        plan_requested_contact(cfg)
+    except StartPoseError as e:
+        reasons.append(str(e))
+    return " ".join(reasons) or None
+
+
+def execute_requested_contact(link, cfg, should_stop=lambda: False):
+    """첫 자세에서 접촉 자세로 이동하고, 도착 상태를 확인한다."""
+    from .draw_executor import parse_status
+
+    if not getattr(link, "virtual", False) and not (cfg.get("requested_start_pose") or {}).get("tool_offset_verified", False):
+        raise StartPoseError("펜 홀더 오프셋이 실물 검증되지 않아 이동하지 않았습니다.")
+    plan = plan_requested_contact(cfg)
+    status = parse_status(link.query_status()[2])
+    actual, expected = status.get("joints_deg"), cfg["requested_start_pose"]["joints_deg"]
+    if status["state"] != "Idle" or actual is None or max(abs(a-b) for a, b in zip(actual, expected)) > 1.0:
+        raise StartPoseError("첫 시작 자세가 아니어서 접촉 이동을 중단했습니다.")
+    if should_stop():
+        raise StartPoseError("취소했습니다.")
+    link.send_and_ack(plan["command"], cfg["ack_timeout_s"])
+    link.wait_idle(cfg["idle_timeout_s"])
+    status = parse_status(link.query_status()[2])
+    actual = status.get("joints_deg")
+    if status["state"] != "Idle" or actual is None or max(abs(a-b) for a, b in zip(actual, plan["joints_deg"])) > 1.0:
+        raise StartPoseError("접촉 자세가 계획과 달라 이후 이동을 중단했습니다.")
+    return status
+
+
+def drawing_config_from_contact(cfg, status):
+    """실제로 확인한 접촉 자세를 이번 실행의 좌표·자세 기준으로 사용한다."""
+    try:
+        expected = np.asarray(cfg["requested_start_pose"]["contact_joints_deg"], dtype=float)
+        joints = np.asarray(status["joints_deg"], dtype=float)
+        tcp = np.asarray(status["tcp"], dtype=float)
+        abc = np.asarray(status["abc_deg"], dtype=float)
+    except (KeyError, TypeError, ValueError):
+        raise StartPoseError("접촉 자세의 관절값과 TCP·방향을 읽지 못했습니다.") from None
+    if (status.get("state") != "Idle" or expected.shape != (6,) or joints.shape != (6,)
+            or tcp.shape != (3,) or abc.shape != (3,) or not all(np.all(np.isfinite(x))
+            for x in (expected, joints, tcp, abc)) or np.max(np.abs(expected - joints)) > 1.0):
+        raise StartPoseError("접촉 자세의 Idle 상태와 관절값·TCP·방향이 일치하지 않습니다.")
+    result = copy.deepcopy(cfg)
+    result["paper_center_tcp_mm"] = dict(zip(("x", "y", "z"), tcp.tolist()))
+    result["orientation_deg"] = dict(zip(("a", "b", "c"), abc.tolist()))
+    result["simulation_start_joints_deg"] = joints.tolist()
+    result["pen"]["up_clearance_mm"] = 10.0                 # 획 사이에는 접촉점에서 10 mm 뒤로 뗀다
+    # 사용자가 정한 대로 접촉점보다 조금 더 눌러 그린다 (없으면 기존 설정값)
+    result["pen"]["down_extra_mm"] = float(cfg["requested_start_pose"].get(
+        "requested_pen_down_extra_mm", result["pen"].get("down_extra_mm", 0.0)))
+    return result
+
+
+def prepare_requested_drawing(link, cfg, should_stop=lambda: False):
+    """대기 자세에서 접촉 자세로 이동하고 보고된 실제 자세를 그리기 기준으로 만든다."""
+    return drawing_config_from_contact(cfg, execute_requested_contact(link, cfg, should_stop=should_stop))
+
+
+def drawing_config_from_recorded_contact(cfg):
+    """사전 시뮬레이션에 저장된 접촉 샘플을 사용한다. 실물 이동 후에는 다시 상태를 읽어야 한다."""
+    sample = (cfg.get("requested_start_pose") or {}).get("contact_status_sample") or {}
+    return drawing_config_from_contact(cfg, {"state": "Idle", "joints_deg": sample.get("joints_deg"),
+                                             "tcp": sample.get("tcp_mm"), "abc_deg": sample.get("abc_deg")})
+
+
+def execute_requested_return(link, cfg, should_stop=lambda: False):
+    """현재 관절 상태에서 검사된 경로를 통해 저장된 대기 자세로 돌아간다."""
+    from .draw_executor import parse_status
+
+    requested = cfg.get("requested_start_pose") or {}
+    if not getattr(link, "virtual", False) and not requested.get("tool_offset_verified", False):
+        raise StartPoseError("펜 홀더 오프셋이 실물 검증되지 않아 복귀하지 않았습니다.")
+    if should_stop():
+        raise StartPoseError("취소했습니다.")
+    status = parse_status(link.query_status()[2])
+    actual = status.get("joints_deg")
+    target = np.asarray(requested.get("joints_deg"), dtype=float)
+    if status["state"] != "Idle" or actual is None or target.shape != (6,) or not np.all(np.isfinite(target)):
+        raise StartPoseError("복귀 전 Idle 관절 상태 또는 대기 자세를 확인하지 못했습니다.")
+    if max(abs(a - b) for a, b in zip(actual, target)) <= 1.0:
+        return status
+    s = settings(cfg)
+    s.update(paper_x_mm=float(requested["wall_distance_mm"]),
+             pen_len_max_mm=float(requested["pen_length_mm"]), clearance_mm=0.0)
+    if "tool_offset_mm" in requested:
+        s["tool_offset_mm"] = requested["tool_offset_mm"]
+    _check_segments([np.radians(actual), np.radians(target)], s)
+    if should_stop():
+        raise StartPoseError("취소했습니다.")
+    link.send_and_ack(joint_line(target, s["joint_feed"]), cfg["ack_timeout_s"])
+    link.wait_idle(cfg["idle_timeout_s"])
+    status = parse_status(link.query_status()[2])
+    actual = status.get("joints_deg")
+    if status["state"] != "Idle" or actual is None or max(abs(a-b) for a, b in zip(actual, target)) > 1.0:
+        raise StartPoseError("대기 자세 복귀 위치를 확인하지 못했습니다.")
+    return status
+
+
+def _tip(q, pen_len, tool_offset_mm=None):
     flange, _ = ms.fk(q)
+    if tool_offset_mm is not None:
+        return flange[:3, 3] + flange[:3, :3] @ np.asarray(tool_offset_mm, dtype=float)
     return flange[:3, 3] + pen_len * flange[:3, 2]
 
 
@@ -87,7 +276,7 @@ def _check_segments(poses, s):
         for t in np.linspace(0.0, 1.0, SAMPLES + 1):
             q = a + (b - a) * t
             margin = float(np.degrees(np.minimum(q - lo, hi - q)).min())
-            tip = _tip(q, s["pen_len_max_mm"])
+            tip = _tip(q, s["pen_len_max_mm"], s.get("tool_offset_mm"))
             gap = s["paper_x_mm"] - float(tip[0])
             if margin < s["min_joint_margin_deg"]:
                 raise StartPoseError(f"{k}번째 이동에서 관절 한계 여유가 {margin:.1f}°입니다 "
@@ -515,9 +704,34 @@ def main():
     ap.add_argument("--config", default=None)
     ap.add_argument("--execute", action="store_true", help="실제 로봇으로 전송 (없으면 계획과 검사 결과만)")
     ap.add_argument("--virtual", action="store_true", help="가상 로봇으로 실행")
+    ap.add_argument("--requested", action="store_true", help="설정의 관절 시작 자세로 이동")
     args = ap.parse_args()
     cfg = de.load_config(args.config)
     s = settings(cfg)
+    if args.requested:
+        try:
+            plan = plan_requested_start(cfg)
+        except StartPoseError as e:
+            print(f"계획 실패: {e}")
+            return 2
+        print(f"요청 자세 관절 경로: {plan['joints_deg']}; 펜 끝-벽 최소 {plan['min_tip_clearance_mm']:.1f} mm")
+        if not (args.execute or args.virtual):
+            print("계획만 확인했습니다. 로봇은 움직이지 않았습니다.")
+            return 0
+        if args.execute and input("로봇 양옆과 이동 범위를 확인했으면 yes: ").strip().lower() != "yes":
+            print("취소했습니다.")
+            return 1
+        link = de.open_link(cfg, virtual=args.virtual, virtual_speed=20.0)
+        try:
+            de.connect_and_home(link, cfg)
+            status = execute_requested_start(link, cfg)
+            print(f"도착: 관절 {status['joints_deg']}, TCP {status['tcp']}")
+        except (de.DrawError, de.ControllerError, StartPoseError) as e:
+            print(f"멈춤: {getattr(e, 'message', e)}")
+            return 1
+        finally:
+            link.close()
+        return 0
     try:
         plan = plan_raise(cfg)
     except StartPoseError as e:

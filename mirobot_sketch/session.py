@@ -756,7 +756,8 @@ class SketchSession:
         with self.lock:
             self._need_result()
             strokes = [[tuple(pt) for pt in s] for s in self.result["strokes_mm"]]
-        res = ms.simulate(ms.plan_targets(strokes, self.cfg), progress=progress)
+        rotation, q0 = ms.simulation_pose(self.cfg)
+        res = ms.simulate(ms.plan_targets(strokes, self.cfg), progress=progress, r_goal=rotation, q0=q0)
         j = int(np.argmin(res["min_margin_deg"]))
         summary = {"verdict": ms.verdict(res), "min_margin_deg": round(float(res["min_margin_deg"][j]), 1),
                    "axis": ms.CONTROLLER_AXES[j], "samples": len(res["samples"])}

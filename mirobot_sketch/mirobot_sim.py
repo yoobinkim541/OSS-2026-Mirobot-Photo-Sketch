@@ -96,6 +96,23 @@ TOOL_OFFSET_MM = _T0[:3, :3].T @ (HOME_TCP_MM - _T0[:3, 3])
 HOME_ROT = _T0[:3, :3]
 
 
+def controller_rotation(abc_deg):
+    """컨트롤러 Rx/Ry/Rz(도)를 모델 플랜지 회전으로 변환한다."""
+    abc = np.asarray(abc_deg, dtype=float)
+    if abc.shape != (3,) or not np.all(np.isfinite(abc)):
+        raise ValueError("자세 각도는 유한한 숫자 3개여야 합니다.")
+    return _rpy(*np.radians(abc)) @ HOME_ROT
+
+
+def simulation_pose(cfg):
+    """실행기의 자세와 시뮬레이션 시작 관절을 같은 설정에서 읽는다."""
+    abc = cfg["orientation_deg"]
+    q = np.asarray(cfg.get("simulation_start_joints_deg", [0] * 6), dtype=float)
+    if q.shape != (6,) or not np.all(np.isfinite(q)):
+        raise ValueError("시뮬레이션 시작 관절은 유한한 숫자 6개여야 합니다.")
+    return controller_rotation([abc[k] for k in ("a", "b", "c")]), np.radians(q)
+
+
 def fk(q):
     return fk_chain(q, TOOL_OFFSET_MM)
 
@@ -457,7 +474,8 @@ def main():
     bad = de.check_limits(strokes, cfg)
     if bad:
         print(f"참고: 실행기 범위(limits)를 벗어난 점 {len(bad)}개 — 실행기는 이 경로를 거부합니다.")
-    result = simulate(plan_targets(strokes, cfg))
+    rotation, q0 = simulation_pose(cfg)
+    result = simulate(plan_targets(strokes, cfg), r_goal=rotation, q0=q0)
     print_report(result, title)
 
     if args.plot:
