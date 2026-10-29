@@ -312,13 +312,23 @@ class MirobotLink:
         """뺀 X가 보고될 때까지. 좌표가 없는 Idle은 통과하지 않는다."""
         return self._wait_settled(timeout, float(target_x), float(tol))
 
-    def wait_until_pose(self, pose, timeout, tol=1.5, yz_tol=1.0, contact_sign=1.0):
-        """이번 빼기 명령의 위치가 보고될 때까지.
-        첫 샘플이 이번 X·Y·Z와 맞으면 끝난 것으로 본다. 아니면 접촉 쪽 X를 한 번 본 뒤,
-        Idle이고 X가 목표일 때만 통과한다."""
-        x, y, z = pose
-        return self._wait_settled(timeout, float(x), float(tol), (float(y), float(z)), float(yz_tol),
-                                  float(contact_sign))
+    def wait_until_left_contact(self, contact_x, timeout, retract_sign=-1.0, min_mm=5.0):
+        """이번 획의 접촉 X를 본 뒤, 종이 반대쪽으로 min_mm 이상 움직인 보고가 올 때까지.
+        목표 X나 직전 빼기 X만 맞은 샘플은 통과하지 않는다."""
+        deadline = time.monotonic() + timeout
+        saw_contact = False
+        while time.monotonic() < deadline:
+            state, tcp, raw = self.query_status()
+            if any(t in raw.lower() for t in ERROR_TOKENS):
+                raise ControllerError(f"Idle 대기 중 오류 상태: {raw}")
+            if tcp is not None:
+                if abs(tcp[0] - contact_x) <= 2.0:
+                    saw_contact = True
+                away = (contact_x - tcp[0]) * (-float(retract_sign))
+                if saw_contact and away >= min_mm:
+                    return tcp
+            time.sleep(0.05)
+        raise ControllerError("펜이 종이에서 떨어진 위치를 확인하지 못했습니다")
 
     def _wait_settled(self, timeout, target_x, tol, target_yz=None, yz_tol=1.0, contact_sign=1.0):
         deadline = time.monotonic() + timeout
@@ -497,22 +507,7 @@ def write_run_record(meta, result, cfg):
     return path
 
 
-def _segment_s(from_x, line):
-    x = float(re.search(r"X([-\d.]+)", line).group(1))
-    feed = float(re.search(r"F([\d.]+)", line).group(1))
-    return abs(from_x - x) / feed * 60.0 if feed > 0 else 0.0
 
-
-def pen_up_pause_s(contact_line, lift_line, pen_up_line):
-    """옆 이동 전에 들기와 펜업이 끝날 시간(초). 상태 확인이 일찍 통과해도 이 시간만큼 명령을 보내지 않는다."""
-    if not contact_line:
-        return 0.0
-    x = float(re.search(r"X([-\d.]+)", contact_line).group(1))
-    total = 0.0
-    if lift_line:
-        total += _segment_s(x, lift_line)
-        x = float(re.search(r"X([-\d.]+)", lift_line).group(1))
-    return total + _segment_s(x, pen_up_line)
 
 
 def execute(link, cmds, cfg, progress=print, on_ack=None, should_stop=None):
@@ -522,9 +517,8 @@ def execute(link, cmds, cfg, progress=print, on_ack=None, should_stop=None):
     started = time.monotonic()
     sent = 0
     stop = should_stop or (lambda: False)
-    contact_sign = -float(cfg["pen"]["retract_x_sign"])
+    retract_sign = float(cfg["pen"]["retract_x_sign"])
     contact_line = None
-    lift_line = None
     try:
         for i, (line, label) in enumerate(cmds):
             if stop():
@@ -536,26 +530,17 @@ def execute(link, cmds, cfg, progress=print, on_ack=None, should_stop=None):
             sent = i + 1
             if on_ack:
                 on_ack(sent, len(cmds))
-            if label.endswith("pen-down") or i == len(cmds) - 1:
-                progress(f"  [{sent}/{len(cmds)}] {label}")
             if label.endswith("pen-down") or label.endswith("draw"):
                 contact_line = line
-                lift_line = None
-            elif label.endswith("lift"):
-                lift_line = line
-            # ok는 동작이 끝나기 전에 온다. 이번 빼기 위치가 보고된 뒤에만 옆 이동을 보낸다.
-            if label.endswith("pen-up"):
-                pose = tuple(float(v) for v in re.search(
-                    r"X([-\d.]+) Y([-\d.]+) Z([-\d.]+)", line).groups())
-                if hasattr(link, "wait_until_pose"):
-                    link.wait_until_pose(pose, cfg["idle_timeout_s"], contact_sign=contact_sign)
-                elif hasattr(link, "wait_until_x"):
-                    link.wait_until_x(pose[0], cfg["idle_timeout_s"])
-                else:
-                    link.wait_idle(cfg["idle_timeout_s"])
-                pause = pen_up_pause_s(contact_line, lift_line, line)
-                if pause > 0 and not getattr(link, "virtual", False):
-                    time.sleep(pause)   # 컨트롤러에는 명령을 더 넣지 않는다. G4도 보내지 않는다.
+            if label.endswith("pen-down") or i == len(cmds) - 1:
+                progress(f"  [{sent}/{len(cmds)}] {label}")
+            # 고정 대기는 없다. 이번 접촉에서 종이 반대쪽으로 움직인 보고 직후에 다음 위치로 간다.
+            if label.startswith("stroke ") and label.endswith("pen-up") and contact_line and hasattr(link, "wait_until_left_contact"):
+                contact_x = float(re.search(r"X([-\d.]+)", contact_line).group(1))
+                pen_up_x = float(re.search(r"X([-\d.]+)", line).group(1))
+                link.wait_until_left_contact(
+                    contact_x, cfg["idle_timeout_s"], retract_sign,
+                    max(1.0, abs(contact_x - pen_up_x) - 1.5))
         link.wait_idle(cfg["idle_timeout_s"])
         return {"result": "completed", "commands_sent": sent, "elapsed_s": round(time.monotonic() - started, 1)}
     except StopRequested:

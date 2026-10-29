@@ -36,10 +36,13 @@ class FakeSerial:
         self.fail_msg = fail_msg
         self.written = []
         self.x, self.y, self.z = "198.668", "0.000", "230.477"
+        self.held_x = None
 
     def _idle(self):
+        x = self.held_x if self.held_x is not None else self.x
+        self.held_x = None
         return ("<Idle,Angle(ABCDXYZ):0,0,0,0,0,0,0,"
-                f"Cartesian coordinate(XYZ RxRyRz):{self.x},{self.y},{self.z},0.000,0.000,0.000,"
+                f"Cartesian coordinate(XYZ RxRyRz):{x},{self.y},{self.z},0.000,0.000,0.000,"
                 "Pump PWM:0,Valve PWM:0,Motion_MODE:0>")
 
     def write(self, data):
@@ -47,6 +50,8 @@ class FakeSerial:
         self.written.append(text)
         m = re.search(r"^M20 .*X([-\d.]+) Y([-\d.]+) Z([-\d.]+)", text)
         if m:
+            if m.group(1) != self.x:
+                self.held_x = self.x
             self.x, self.y, self.z = m.groups()
         if text == "?":
             self.pending.append(self._idle())
@@ -443,7 +448,18 @@ class RetractConfirmTest(unittest.TestCase):
         tcp = self._run([_status("Idle"), _status("Jog", 218.0), _status("Idle", 190.0)])
         self.assertEqual(tcp[0], 190.0)
 
-    def _pose(self, statuses, pose, timeout=1.0):
+
+
+
+    def test_target_x_alone_does_not_mean_this_retract_started(self):
+        with self.assertRaises(de.ControllerError):
+            self._left([_status("Idle", 212.0)] * 30, 240.0)
+
+    def test_leaves_after_this_contact_is_seen(self):
+        tcp = self._left([_status("Idle", 240.0), _status("Idle", 220.0)], 240.0, min_mm=5.0)
+        self.assertEqual(tcp[0], 220.0)
+
+    def _left(self, statuses, contact_x, timeout=1.0, min_mm=5.0):
         clock = {"t": 0.0}
 
         def monotonic():
@@ -454,31 +470,9 @@ class RetractConfirmTest(unittest.TestCase):
 
         link = de.MirobotLink(ScriptedStatus(statuses))
         with mock.patch.object(de.time, "monotonic", monotonic), mock.patch.object(de.time, "sleep", sleep):
-            return link.wait_until_pose(pose, timeout)
+            return link.wait_until_left_contact(contact_x, timeout, -1.0, min_mm)
 
-    def test_previous_pen_up_x_does_not_pass_for_this_pose(self):
-        with self.assertRaises(de.ControllerError):
-            self._pose([_status("Idle", 190.2, y=-8.0, z=266.0)] * 30, (190.0, -6.9, 266.1))
 
-    def test_this_pen_up_pose_passes_on_the_first_sample(self):
-        tcp = self._pose([_status("Idle", 190.0, y=-6.9, z=266.1)], (190.0, -6.9, 266.1))
-        self.assertEqual(tcp[:3], (190.0, -6.9, 266.1))
-
-    def test_contact_then_this_pose_passes_without_run(self):
-        tcp = self._pose([
-            _status("Idle", 218.0, y=-6.9, z=266.1),
-            _status("Idle", 190.0, y=-6.9, z=266.1),
-        ], (190.0, -6.9, 266.1))
-        self.assertEqual(tcp[0], 190.0)
-
-    def test_every_pen_up_waits_for_lift_and_pen_up(self):
-        contact = "M20 G90 G01 X240.000 Y-6.900 Z266.100 A0.000 B-128.000 C0.000 F300"
-        lift = "M20 G90 G01 X231.000 Y-6.900 Z266.100 A0.000 B-128.000 C0.000 F200"
-        up = "M20 G90 G01 X213.000 Y-6.500 Z266.400 A0.000 B-128.000 C0.000 F600"
-        self.assertAlmostEqual(de.pen_up_pause_s(contact, lift, up), 4.5)
-        far = "M20 G90 G01 X213.000 Y-40.000 Z240.000 A0.000 B-128.000 C0.000 F600"
-        self.assertAlmostEqual(de.pen_up_pause_s(contact, lift, far), 4.5)
-        self.assertEqual(de.pen_up_pause_s(None, lift, up), 0.0)
 
 class OrientationTestFileTest(unittest.TestCase):
     def test_orientation_file_is_valid_and_in_limits(self):

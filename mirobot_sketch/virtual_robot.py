@@ -113,5 +113,8 @@ class VirtualMirobotLink:
     def wait_until_pose(self, pose, timeout, tol=1.5, yz_tol=1.0, contact_sign=1.0):
         return self.pos
 
+    def wait_until_left_contact(self, contact_x, timeout, retract_sign=-1.0, min_mm=5.0):
+        return self.pos
+
     def close(self):
         self.state = "closed"
