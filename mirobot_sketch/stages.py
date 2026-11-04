@@ -107,13 +107,24 @@ def _run_prep(prev, p):
 
 def _run_edges(prev, p):
     # 블러는 전처리에서 했으므로 여기서는 1(끔)
+    color, gray = prev["prep_color"], prev["prep_gray"]
+    missing = {}
+    if p.get("lineart"):
+        from . import lineart
+        try:
+            art, e = lineart.ink_mask(prev["color"])
+        except lineart.LineartUnavailable as why:     # 오프라인 첫 실행 등: 기존 선 검출로 그리고 이유를 알림
+            missing = {"lineart_missing": f"{why} 선화 대신 기본 선 검출로 그렸습니다."}
+        else:
+            gray = cv2.cvtColor(art, cv2.COLOR_BGR2GRAY)
+            return {**prev, "prep_color": art, "prep_gray": gray, "edges": e, "lineart_used": True}
     if p["edge_mode"] == "dark":
-        e = sp.compute_dark_mask(prev["prep_gray"], 1)
+        e = sp.compute_dark_mask(gray, 1)
     elif p["edge_mode"] == "lab":
-        e = sp.compute_edges_lab(prev["prep_color"], p["canny_low"], p["canny_high"], 1)
+        e = sp.compute_edges_lab(color, p["canny_low"], p["canny_high"], 1)
     else:
-        e = sp.compute_edges(prev["prep_gray"], p["canny_low"], p["canny_high"], 1)
-    return {**prev, "edges": e}
+        e = sp.compute_edges(gray, p["canny_low"], p["canny_high"], 1)
+    return {**prev, "edges": e, **missing}
 
 
 def _run_trace(prev, p):
@@ -127,17 +138,53 @@ def _run_dedupe(prev, p):
         return {**prev, "discarded_dedupe": []}
     disc = []
     st = sp.dedupe_strokes(prev["strokes"], prev["edges"].shape, int(p["dedupe_px"]), discarded=disc)
+    gray = prev.get("prep_gray", prev.get("gray"))
+    if gray is not None and prev.get("region") is not None:
+        gap = _px_per_mm(prev, p) * INK_TWIN_MM          # 종이에서 이 거리(mm) 안, 사이가 먹인 쌍만
+        faces = prev.get("faces") or []
+        protect = np.vstack([np.asarray(f.landmarks, np.float64) for f in faces]) if faces else None
+        protect_px = 0.14 * max(float(f.box[2]) for f in faces) if faces else 0
+        st = sp.drop_ink_twins(st, gray, gap, discarded=disc, protect_xy=protect, protect_px=protect_px)
     return {**prev, "strokes": st, "discarded_dedupe": disc}
 
 
+LINEART_GAP_PX = 12.0      # 선화의 점선처럼 끊긴 선을 이을 끝점 거리 (작업 이미지 px)
+LINEART_MIN_PX = 14.0      # 이었는데도 이보다 짧은 열린 토막은 버림 (펜으로 그리면 지저분한 점선이 됨)
+INK_TWIN_MM = 2.0          # 굵은 선 양쪽 경계를 하나로 보는 종이 거리 (1.2 mm보다 넓게, 사이가 밝은 선은 남김)
+
+
 def _run_merge(prev, p):
-    if not p["merge_join_px"]:
-        return dict(prev)
-    return {**prev, "strokes": sp.merge_strokes(prev["strokes"], p["merge_join_px"])}
+    strokes = prev["strokes"]
+    if p["merge_join_px"]:
+        strokes = sp.merge_strokes(strokes, p["merge_join_px"])
+    if prev.get("lineart_used"):                    # 선화를 그대로 따라 그림: 점선처럼 끊긴 선만 잇고 짧은 토막은 버림
+        strokes = sp.join_gaps(strokes, LINEART_GAP_PX)
+        near = _near_features(strokes, prev.get("faces") or [])
+        strokes = [q for q, keep in zip(strokes, near)
+                   if keep or sp.is_closed(q) or sp.polyline_length(q) >= LINEART_MIN_PX]
+        # 짧은 획(눈동자 고리 등)은 세게 펴면 점으로 오그라듦: 길이에 맞춰 약하게
+        strokes = [sp.smooth_strokes([q], min(3.0, sp.polyline_length(q) / 20.0))[0] for q in strokes]
+    return {**prev, "strokes": strokes}
+
+
+def _near_features(strokes, faces):
+    """획마다 눈·코·입 랜드마크 가까이(얼굴 폭의 12% 이내)에 닿는지. 작은 눈·콧구멍은 짧아도 남기기 위함."""
+    marks = [(np.asarray(f.landmarks, np.float64), 0.12 * float(f.box[2])) for f in faces]
+    out = []
+    for q in strokes:
+        q = np.asarray(q, np.float64)
+        out.append(any(np.min(np.linalg.norm(q[:, None, :] - lm[None, :, :], axis=2)) <= r for lm, r in marks))
+    return out
 
 
 FACE_REASON = "얼굴 세밀 처리로 교체"
 GREEN = (40, 160, 40)
+def _px_per_mm(prev, p):
+    """작업 이미지에서 종이 1 mm가 몇 px인지. 구도로 줄어든 실제 크기를 쓴다."""
+    h, w = prev["gray"].shape[:2] if "gray" in prev else prev["prep_gray"].shape[:2]
+    region = prev.get("region")
+    long_mm = limits.effective_long_mm(region, p["box_mm"], w, h) if region is not None and "box_mm" in p else float(p.get("box_mm", 100))
+    return max(h, w) / max(long_mm, 1.0)
 
 
 def _face_strokes(crop, face, p, pen_px):
@@ -173,6 +220,8 @@ def _face_pen_px(prev, p):
 def _run_face(prev, p):
     found = prev.get("faces") or []
     if not found or not p["face_detail"]:
+        return {**prev, "discarded_face": [], "faces_used": 0, "uses_deps": False}
+    if prev.get("lineart_used"):                    # 선화가 눈·입까지 그리므로 얼굴만 따로 다시 따지 않음
         return {**prev, "discarded_face": [], "faces_used": 0, "uses_deps": False}
     pen_px = _face_pen_px(prev, p)
     strokes, gone = list(prev["strokes"]), []
@@ -255,8 +304,10 @@ STAGES = (
                   help="클수록 잔선이 줄고 윤곽이 부드러워짐")),
         _run_prep, lambda o: _bgr(o["prep_gray"])),
     Stage("edges", "선 검출", (
+        ParamSpec("lineart", "실사 선화로 바꾼 뒤 따기", "bool", False,
+                  help="실사만. 선화 모델(처음 한 번 내려받음)이 그린 선을 그대로 따라 그림. 모델을 못 쓰면 아래 방식으로"),
         ParamSpec("edge_mode", "방식", "choice", "luma", choices=EDGE_MODES,
-                  help="밝기=흑백 Canny, 색 차이=Lab Canny(밝기가 같은 색 경계도 찾음), 어두운 선=선화 중심선"),
+                  help="선화를 끈 때: 밝기=흑백 Canny, 색 차이=Lab Canny, 어두운 선=선화 중심선"),
         ParamSpec("canny_low", "약한 선 민감도 (Canny 하한)", "int", _hi[0], 0, 255, help="낮을수록 약한 선도 잡음"),
         ParamSpec("canny_high", "강한 선 기준 (Canny 상한)", "int", _hi[1], 0, 400, help="선이 시작되는 강한 경계 기준")),
         _run_edges, lambda o: _bgr(255 - o["edges"])),
@@ -266,7 +317,7 @@ STAGES = (
         _run_trace, lambda o: draw_strokes_colored(o["strokes"], o["gray"].shape, o["discarded_trace"])),
     Stage("dedupe", "겹침 제거", (
         ParamSpec("dedupe_px", "겹친 선 합치기 (px, 0=끔)", "int", presets.DEFAULT_DEDUPE_PX, 0, 8,
-                  help="이 거리 안에서 겹치는 선은 하나만 남김"),),
+                  help="이 거리 안에서 겹치는 선은 하나만 남김. 사이가 먹인 굵은 선 양쪽은 종이 2 mm까지 하나로 합치고, 사이가 밝은 선과 눈·입은 남김"),),
         _run_dedupe, lambda o: draw_strokes_colored(o["strokes"], o["gray"].shape, o["discarded_dedupe"])),
     Stage("merge", "이어 붙이기", (
         ParamSpec("merge_join_px", "끊긴 선 이어 붙이기 (px, 0=끔)", "float", presets.DEFAULT_MERGE_JOIN_PX, 0, 8, 0.5,

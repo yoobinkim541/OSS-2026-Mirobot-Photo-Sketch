@@ -1,6 +1,7 @@
 {
  "_about": "robot/draw_executor.py 설정. 값을 바꾸면 LOG에 이유와 결과를 기록할 것.",
- "port": "COM9",
+ "port": "auto",
+ "_port_note": "auto = 로봇 USB(WCH CH340/CH341/CH9102) 포트를 자동으로 찾음. COM 이름을 적으면 그 포트를 먼저 쓰고, 없으면 자동으로 찾음. 로봇 USB가 여러 개면 COM 이름을 적을 것.",
  "baud": 115200,
 
  "paper_center_tcp_mm": {"x": 198.668, "y": 0.0, "z": 230.477},

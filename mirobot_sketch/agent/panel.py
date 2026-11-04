@@ -15,13 +15,7 @@ import customtkinter as ctk
 
 from . import backends as bk
 
-PANEL_BG = ("#f7f8fa", "#171a21")
-BUBBLE = ("#e8ecf3", "#2a2f3a")
-CARD = ("#ffffff", "#1f2430")
-BORDER = ("#dde2ea", "#303644")
-TEXT = ("#111827", "#e5e7eb")
-MUTED = ("#6b7280", "#9aa3b2")
-ACCENT = ("#2563eb", "#3b82f6")
+from ..theme import ACCENT, BG as PANEL_BG, BORDER, CARD, MUTED, SURFACE as BUBBLE, TEXT
 ERR_BG = ("#fdecec", "#3a2226")
 ERR_FG = ("#b42318", "#f7a8a8")
 
@@ -39,7 +33,8 @@ QUICK_PROMPTS = [
 
 class AgentPanel(ctk.CTkFrame):
     def __init__(self, master, app, toolbox, bridge, font, icon_image=None, on_close=None):
-        super().__init__(master, fg_color=PANEL_BG, corner_radius=14, width=420)
+        super().__init__(master, fg_color=PANEL_BG, corner_radius=16, width=380,
+                         border_width=1, border_color=BORDER)
         self.app, self.toolbox, self.bridge, self.font = app, toolbox, bridge, font
         self.on_close = on_close
         self.settings = bk.load_settings()
@@ -111,14 +106,15 @@ class AgentPanel(ctk.CTkFrame):
     def _show_empty(self):
         self._clear_chat()
         box = ctk.CTkFrame(self.chat, fg_color="transparent")
-        box.grid(row=0, column=0, pady=(120, 0))
+        box.grid(row=0, column=0, pady=(70, 0), padx=12)
         if self.icon_image is not None:
             ctk.CTkLabel(box, image=self.icon_image, text="").pack()
         ctk.CTkLabel(box, text="무엇을 도와드릴까요?", font=self.font(16, "bold")).pack(pady=(10, 4))
         ctk.CTkLabel(box, text="대화로 처리 설정을 바꾸고 획을 정리하고, 로봇으로 그릴 준비가 됐는지 확인합니다.\n"
                                "예: “배경 잡음을 지워줘”, “10분 안에 끝나게 해줘”, “로봇으로 그려도 되는지 봐줘”",
-                     font=self.font(12), text_color=MUTED, justify="center", wraplength=340).pack()
-        ctk.CTkLabel(box, text="로봇 연결·시작은 사용자가 '로봇으로 그리기' 창에서 직접 합니다.", font=self.font(11), text_color=MUTED).pack(pady=(8, 0))
+                     font=self.font(12), text_color=MUTED, justify="center", wraplength=300).pack()
+        ctk.CTkLabel(box, text="로봇 연결·시작은 사용자가 '로봇으로 그리기' 창에서 직접 합니다.",
+                     font=self.font(11), text_color=MUTED, wraplength=300).pack(pady=(12, 0))
         self._empty = True
 
     def _row(self):
@@ -137,7 +133,7 @@ class AgentPanel(ctk.CTkFrame):
 
     def add_assistant(self, text):
         r = self._row()
-        ctk.CTkLabel(self.chat, text=text.strip(), font=self.font(13), text_color=TEXT, wraplength=360,
+        ctk.CTkLabel(self.chat, text=text.strip(), font=self.font(13), text_color=TEXT, wraplength=310,
                      justify="left", anchor="w").grid(row=r, column=0, sticky="w", padx=10, pady=6)
         self._scroll_end()
 
@@ -168,7 +164,7 @@ class AgentPanel(ctk.CTkFrame):
         r = self._row()
         card = ctk.CTkFrame(self.chat, fg_color=ERR_BG, corner_radius=14)
         card.grid(row=r, column=0, sticky="ew", padx=8, pady=6)
-        ctk.CTkLabel(card, text="⚠  " + text, font=self.font(12), text_color=ERR_FG, wraplength=360,
+        ctk.CTkLabel(card, text="⚠  " + text, font=self.font(12), text_color=ERR_FG, wraplength=290,
                      justify="left", anchor="w").pack(fill="x", padx=12, pady=(10, 4 if action else 10))
         if action == "login":
             ctk.CTkButton(card, text="로그인 창 열기", font=self.font(12, "bold"), height=30, corner_radius=15,

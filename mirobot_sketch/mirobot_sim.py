@@ -96,8 +96,38 @@ TOOL_OFFSET_MM = _T0[:3, :3].T @ (HOME_TCP_MM - _T0[:3, 3])
 HOME_ROT = _T0[:3, :3]
 
 
+def controller_rotation(abc_deg):
+    """컨트롤러 Rx/Ry/Rz(도)를 모델 플랜지 회전으로 변환한다."""
+    abc = np.asarray(abc_deg, dtype=float)
+    if abc.shape != (3,) or not np.all(np.isfinite(abc)):
+        raise ValueError("자세 각도는 유한한 숫자 3개여야 합니다.")
+    return _rpy(*np.radians(abc)) @ HOME_ROT
+
+
+def simulation_pose(cfg):
+    """실행기의 자세와 시뮬레이션 시작 관절을 같은 설정에서 읽는다."""
+    abc = cfg["orientation_deg"]
+    q = np.asarray(cfg.get("simulation_start_joints_deg", [0] * 6), dtype=float)
+    if q.shape != (6,) or not np.all(np.isfinite(q)):
+        raise ValueError("시뮬레이션 시작 관절은 유한한 숫자 6개여야 합니다.")
+    return controller_rotation([abc[k] for k in ("a", "b", "c")]), np.radians(q)
+
+
 def fk(q):
     return fk_chain(q, TOOL_OFFSET_MM)
+
+
+def joint_axes(q):
+    """관절각(rad) -> 관절 6개의 회전축 방향(로봇 좌표, 단위 벡터) (6, 3)."""
+    t = np.eye(4)
+    axes = []
+    for fixed, (_, _, axis), qi in zip(_FIXED, URDF_JOINTS, q):
+        t = t @ fixed
+        axes.append(t[:3, :3] @ np.asarray(axis, float))
+        rot = np.eye(4)
+        rot[:3, :3] = _axis_angle(axis, qi)
+        t = t @ rot
+    return np.array(axes)
 
 
 def _rot_error(r_cur, r_goal):
@@ -183,11 +213,12 @@ class SimulationCancelled(Exception):
     """progress 콜백이 던지면 시뮬레이션을 중간에 멈춘다 (더 이상 필요 없는 백그라운드 계산을 끝냄)."""
 
 
-def simulate(targets, step_mm=1.0, progress=None):
+def simulate(targets, step_mm=1.0, progress=None, r_goal=HOME_ROT, q0=None):
     """직선 보간하며 IK. 반환 dict: samples(q, tcp, 설명, pen_down), 위반/실패 목록, 관절별 최소 여유.
     progress(끝낸 명령 수, 전체 명령 수)는 명령마다 불려 화면이 진행률을 보여 줄 수 있고,
-    SimulationCancelled를 던지면 그대로 밖으로 나와 계산을 멈춘다."""
-    q = np.zeros(6)
+    SimulationCancelled를 던지면 그대로 밖으로 나와 계산을 멈춘다.
+    r_goal: 경로 내내 고정할 플랜지 자세(기본: 홈 자세, 펜이 아래). q0: IK 시작 관절각(기본: 0)."""
+    q = np.zeros(6) if q0 is None else np.array(q0, float)
     samples = []
     failures = []
     prev = targets[0][0]
@@ -205,7 +236,7 @@ def simulate(targets, step_mm=1.0, progress=None):
             # (해는 같음: 관절각 차이 1e-5 rad 이하)
             q_start = q if q_before is None else q + (q - q_before)
             q_before = q
-            q, err, ok = ik(p, q_start)
+            q, err, ok = ik(p, q_start, r_goal=r_goal)
             if not ok:
                 failures.append({"command": label, "target_mm": p.round(2).tolist(), "pos_error_mm": round(err, 3)})
             samples.append((q.copy(), p.copy(), label, pen_down, t - 1))   # 마지막 값: G-code 명령 번호
@@ -443,7 +474,8 @@ def main():
     bad = de.check_limits(strokes, cfg)
     if bad:
         print(f"참고: 실행기 범위(limits)를 벗어난 점 {len(bad)}개 — 실행기는 이 경로를 거부합니다.")
-    result = simulate(plan_targets(strokes, cfg))
+    rotation, q0 = simulation_pose(cfg)
+    result = simulate(plan_targets(strokes, cfg), r_goal=rotation, q0=q0)
     print_report(result, title)
 
     if args.plot:

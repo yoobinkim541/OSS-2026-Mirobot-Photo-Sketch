@@ -31,6 +31,13 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+## Informative Drawings 선화 모델
+
+- **파일:** 저장소·설치 파일에 들어 있지 않습니다. 앱이 처음 실사 사진을 처리할 때 이 프로젝트의 GitHub Releases(`models-v1`의 `informative_drawings.onnx`)에서 내려받아 SHA256을 확인한 뒤 캐시 폴더(`out/cache/models/`, 설치판은 사용자 폴더의 `cache/models/`)에 둡니다.
+- **출처:** Caroline Chan, Frédo Durand, Phillip Isola, "Learning to generate line drawings that convey geometry and semantics", CVPR 2022. 코드 https://github.com/carolineec/informative-drawings (MIT License). ONNX 변환본 https://huggingface.co/rocca/informative-drawings-line-art-onnx (`model.onnx`)
+- **SHA256:** `1fef40b8f7126d827e30fbebccf95ae9b0b391795df926bf9366a821bad4f498`
+- **용도:** 실사 사진을 선화로 바꾼 뒤 획을 땁니다 (`mirobot_sketch/lineart.py`).
+
 ## 예시 사진 (README·문서 스크린샷)
 
 - **파일:** `assets/sample/sample-portrait.jpg` (원본을 긴 변 1400px로 줄임)

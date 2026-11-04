@@ -101,7 +101,8 @@ class SketchSession:
                 t = presets.IMAGE_TYPES[image_type]
                 self.image_type = image_type
                 self.detail = t["detail"]
-                self.params.update(rembg=t["rembg"], median_ksize=t["median"])
+                self.params.update(rembg=t["rembg"], median_ksize=t["median"],
+                                   lineart=bool(t.get("lineart", False)))
             if detail:
                 if detail not in presets.DETAIL_PRESETS:
                     raise SessionError(f"알 수 없는 상세도: {detail} (가능: low, medium, high)")
@@ -317,6 +318,8 @@ class SketchSession:
                             self.notice = "구도가 바뀌어 편집 기록을 초기화했습니다"
                         if fr["notice"]:
                             self.notice += f" · {fr['notice']}"
+                        if outs["edges"].get("lineart_missing"):
+                            self.notice += f" · {outs['edges']['lineart_missing']}"
                         self._last_simplify = outs["simplify"]
                         self._fit_outline = [e["poly"] for e in self.table.values() if e["kind"] == "stroke"]
                     # 명암 빗금은 윤곽과 함께 배치를 정함 (빗금 설정만 바뀌어도 다시 맞춤)
@@ -755,7 +758,8 @@ class SketchSession:
         with self.lock:
             self._need_result()
             strokes = [[tuple(pt) for pt in s] for s in self.result["strokes_mm"]]
-        res = ms.simulate(ms.plan_targets(strokes, self.cfg), progress=progress)
+        rotation, q0 = ms.simulation_pose(self.cfg)
+        res = ms.simulate(ms.plan_targets(strokes, self.cfg), progress=progress, r_goal=rotation, q0=q0)
         j = int(np.argmin(res["min_margin_deg"]))
         summary = {"verdict": ms.verdict(res), "min_margin_deg": round(float(res["min_margin_deg"][j]), 1),
                    "axis": ms.CONTROLLER_AXES[j], "samples": len(res["samples"])}

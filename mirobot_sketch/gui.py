@@ -41,6 +41,7 @@ from . import paths, presets, stages
 from . import sketch_pipeline as sp
 from .session import SketchSession
 from .stage_view import BigView, ParamControls, ProposalBar, StageStrip
+from .theme import ACCENT, BAD, BG, BORDER, CARD, MUTED, OK, SURFACE, TEXT, WARN, configure_widgets
 
 # 한글이 네모로 깨지지 않도록 설치된 한글 글꼴 사용 (Windows: 맑은 고딕)
 FONT = "Malgun Gothic"
@@ -51,12 +52,6 @@ for _font in ("Malgun Gothic", "AppleGothic", "NanumGothic", "Noto Sans CJK KR")
         break
 matplotlib.rcParams["axes.unicode_minus"] = False
 
-ACCENT = ("#2563eb", "#3b82f6")          # (라이트, 다크)
-CARD = ("#ffffff", "#1f2430")
-BG = ("#eef1f6", "#141821")
-MUTED = ("#6b7280", "#9aa3b2")
-TEXT = ("#1f2937", "#e5e7eb")
-OK, WARN, BAD = "#16a34a", "#d97706", "#dc2626"
 
 TYPE_KEYS = list(presets.IMAGE_TYPES)                          # photo / illustration / manga
 TYPE_LABELS = [presets.IMAGE_TYPES[k]["label"] for k in TYPE_KEYS]
@@ -74,25 +69,37 @@ class Card(ctk.CTkFrame):
     """제목이 있는 둥근 카드."""
 
     def __init__(self, master, title=None, **kw):
-        super().__init__(master, fg_color=CARD, corner_radius=14, **kw)
+        super().__init__(master, fg_color=CARD, corner_radius=16, border_width=1, border_color=BORDER, **kw)
         if title:
-            ctk.CTkLabel(self, text=title, font=font(14, "bold"), anchor="w").pack(fill="x", padx=14, pady=(12, 4))
+            ctk.CTkLabel(self, text=title, font=font(13, "bold"), text_color=TEXT,
+                         anchor="w").pack(fill="x", padx=16, pady=(14, 8))
 
 
 class StatCard(ctk.CTkFrame):
     """아래쪽 요약 카드: 제목 / 큰 값 / 설명."""
 
     def __init__(self, master, title):
-        super().__init__(master, fg_color=CARD, corner_radius=14)
-        ctk.CTkLabel(self, text=title, font=font(12), text_color=MUTED, anchor="w").pack(fill="x", padx=14, pady=(10, 0))
-        self.value = ctk.CTkLabel(self, text="—", font=font(24, "bold"), anchor="w")
-        self.value.pack(fill="x", padx=14)
+        super().__init__(master, fg_color=CARD, corner_radius=14, border_width=1, border_color=BORDER)
+        ctk.CTkLabel(self, text=title, font=font(11), text_color=MUTED, anchor="w").pack(fill="x", padx=16, pady=(12, 2))
+        self._value_font = font(23, "bold")
+        self.value = ctk.CTkLabel(self, text="—", font=self._value_font, text_color=TEXT,
+                                  anchor="w", justify="left")
+        self.value.pack(fill="x", padx=16)
         self.sub = ctk.CTkLabel(self, text="", font=font(11), text_color=MUTED, anchor="w", justify="left",
-                                wraplength=260)
-        self.sub.pack(fill="x", padx=14, pady=(0, 10))
+                                wraplength=230)
+        self.sub.pack(fill="x", padx=16, pady=(2, 12))
+        self.bind("<Configure>", self._resize_content, add="+")
+
+    def _resize_content(self, event):
+        width = max(60, int(event.width / self._get_widget_scaling()) - 32)
+        self.value.configure(wraplength=width)
+        self.sub.configure(wraplength=width)
+        size = 18 if width < 160 else 23
+        if self._value_font.cget("size") != size:
+            self._value_font.configure(size=size)
 
     def set(self, value, sub="", color=None):
-        self.value.configure(text=value, text_color=color or ("#111827", "#f3f4f6"))
+        self.value.configure(text=value, text_color=color or TEXT)
         self.sub.configure(text=sub)
 
 
@@ -105,17 +112,29 @@ GIL_SWITCH_INTERVAL_S = 0.0005
 class SketchApp:
     def __init__(self, root):
         sys.setswitchinterval(GIL_SWITCH_INTERVAL_S)
+        configure_widgets()
         self.root = root
         self._closing = False
         self._ui_after = self._usb_after = self._icon_after = None
         self.root.title("Mirobot Sketch")
-        self.root.geometry("1560x940")
+        # Keep the minimum workspace usable on high-DPI laptop displays.
+        scale = self.root._get_window_scaling()
+        fit = min(1.0, (root.winfo_screenwidth() - 60) / (1200 * scale),
+                  (root.winfo_screenheight() - 100) / (760 * scale))
+        if fit < 1.0:
+            ctk.set_widget_scaling(fit)
+            ctk.set_window_scaling(fit)
+            scale = self.root._get_window_scaling()
+        width = min(1560, int((root.winfo_screenwidth() - 60) / scale))
+        height = min(940, int((root.winfo_screenheight() - 100) / scale))
+        self.root.geometry(f"{width}x{height}")
         self.root.minsize(1200, 760)
         self.root.configure(fg_color=BG)
         self._set_icon()
 
         self.cfg = de.load_config()
         self._robot_usb_scan_busy = False
+        self.robot_port_label = "USB 자동 감지"
         # 이미지·설정·결과·편집 기록은 세션 하나에 둠 (화면 버튼과 에이전트 도구가 함께 사용)
         self.session = SketchSession(self.cfg)
         self.busy = False
@@ -189,44 +208,57 @@ class SketchApp:
         self.root.grid_columnconfigure(1, weight=1)
         self.root.grid_rowconfigure(1, weight=1)
 
-        # --- 머리글
-        header = ctk.CTkFrame(self.root, fg_color="transparent")
-        header.grid(row=0, column=0, columnspan=3, sticky="ew", padx=18, pady=(14, 6))
+        # --- 머리글: 브랜드와 연결 상태를 분리
+        header = ctk.CTkFrame(self.root, fg_color=CARD, corner_radius=0)
+        header.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 12))
+        brand = ctk.CTkFrame(header, fg_color="transparent")
+        brand.pack(side="left", padx=24, pady=10)
         if paths.asset("app_icon_256.png").exists():
             from PIL import Image
-            logo = ctk.CTkImage(Image.open(paths.asset("app_icon_256.png")), size=(40, 40))
-            ctk.CTkLabel(header, image=logo, text="").pack(side="left", padx=(0, 10))
-        title = ctk.CTkFrame(header, fg_color="transparent")
+            logo = ctk.CTkImage(Image.open(paths.asset("app_icon_256.png")), size=(38, 38))
+            ctk.CTkLabel(brand, image=logo, text="").pack(side="left", padx=(0, 12))
+        title = ctk.CTkFrame(brand, fg_color="transparent")
         title.pack(side="left")
-        ctk.CTkLabel(title, text="Mirobot Sketch", font=font(22, "bold"), anchor="w").pack(anchor="w")
-        ctk.CTkLabel(title, text="사진을 로봇 팔이 그릴 수 있는 선으로", font=font(12), text_color=MUTED,
-                     anchor="w").pack(anchor="w")
-        self.mode = ctk.CTkSegmentedButton(header, values=["라이트", "다크"], command=self.set_mode, font=font(12))
+        ctk.CTkLabel(title, text="Mirobot Sketch", font=font(21, "bold"), anchor="w").pack(anchor="w")
+        ctk.CTkLabel(title, text="사진에서 시작하는 로봇 드로잉 스튜디오", font=font(11),
+                     text_color=MUTED, anchor="w").pack(anchor="w")
+        self.mode = ctk.CTkSegmentedButton(header, values=["라이트", "다크"], command=self.set_mode,
+                                          font=font(12), height=32)
         self.mode.set("다크" if ctk.get_appearance_mode() == "Dark" else "라이트")
-        self.mode.pack(side="right")
-        self.agent_btn = ctk.CTkButton(header, text="✦ 에이전트", command=self.toggle_agent, font=font(13),
-                                       height=32, width=110, fg_color="transparent", border_width=1,
-                                       text_color=TEXT)
-        self.agent_btn.pack(side="right", padx=(0, 10))
-        self.robot_usb_status = ctk.CTkLabel(header, text="USB: 확인 중", font=font(11), text_color=MUTED)
-        self.robot_usb_status.pack(side="right", padx=(0, 12))
-        self.robot_controller_status = ctk.CTkLabel(header, text="제어기 상태: 미확인", font=font(11),
+        self.mode.pack(side="right", padx=(0, 24))
+        self.agent_btn = ctk.CTkButton(header, text="✦ 에이전트", command=self.toggle_agent, font=font(12, "bold"),
+                                       height=34, width=112, fg_color="transparent", border_width=1,
+                                       text_color=TEXT, hover_color=SURFACE)
+        self.agent_btn.pack(side="right", padx=(12, 12))
+        connection = ctk.CTkFrame(header, fg_color=BG, corner_radius=10)
+        connection.pack(side="right", pady=16)
+        self.robot_usb_status = ctk.CTkLabel(connection, text="USB: 확인 중", font=font(11), text_color=MUTED)
+        self.robot_usb_status.pack(side="right", padx=(8, 12), pady=6)
+        self.robot_controller_status = ctk.CTkLabel(connection, text="제어기 상태: 미확인", font=font(11),
                                                     text_color=MUTED)
-        self.robot_controller_status.pack(side="right", padx=(0, 10))
+        self.robot_controller_status.pack(side="left", padx=(12, 8), pady=6)
 
         # --- 왼쪽 설정 패널
-        side = ctk.CTkScrollableFrame(self.root, width=340, fg_color="transparent")
-        side.grid(row=1, column=0, sticky="ns", padx=(18, 8), pady=(0, 18))
+        sidebar = ctk.CTkFrame(self.root, fg_color="transparent")
+        sidebar.grid(row=1, column=0, sticky="ns", padx=(18, 8), pady=(0, 18))
+        sidebar.grid_rowconfigure(0, weight=1)
+        sidebar.grid_columnconfigure(0, weight=1)
+        side = ctk.CTkScrollableFrame(sidebar, width=320, fg_color="transparent",
+                                     scrollbar_button_color=BORDER)
+        side.grid(row=0, column=0, sticky="nsew")
+        ctk.CTkLabel(side, text="작업 설정", font=font(17, "bold"), anchor="w").pack(
+            fill="x", padx=4, pady=(0, 8))
 
-        c1 = Card(side, "① 이미지")
-        c1.pack(fill="x", pady=(0, 10))
-        self.open_btn = ctk.CTkButton(c1, text="이미지 열기", command=self.open_image, font=font(13), height=36,
-                                      fg_color=ACCENT)
+        c1 = Card(side, "01   이미지 가져오기")
+        c1.pack(fill="x", pady=(0, 12))
+        self.open_btn = ctk.CTkButton(c1, text="+  이미지 열기", command=self.open_image,
+                                      font=font(13, "bold"), height=40, fg_color=ACCENT)
         self.open_btn.pack(fill="x", padx=14)
         self.path_label = ctk.CTkLabel(c1, text="선택된 파일 없음", font=font(11), text_color=MUTED,
                                        wraplength=300, anchor="w", justify="left")
         self.path_label.pack(fill="x", padx=14, pady=(4, 8))
-        ctk.CTkLabel(c1, text="이미지 종류 (추천 설정 적용)", font=font(12), anchor="w").pack(fill="x", padx=14)
+        ctk.CTkLabel(c1, text="이미지 종류  ·  추천 설정", font=font(11), text_color=MUTED,
+                     anchor="w").pack(fill="x", padx=14)
         self.type_seg = ctk.CTkSegmentedButton(c1, values=TYPE_LABELS, command=lambda _: self.apply_type_preset(),
                                                font=font(12))
         self.type_seg.set(presets.IMAGE_TYPES["illustration"]["label"])
@@ -235,8 +267,8 @@ class SketchApp:
                                       anchor="w", justify="left")
         self.type_hint.pack(fill="x", padx=14, pady=(2, 12))
 
-        c2 = Card(side, "② 상세도")
-        c2.pack(fill="x", pady=(0, 10))
+        c2 = Card(side, "02   선의 상세도")
+        c2.pack(fill="x", pady=(0, 12))
         self.detail_seg = ctk.CTkSegmentedButton(c2, values=DETAIL_LABELS, command=lambda _: self.apply_detail_preset(),
                                                  font=font(12))
         self.detail_seg.set("높음")
@@ -244,26 +276,31 @@ class SketchApp:
 
         self.ctrl_card = Card(side)
         self.ctrl_card.pack(fill="x", pady=(0, 10))
-        self.ctrl_title = ctk.CTkLabel(self.ctrl_card, text="", font=font(14, "bold"), anchor="w")
-        self.ctrl_title.pack(fill="x", padx=14, pady=(12, 0))
+        self.ctrl_title = ctk.CTkLabel(self.ctrl_card, text="", font=font(13, "bold"), anchor="w")
+        self.ctrl_title.pack(fill="x", padx=16, pady=(14, 6))
         self.controls = None
         self._controls_cache = {}       # 단계별 조절 칸: 한 번 만들어 두고 보이기/숨기기만 함 (단계 전환이 빠르도록)
 
-        c3 = Card(side, "③ 실행")
-        c3.pack(fill="x", pady=(0, 10))
-        self.run_btn = ctk.CTkButton(c3, text="지금 다시 계산", command=lambda: self._schedule_recompute(0),
-                                     font=font(13), height=36, fg_color=ACCENT)
-        self.run_btn.pack(fill="x", padx=14, pady=(2, 6))
-        self.sim_btn = ctk.CTkButton(c3, text="로봇 시뮬레이션 (관절 한계)", command=self.simulate, font=font(13),
-                                     height=36, fg_color="transparent", border_width=2, text_color=TEXT)
-        self.sim_btn.pack(fill="x", padx=14, pady=3)
-        self.draw_btn = ctk.CTkButton(c3, text="로봇으로 그리기", command=self.open_draw_window, font=font(13, "bold"),
-                                      height=38, fg_color="#16a34a", hover_color="#15803d")
-        self.draw_btn.pack(fill="x", padx=14, pady=3)
+        # Keep the primary action visible while stage parameters scroll independently.
+        c3 = Card(sidebar, "03   검증 및 드로잉")
+        c3.grid(row=1, column=0, sticky="ew", padx=(6, 14), pady=(10, 0))
+        actions = ctk.CTkFrame(c3, fg_color="transparent")
+        actions.pack(fill="x", padx=14, pady=(0, 2))
+        self.run_btn = ctk.CTkButton(actions, text="다시 계산", command=lambda: self._schedule_recompute(0),
+                                     width=110, font=font(12), height=32, fg_color=SURFACE,
+                                     hover_color=BORDER, text_color=TEXT)
+        self.run_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self.sim_btn = ctk.CTkButton(actions, text="시뮬레이션 검증", command=self.simulate, width=150,
+                                     font=font(12), height=32, fg_color="transparent", border_width=1,
+                                     text_color=TEXT, hover_color=SURFACE)
+        self.sim_btn.pack(side="left", fill="x", expand=True)
+        self.draw_btn = ctk.CTkButton(c3, text="로봇으로 그리기  →", command=self.open_draw_window,
+                                      font=font(13, "bold"), height=40, fg_color=ACCENT)
+        self.draw_btn.pack(fill="x", padx=14, pady=(6, 3))
         row = ctk.CTkFrame(c3, fg_color="transparent")
         row.pack(fill="x", padx=14, pady=(3, 6))
-        ctk.CTkButton(row, text="JSON 내보내기", command=self.export_strokes, font=font(12), height=32,
-                      fg_color="transparent", border_width=1, text_color=TEXT
+        ctk.CTkButton(row, text="JSON 내보내기", command=self.export_strokes, font=font(12), height=30,
+                      fg_color="transparent", hover_color=SURFACE, border_width=1, text_color=TEXT
                       ).pack(side="left", fill="x", expand=True, padx=(0, 4))
         # RViz(3D 재생)는 고급 기능이라 접어 둠: 처음 쓰는 사람에게 주요 실행 버튼과 같은 층에 두지 않는다
         self._adv_open = False
@@ -277,31 +314,37 @@ class SketchApp:
         self.traj_btn.pack(fill="x", pady=(0, 3))
         ctk.CTkButton(self.adv_frame, text="RViz 3D 환경 설치·확인…", command=self.open_rviz_setup, font=font(12),
                       height=28, fg_color="transparent", border_width=1, text_color=TEXT).pack(fill="x", pady=(0, 3))
-        self.progress = ctk.CTkProgressBar(c3, mode="indeterminate", height=6)
+        self.progress = ctk.CTkProgressBar(c3, mode="determinate", height=4)
         self.progress.pack(fill="x", padx=14, pady=(6, 4))
         self.progress.set(0)
-        self.status = ctk.CTkLabel(c3, text="이미지를 열어 주세요.", font=font(12), text_color=ACCENT,
-                                   wraplength=300, anchor="w", justify="left")
-        self.status.pack(fill="x", padx=14, pady=(0, 12))
+        self.status = ctk.CTkLabel(c3, text="이미지를 열어 주세요.", font=font(11), text_color=ACCENT,
+                                   wraplength=282, anchor="w", justify="left")
+        self.status.pack(fill="x", padx=14, pady=(0, 6))
         lim = limits.executor_region(self.cfg).x_max * 2
         plim = limits.pending_region(self.cfg).x_max * 2
-        ctk.CTkLabel(c3, text=f"종이 미리보기: 파란 점선 = 펜으로 그릴 수 있는 범위(폭 {lim:.0f}mm) · "
-                              f"주황 점선 = 공중 모드로만 확인하는 넓은 범위(최대 폭 {plim:.0f}mm, 위쪽이 낮은 지붕 모양)",
-                     font=font(11), text_color=MUTED, wraplength=300, anchor="w", justify="left"
+        ctk.CTkLabel(c3, text=f"종이 가이드  ·  파랑: 펜 범위 {lim:.0f}mm\n"
+                              f"주황: 공중 확인 범위 최대 {plim:.0f}mm",
+                     font=font(11), text_color=MUTED, wraplength=290, anchor="w", justify="left"
                      ).pack(fill="x", padx=14, pady=(0, 12))
 
         # --- 오른쪽: 단계 띠 + 큰 보기 + 요약 카드
         right = ctk.CTkFrame(self.root, fg_color="transparent")
         right.grid(row=1, column=1, sticky="nsew", padx=(8, 18), pady=(0, 18))
         right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(1, weight=1)
+        right.grid_rowconfigure(2, weight=1)
+        workspace = ctk.CTkFrame(right, fg_color="transparent")
+        workspace.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ctk.CTkLabel(workspace, text="드로잉 워크스페이스", font=font(17, "bold")).pack(side="left")
+        ctk.CTkLabel(workspace, text="단계를 선택해 결과를 비교하고 조절하세요", font=font(11),
+                     text_color=MUTED).pack(side="right")
         self.strip = StageStrip(right, stages.ALL_STAGES, self.select_stage, font,
                                 titles={st.id: stages.stage_title(st.id) for st in stages.ALL_STAGES})
-        self.strip.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        self.strip.grid(row=1, column=0, sticky="ew", pady=(0, 12))
         self.view_card = Card(right)
-        self.view_card.grid(row=1, column=0, sticky="nsew")
+        self.view_card.grid(row=2, column=0, sticky="nsew")
         self.view = BigView(self.view_card, font, self._theme_colors)
-        self.view.pack(fill="both", expand=True)
+        self.view.pack(fill="both", expand=True, padx=2, pady=2)
+        self.view.empty_open_btn.configure(command=self.open_image)
         self.show_numbers = tk.BooleanVar(value=True)
         self.show_cands = tk.BooleanVar(value=False)
         for text, var in (("번호", self.show_numbers), ("버린 선", self.show_cands)):
@@ -311,7 +354,7 @@ class SketchApp:
         self.proposal_bar = ProposalBar(self.view_card, font, self._apply_proposals, self._discard_proposals)
 
         stats = ctk.CTkFrame(right, fg_color="transparent")
-        stats.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        stats.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         for i in range(4):
             stats.grid_columnconfigure(i, weight=1, uniform="stat")
         self.st_strokes = StatCard(stats, "획 / 명령")
@@ -320,6 +363,10 @@ class SketchApp:
         self.st_sim = StatCard(stats, "로봇 시뮬레이션")
         for i, w in enumerate((self.st_strokes, self.st_size, self.st_time, self.st_sim)):
             w.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 5, 0 if i == 3 else 5))
+        self.st_strokes.set("—", "이미지를 열면 자동으로 계산")
+        self.st_size.set("—", "A4 종이 기준 · mm")
+        self.st_time.set("—", "그리기와 이동 시간을 포함")
+        self.st_sim.set("미검증", "드로잉 전 관절 한계 확인")
         self._build_controls()
         self.strip.select(self.stage_id)
 
@@ -334,7 +381,7 @@ class SketchApp:
     # ---------------------------------------------------------- 그림 테마
     def _theme_colors(self):
         dark = ctk.get_appearance_mode() == "Dark"
-        return ("#1f2430", "#e5e7eb") if dark else ("#ffffff", "#111827")
+        return (BG[1], TEXT[1]) if dark else (BG[0], TEXT[0])
 
     def set_mode(self, value):
         ctk.set_appearance_mode("Light" if value == "라이트" else "Dark")
@@ -354,7 +401,7 @@ class SketchApp:
             self.controls.pack_forget()
         st = stages.STAGE_BY_ID[self.stage_id]
         specs = [self.session.param_specs()[p.key] for p in st.params]
-        self.ctrl_title.configure(text=f"조절: {st.label}" + ("" if specs else " (조절 항목 없음)"))
+        self.ctrl_title.configure(text=f"조절  /  {st.label}" + ("" if specs else " · 설정 없음"))
         ctl = self._controls_cache.get(self.stage_id)
         if ctl is None:
             ctl = self._controls_cache[self.stage_id] = ParamControls(
@@ -761,23 +808,26 @@ class SketchApp:
         self._usb_after = self.root.after(3000, self._poll_robot_usb)
 
     def _query_robot_usb(self):
-        port = str(self.cfg.get("port") or "").strip()
-        if not port:
-            text, color = "USB: 포트 미설정", WARN
+        try:
+            choice = robot_status.detect_robot_port(self.cfg.get("port"))
+        except Exception:
+            text, color, label = "USB: 확인 실패", WARN, "USB 확인 실패"
         else:
-            try:
-                from serial.tools import list_ports
-                present = robot_status.port_is_present(port, list_ports.comports())
-            except Exception:
-                text, color = f"USB: {port} 확인 실패", WARN
+            if choice.port:
+                text = f"USB: {choice.port} " + ("자동 감지" if choice.source == "auto" else "감지")
+                color, label = OK, choice.port
+            elif choice.source == "ambiguous":
+                text, color, label = f"USB: 로봇 포트 여러 개 ({', '.join(choice.candidates)})", WARN, "포트 여러 개"
             else:
-                text = f"USB: {port} 감지" if present else f"USB: {port} 미감지"
-                color = OK if present else BAD
-        self._ui(self._show_robot_usb, text, color)
+                text, color, label = "USB: 로봇 미감지", BAD, "USB 미감지"
+        self._ui(self._show_robot_usb, text, color, label)
         self._ui(self._finish_robot_usb_scan)
 
-    def _show_robot_usb(self, text, color):
+    def _show_robot_usb(self, text, color, label):
         self.robot_usb_status.configure(text=text, text_color=color)
+        self.robot_port_label = label
+        if self.draw_window is not None and self.draw_window.winfo_exists():
+            self.draw_window.set_robot_port(label)
 
     def _finish_robot_usb_scan(self):
         self._robot_usb_scan_busy = False
@@ -824,7 +874,7 @@ class SketchApp:
         self._agent_visible = not self._agent_visible
         if self._agent_visible:
             self.agent_panel.grid(row=1, column=2, sticky="ns", padx=(0, 18), pady=(0, 18))
-            self.agent_btn.configure(fg_color=ACCENT, text_color="#ffffff")
+            self.agent_btn.configure(fg_color=ACCENT, text_color=("#ffffff", "#10131c"))
         else:
             self.agent_panel.grid_remove()
             self.agent_btn.configure(fg_color="transparent", text_color=TEXT)
@@ -885,6 +935,7 @@ class SketchApp:
         self.agent_busy(self._agent_busy)
         self.draw_btn.configure(state="disabled" if self.drawing else "normal")
         self.open_btn.configure(state="disabled" if self.drawing else "normal")
+        self.view.empty_open_btn.configure(state="disabled" if self.drawing else "normal")
         # 메인 'RViz 3D로 보기'는 run_rviz.sh가 떠 있는 따라가기 화면을 정리(pkill)하므로 그리는 중엔 잠금
         self.traj_btn.configure(state="disabled" if self.drawing or not self.result else "normal")
         if not self.drawing:
@@ -930,7 +981,6 @@ def main():
         except (AttributeError, OSError):
             pass
     ctk.set_appearance_mode("Light")
-    ctk.set_default_color_theme("blue")
     root = ctk.CTk()
     app = SketchApp(root)
     if "--setup-rviz" in sys.argv[1:]:          # 설치 프로그램의 "RViz 3D 환경도 설치" 선택

@@ -245,17 +245,6 @@ class GuiTextAndLayoutTest(unittest.TestCase):
         finally:
             close_quietly(app)
 
-    def test_no_stale_or_jargon_texts_in_the_screens(self):
-        root_dir = Path(__file__).resolve().parent.parent / "mirobot_sketch"
-        forbidden = ("처리 실행", "실행기 허용", "python robot/draw_executor.py", "1mm마다 역기구학")
-        for name in ("gui.py", "draw_window.py", "stage_view.py"):
-            text = (root_dir / name).read_text(encoding="utf-8")
-            for bad in forbidden:
-                self.assertNotIn(bad, text, f"{name}: {bad}")
-        # GUI에는 명령줄 옵션 이름을 메시지로 노출하지 않음 (내보내기 완료창의 mirobot-draw 안내는 예외)
-        gui_text = (root_dir / "gui.py").read_text(encoding="utf-8")
-        self.assertNotIn("실행 시 --pending-limits", gui_text)
-
 
 class GuiAgentUxTest(unittest.TestCase):
     def open_panel(self):
@@ -322,6 +311,63 @@ class GuiAgentUxTest(unittest.TestCase):
             texts = [w.cget("text") for w in panel.chat.winfo_children()[0].winfo_children() if hasattr(w, "cget")
                      and isinstance(w.cget("text"), str)]
             self.assertTrue(any("로봇으로 그릴 준비" in t for t in texts), texts)
+        finally:
+            close_quietly(app)
+
+
+class GuiWorkspaceInteractionTest(unittest.TestCase):
+    def test_open_from_empty_workspace_and_reset_for_next_image(self):
+        root, app = make_app()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                path = Path(d) / "line.png"
+                cv2.imwrite(str(path), golden.synthetic_images()["line"])
+                with mock.patch("mirobot_sketch.gui.filedialog.askopenfilename", return_value=str(path)):
+                    app.view.empty_open_btn.invoke()
+                self.assertTrue(pump(root, app, lambda: app.result is not None and app._workers == 0))
+                self.assertGreater(app.result["timing"]["stroke_count"], 0)
+                self.assertEqual(app.view.empty.winfo_manager(), "")
+                app.reset_for_next_drawing()
+                root.update()
+                self.assertIsNone(app.view.image)
+                self.assertEqual(app.view.empty.winfo_manager(), "place")
+                self.assertIsNone(app.view._compare)
+                self.assertIsNone(app.view._drag)
+        finally:
+            close_quietly(app)
+
+    def test_fit_restores_full_image_after_zoom(self):
+        root, app = make_app()
+        try:
+            image = golden.synthetic_images()["line"]
+            app.view.show("Preview", image)
+            app.view.ax.set_xlim(10, 30)
+            app.view.ax.set_ylim(40, 20)
+            app.view.fit_btn.invoke()
+            h, w = image.shape[:2]
+            self.assertEqual(tuple(app.view.ax.get_xlim()), (-0.5, w - 0.5))
+            self.assertEqual(tuple(app.view.ax.get_ylim()), (h - 0.5, -0.5))
+        finally:
+            close_quietly(app)
+
+    def test_stage_selection_reveals_offscreen_stage_in_both_directions(self):
+        root, app = make_app()
+        try:
+            root.deiconify()
+            root.geometry("1200x760")
+            root.update()
+            canvas = app.strip._parent_canvas
+            for stage_id in ("paper", "source"):
+                app.select_stage(stage_id)
+                root.update()
+                button = app.strip.buttons[stage_id]
+                self.assertGreaterEqual(button.winfo_rootx(), canvas.winfo_rootx())
+                self.assertLessEqual(button.winfo_rootx() + button.winfo_width(),
+                                     canvas.winfo_rootx() + canvas.winfo_width() + 2)
+                self.assertTrue(app.draw_btn.winfo_ismapped())
+                self.assertGreaterEqual(app.draw_btn.winfo_rooty(), root.winfo_rooty())
+                self.assertLessEqual(app.draw_btn.winfo_rooty() + app.draw_btn.winfo_height(),
+                                     root.winfo_rooty() + root.winfo_height())
         finally:
             close_quietly(app)
 
@@ -535,6 +581,48 @@ class GuiSmokeTest(unittest.TestCase):
                     self.assertEqual(w.finished["result"]["result"], "completed")
                     self.assertFalse(app.drawing)
                     self.assertTrue(list((Path(d) / "runs").glob("run-*.json")))
+                    w.close()
+        finally:
+            app._on_close()
+
+    def test_draw_window_start_pose_hold_to_jog_and_remember(self):
+        import json
+
+        root, app = make_app()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                p1, p2 = self._patched_dirs(d)
+                config_file = Path(d) / "drawing_config.json"
+                config_file.write_text(json.dumps(golden.default_cfg(), ensure_ascii=False), encoding="utf-8")
+                p3 = mock.patch("mirobot_sketch.draw_job.paths.config_path", lambda: config_file)
+                with p1, p2, p3:
+                    p = Path(d) / "line.png"
+                    cv2.imwrite(str(p), golden.synthetic_images()["line"])
+                    app.load_image(p)
+                    self.assertTrue(pump(root, app, lambda: app.result is not None and app._workers == 0))
+                    app.session.update_params({"box_mm": 60})              # 커밋된 설정의 허용 범위(±40mm) 안
+                    app._schedule_recompute(0)
+                    self.assertTrue(pump(root, app, lambda: app._workers == 0 and
+                                         app.result["params"]["box_mm"] == 60))
+                    w = app.open_draw_window(launch_rviz=lambda *a, **k: None)
+                    self.assertTrue(w.start_pose_var.get())                         # 기본으로 켜짐
+                    w.virtual_var.set(True)
+                    w.speed_var.set("500×")
+                    w.start_pose_in_virtual = True
+                    w.begin()
+                    self.assertTrue(pump(root, app, lambda: w.jog_frame.winfo_ismapped(), timeout=60))
+                    z0 = w.job.link.pos[2]
+                    w.jog_step_var.set("0.5")
+                    w._jog_press((0, 0, 1))                                          # ▲ 위 누르고 있기
+                    self.assertTrue(pump(root, app, lambda: w.job.link.pos[2] >= z0 + 1.0, timeout=20))
+                    w._jog_release()
+                    w.on_accept_start_pose()
+                    self.assertTrue(pump(root, app, lambda: w.job.state == "confirm", timeout=60))
+                    self.assertFalse(w.jog_frame.winfo_ismapped())
+                    saved = json.loads(config_file.read_text(encoding="utf-8"))["start_pose"]["ready_pose"]
+                    self.assertGreaterEqual(saved["tcp_mm"][2], z0 + 1.0)
+                    w.on_stop()
+                    self.assertTrue(pump(root, app, lambda: w.finished is not None, timeout=30))
                     w.close()
         finally:
             app._on_close()

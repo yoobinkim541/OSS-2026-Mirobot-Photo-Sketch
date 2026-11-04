@@ -15,7 +15,7 @@ import customtkinter as ctk
 from . import paths, rviz_launch
 from . import rviz_setup as rs
 
-OK_C, BAD_C, IDLE_C, ACT_C = "#16a34a", "#dc2626", ("#9aa3b2", "#6b7280"), ("#2563eb", "#3b82f6")
+from .theme import ACCENT as ACT_C, BAD as BAD_C, MUTED as IDLE_C, OK as OK_C, SURFACE, TEXT
 MARK = {"ok": ("✓", OK_C), "missing": ("✕", BAD_C), "blocked": ("○", IDLE_C)}
 
 
@@ -54,14 +54,14 @@ class RvizSetupWindow(ctk.CTkToplevel):
         self.install_btn.pack(side="left")
         self.wsl_btn = ctk.CTkButton(row, text="WSL 설치(관리자)", command=self.install_wsl, font=font(12), width=130)
         self.manual_btn = ctk.CTkButton(row, text="직접 설치(예비)", command=self.manual, font=font(12), width=120,
-                                        fg_color="transparent", border_width=1)
+                                        fg_color="transparent", border_width=1, text_color=TEXT, hover_color=SURFACE)
         self.manual_btn.pack(side="left", padx=6)
         row2 = ctk.CTkFrame(self, fg_color="transparent")
         row2.pack(fill="x", padx=16, pady=(4, 12))
         for text, cmd in (("다시 확인", self.refresh), ("제거", self.uninstall), ("로그 열기", self.open_log),
                           ("닫기", self.close)):
             ctk.CTkButton(row2, text=text, command=cmd, font=font(12), width=90, fg_color="transparent",
-                          border_width=1).pack(side="left", padx=(0, 6))
+                          border_width=1, text_color=TEXT, hover_color=SURFACE).pack(side="left", padx=(0, 6))
         self.refresh()
 
     # ------------------------------------------------------------ 표시

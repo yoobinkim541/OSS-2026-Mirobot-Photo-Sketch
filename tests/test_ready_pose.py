@@ -1,0 +1,232 @@
+"""시작 자세 T4: 펜 끝을 종이 가운데에 맞춘 자세(ready_pose)의 검사·저장·불러오기 테스트.
+
+    python -m unittest tests.test_ready_pose -v
+"""
+
+import copy
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from mirobot_sketch import draw_executor as de  # noqa: E402
+from mirobot_sketch import start_pose as sp  # noqa: E402
+
+import golden  # noqa: E402
+
+CFG = golden.default_cfg()
+FLANGE_CFG = copy.deepcopy(CFG)
+FLANGE_CFG["start_pose"] = {"pen_mount": "along_flange"}
+
+
+def status(x, y=0.0, z=130.0, abc=(0.0, -90.0, 0.0), joints=(0.0, -1.4, 46.4, 0.0, -135.0, 0.0)):
+    return {"state": "Idle", "tcp": (x, y, z), "abc_deg": abc, "joints_deg": list(joints)}
+
+
+REFERENCE = status(185.0)        # 펜을 수평으로 올린 직후(대기 자세)에 컨트롤러가 보고한 값이라고 가정
+
+
+class CheckReadyTest(unittest.TestCase):
+    def test_jog_along_x_and_y_only_is_accepted(self):
+        r = sp.check_ready(FLANGE_CFG, status(200.0, y=3.0), REFERENCE)
+        self.assertTrue(r["ok"], r["problems"])
+        self.assertGreater(r["min_margin_deg"], 5.0)
+
+    def test_height_change_is_allowed_because_jog_moves_up_and_down(self):
+        r = sp.check_ready(FLANGE_CFG, status(200.0, z=133.0), REFERENCE)
+        self.assertTrue(r["ok"], r["problems"])
+
+    def test_orientation_change_is_rejected(self):
+        r = sp.check_ready(FLANGE_CFG, status(200.0, abc=(0.0, -85.0, 0.0)), REFERENCE)
+        self.assertFalse(r["ok"])
+        self.assertTrue(any("자세" in p for p in r["problems"]))
+
+    def test_paper_too_close_to_the_base_asks_to_move_the_robot_back(self):
+        # 플랜지 X 160 mm: 펜이 수평인 자세에서 그리기 범위 끝이 관절 한계에 걸림
+        r = sp.check_ready(FLANGE_CFG, status(160.0), REFERENCE)
+        self.assertFalse(r["ok"])
+        self.assertGreater(r["move_back_mm"], 0.0)
+        self.assertTrue(any("뒤로" in p for p in r["problems"]))
+
+
+HOME = status(198.67, z=230.5, abc=(0.0, 0.0, 0.0), joints=(0, 0, 0, 0, 0, 0))   # 직각 홀더: 호밍 직후
+
+
+class RightAngleCheckTest(unittest.TestCase):
+    def test_pen_touching_the_paper_near_the_homing_pose_is_accepted(self):
+        r = sp.check_ready(CFG, status(205.0, y=2.0, z=230.5, abc=(0.0, 0.0, 0.0)), HOME)
+        self.assertTrue(r["ok"], r["problems"])
+        self.assertGreater(r["min_singularity_deg"], 60.0)
+
+    def test_flange_too_close_to_the_base_is_rejected(self):
+        # 직각 홀더·호밍 높이에서 플랜지 X 130 mm면 그리기 범위 끝이 J2 한계를 넘음
+        r = sp.check_ready(CFG, status(130.0, z=230.5, abc=(0.0, 0.0, 0.0)), HOME)
+        self.assertFalse(r["ok"])
+        self.assertGreater(r["move_back_mm"], 0.0)
+
+
+class SaveLoadTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "drawing_config.json"
+        raw = json.loads((ROOT / "mirobot_sketch" / "data" / "drawing_config.json").read_text(encoding="utf-8"))
+        raw["_user_note"] = "사용자가 손으로 적은 값"
+        self.path.write_text(json.dumps(raw, ensure_ascii=False, indent=1), encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_saved_pose_comes_back_after_reloading_the_config(self):
+        saved = sp.save_ready_pose(self.path, status(182.0, y=3.0))
+        loaded = sp.settings(de.load_config(self.path))["ready_pose"]
+        self.assertEqual(loaded, saved)
+        self.assertEqual(loaded["tcp_mm"], [182.0, 3.0, 130.0])
+        self.assertEqual(loaded["abc_deg"], [0.0, -90.0, 0.0])
+
+    def test_saving_keeps_the_other_settings(self):
+        sp.save_ready_pose(self.path, status(182.0))
+        raw = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(raw["_user_note"], "사용자가 손으로 적은 값")
+        self.assertIn("limits", raw)
+
+    def test_no_saved_pose_by_default(self):
+        self.assertIsNone(sp.settings(de.load_config(self.path))["ready_pose"])
+
+
+class ScriptedLink:
+    """query_status마다 정해 둔 자세를 차례로 보고 (사람이 화살표로 움직이는 것을 흉내)."""
+
+    def __init__(self, poses):
+        self.poses = list(poses)
+        self.sent = []
+
+    def send_and_ack(self, line, timeout, should_stop=None):
+        self.sent.append(line)
+
+    def wait_idle(self, timeout):
+        return self.poses[0]
+
+    def query_status(self, timeout=2.0):
+        x, y, z = self.poses.pop(0) if len(self.poses) > 1 else self.poses[0]
+        raw = ("<Idle,Angle(ABCDXYZ):0.0,-144.4,0.0,0.0,0.0,-27.3,46.7,"
+               f"Cartesian coordinate(XYZ RxRyRz):{x},{y},{z},0.0,-90.0,0.0,Pump PWM:0>")
+        return "Idle", (x, y, z), raw
+
+
+class JogSessionTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "drawing_config.json"
+        self.path.write_text((ROOT / "mirobot_sketch" / "data" / "drawing_config.json").read_text(encoding="utf-8"),
+                             encoding="utf-8")
+        self.out = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_session(self, poses, keys):
+        keys = iter(keys)
+        self.link = ScriptedLink(poses)
+        return sp.jog_session(self.link, FLANGE_CFG, REFERENCE, self.path,
+                              input_fn=lambda _: next(keys), output_fn=self.out.append)
+
+    def run_keys(self, poses, keys):
+        """Enter 없이 키 하나씩 읽는 방식 (Windows 콘솔의 msvcrt 대신 정해 둔 키를 차례로)."""
+        keys = iter(keys)
+        self.link = ScriptedLink(poses)
+        self.drained = 0
+
+        def drain():
+            self.drained += 1
+
+        return sp.jog_session(self.link, FLANGE_CFG, REFERENCE, self.path, output_fn=self.out.append,
+                              key_fn=lambda: next(keys), drain_fn=drain)
+
+    def test_single_keys_move_immediately_like_the_draw_window(self):
+        self.run_keys([(185.0, 0.0, 130.0)], ["w", "Up", "Left", "s", "Down", "q"])
+        step = sp.settings(FLANGE_CFG)["jog_steps_mm"][sp.settings(FLANGE_CFG)["jog_default_step"]]
+        moves = [tuple(float(line.split(f" {k}")[1].split(" ")[0]) for k in "XYZ") for line in self.link.sent]
+        self.assertEqual(moves, [(185.0 + step, 0.0, 130.0), (185.0 + step, 0.0, 130.0 + step),
+                                 (185.0 + step, step, 130.0 + step), (185.0, step, 130.0 + step),
+                                 (185.0, step, 130.0)])
+        self.assertEqual(self.drained, 5)          # 움직이는 동안 쌓인 자동 반복 키는 버려서 손을 떼면 바로 멈춤
+
+    def test_single_key_enter_saves_and_digits_change_the_step(self):
+        result = self.run_keys([(200.0, 2.0, 130.0)], ["3", "x", "1", "w", " ", "\r"])
+        steps = sp.settings(FLANGE_CFG)["jog_steps_mm"]
+        xs = [float(line.split(" X")[1].split(" ")[0]) for line in self.link.sent]
+        self.assertEqual(xs, [185.0 - steps[2], 185.0 - steps[2] + steps[0]])
+        self.assertEqual(result["result"], "saved")
+        self.assertEqual(sp.settings(de.load_config(self.path))["ready_pose"]["tcp_mm"], [200.0, 2.0, 130.0])
+
+    def test_console_keys_falls_back_to_lines_when_not_a_console(self):
+        from unittest import mock
+        with mock.patch("sys.stdin") as stdin:
+            stdin.isatty.return_value = False
+            self.assertIsNone(sp.console_keys())
+
+    def test_console_arrow_keys_are_named(self):
+        from unittest import mock
+        try:
+            import msvcrt  # noqa: F401
+        except ImportError:
+            self.skipTest("Windows 콘솔 전용")
+        with mock.patch("sys.stdin") as stdin, mock.patch("msvcrt.getwch", side_effect=["à", "H", "w"]):
+            stdin.isatty.return_value = True
+            read_key, _drain = sp.console_keys()
+            self.assertEqual((read_key(), read_key()), ("Up", "w"))
+
+    def test_single_key_escape_quits_without_saving(self):
+        result = self.run_keys([(185.0, 0.0, 130.0)], ["\x1b"])
+        self.assertEqual(result["result"], "quit")
+        self.assertEqual(self.link.sent, [])
+
+    def test_enter_shows_the_current_position_and_s_saves(self):
+        result = self.run_session([(190.0, 0.0, 130.0), (200.0, 2.0, 130.0)], ["", "s"])
+        self.assertEqual(result["result"], "saved")
+        self.assertTrue(any("190.0" in line for line in self.out))
+        saved = sp.settings(de.load_config(self.path))["ready_pose"]
+        self.assertEqual(saved["tcp_mm"], [200.0, 2.0, 130.0])
+
+    def test_a_bad_pose_is_not_saved(self):
+        result = self.run_session([(150.0, 0.0, 130.0)], ["s", "q"])      # 너무 뒤: 그리기 범위가 안 닿음
+        self.assertEqual(result["result"], "quit")
+        self.assertIsNone(sp.settings(de.load_config(self.path))["ready_pose"])
+        self.assertTrue(any("뒤로" in line for line in self.out))
+
+    def test_r_and_f_move_up_and_down(self):
+        self.run_session([(185.0, 0.0, 130.0)], ["r", "f", "f", "q"])
+        zs = [float(line.split(" Z")[1].split(" ")[0]) for line in self.link.sent]
+        step = sp.settings(FLANGE_CFG)["jog_steps_mm"][sp.settings(FLANGE_CFG)["jog_default_step"]]
+        self.assertEqual(zs, [130.0 + step, 130.0, 130.0 - step])
+
+
+    def test_w_moves_toward_the_wall_keeping_height_and_orientation(self):
+        self.run_session([(185.0, 0.0, 130.0)], ["w", "q"])
+        step = sp.settings(CFG)["jog_steps_mm"][sp.settings(CFG)["jog_default_step"]]
+        x, y, z = REFERENCE["tcp"]
+        a, b, c = REFERENCE["abc_deg"]
+        feed = CFG["feeds_mm_per_min"]["approach"]
+        self.assertEqual(self.link.sent, [f"M20 G90 G01 X{x + step:.3f} Y{y:.3f} Z{z:.3f} "
+                                          f"A{a:.3f} B{b:.3f} C{c:.3f} F{feed:.0f}"])
+
+    def test_step_keys_change_the_step_and_moves_add_up(self):
+        self.run_session([(185.0, 0.0, 130.0)], ["3", "aa", "1", "d", "q"])
+        steps = sp.settings(CFG)["jog_steps_mm"]
+        ys = [float(line.split(" Y")[1].split(" ")[0]) for line in self.link.sent]
+        self.assertEqual(ys, [steps[2], 2 * steps[2], 2 * steps[2] - steps[0]])
+
+    def test_moves_outside_the_jog_box_are_refused(self):
+        limit = sp.settings(CFG)["jog_max_y_mm"]
+        keys = ["3"] + ["a"] * int(limit / sp.settings(CFG)["jog_steps_mm"][2] + 2) + ["q"]
+        self.run_session([(185.0, 0.0, 130.0)], keys)
+        ys = [float(line.split(" Y")[1].split(" ")[0]) for line in self.link.sent]
+        self.assertLessEqual(max(ys), limit + 1e-9)
+        self.assertTrue(any("범위" in line for line in self.out))
+
+
+if __name__ == "__main__":
+    unittest.main()
