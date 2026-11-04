@@ -13,6 +13,7 @@ GUI 없이 같은 파라미터로 결과를 재현할 때 사용합니다. 사�
 출력:
     <out>.json          : robot/draw_executor.py 가 읽는 획 데이터 (mm)
     <out>_preview.png   : 입력 / 엣지 / 획 / 그리는 순서 비교 이미지
+    <out>.svg           : (--svg) 펜 플로터·GRBL 장비용 SVG (실제 종이 크기, mm)
 """
 
 import argparse
@@ -26,6 +27,7 @@ from . import draw_executor as de
 from . import paper_mapping as pm
 from . import paths, presets
 from . import sketch_pipeline as sp
+from . import svg_export
 
 
 def main():
@@ -54,6 +56,7 @@ def main():
     ap.add_argument("--box", type=float, nargs=2, default=pm.DEFAULT_BOX_MM, metavar=("W", "H"),
                     help="그리기 상자 크기 mm (기본 100 100)")
     ap.add_argument("--config", type=Path, help="시간 추정에 쓰는 로봇 설정 (기본: 저장소 또는 사용자 폴더)")
+    ap.add_argument("--svg", action="store_true", help="펜 플로터·GRBL 장비용 SVG(<out>.svg)도 저장")
     args = ap.parse_args()
 
     t = presets.IMAGE_TYPES.get(args.type, {})
@@ -101,6 +104,8 @@ def main():
     out = args.out or args.image.with_name(args.image.stem + "_strokes")
     out.parent.mkdir(parents=True, exist_ok=True)
     pm.save_strokes_json(out.with_suffix(".json"), doc)
+    if args.svg:
+        svg_export.save_svg(out.with_suffix(".svg"), strokes_mm, svg_export.paper_size_mm(placement))
 
     preview = np.hstack([
         cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR),
@@ -117,6 +122,8 @@ def main():
     print(f"예상 시간: {de.format_time(timing)}")
     print(f"저장: {out.with_suffix('.json')}")
     print(f"미리보기: {preview_path}")
+    if args.svg:
+        print(f"SVG: {out.with_suffix('.svg')}")
     return 0
 
 

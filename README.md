@@ -89,7 +89,7 @@ cd OSS-2026-Mirobot-Photo-Sketch
 pip install -e .
 ```
 
-`mirobot-sketch`(GUI), `mirobot-strokes`, `mirobot-draw`, `mirobot-sim` 명령이 생깁니다. 저장소에서 실행하면 `robot/drawing_config.json`, `LOG/runs/`, `out/`을 그대로 씁니다. 필요한 기능만 추가로 설치합니다.
+`mirobot-sketch`(GUI), `mirobot-strokes`, `mirobot-svg`, `mirobot-draw`, `mirobot-sim` 명령이 생깁니다. 저장소에서 실행하면 `robot/drawing_config.json`, `LOG/runs/`, `out/`을 그대로 씁니다. 필요한 기능만 추가로 설치합니다.
 
 | 추가 기능 | 명령 |
 |---|---|
@@ -190,8 +190,22 @@ mirobot-strokes photo.jpg --type photo --out out/photo
 - `--merge 4` : 끝점이 만나는 획을 이어 그려 펜 올림 횟수를 줄입니다 (기본 4px, 0=끔)
 - `--lines dark` : 깨끗한 선화에서 어두운 선의 중심선을 그립니다.
 - `--box W H` : 그리기 상자 크기(mm). 기본값은 100 × 100입니다.
+- `--svg` : 펜 플로터·GRBL 장비용 SVG(`out/photo.svg`)도 저장합니다. 아래 [다른 장비에서 쓰기](#다른-장비에서-쓰기-svg)를 보세요.
 
 `out/photo.json`과 비교 이미지 `out/photo_preview.png`(입력 / 선 후보 / 획 / 그리는 순서)가 만들어집니다.
+
+#### 다른 장비에서 쓰기 (SVG)
+
+획 JSON은 종이 중심 기준 mm 좌표라 로봇과 무관합니다. 선 추출 결과를 AxiDraw 같은 펜 플로터나 GRBL 기반 장비에서 쓰려면 SVG로 내보냅니다.
+
+```bash
+mirobot-strokes photo.jpg --type photo --out out/photo --svg   # 사진에서 바로
+mirobot-svg out/photo.json                                      # 이미 만든 JSON(GUI에서 저장한 파일 포함) -> out/photo.svg
+```
+
+- 문서 크기는 실제 종이 크기(A4 가로 297 × 210mm)이고, SVG 한 단위가 1mm입니다. 그림은 JSON과 같은 자리(종이 중심)에 놓입니다.
+- 획 하나가 `<path>` 하나이고, 그리는 순서를 그대로 둡니다.
+- AxiDraw(Inkscape 확장·`axicli`), [vpype](https://github.com/abey79/vpype), SVG → G-code 변환기처럼 SVG를 읽는 도구에 넘길 수 있습니다. vpype로 다시 읽어 종이 크기·위치·획 수가 JSON과 같은지 확인했고, AxiDraw·GRBL 실물 장비에서는 확인하지 않았습니다.
 
 ### 2. 획 JSON → 로봇
 

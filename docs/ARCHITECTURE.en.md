@@ -198,12 +198,12 @@ For PCs without WSL or a ROS environment, [`rviz_setup.py`](../mirobot_sketch/rv
 ### 9.1 Python package
 
 - Shared code lives in the `mirobot_sketch/` package with relative imports. The entry files in `CV/`, `robot/` and `sim/` are thin wrappers that keep the old commands working.
-- `pyproject.toml` (setuptools ≥ 77, MIT license metadata) defines dependencies and the commands (`mirobot-sketch` (GUI), `mirobot-strokes`, `mirobot-draw`, `mirobot-sim`, `mirobot-setup-rviz`, `mirobot-calibrate`), with optional extras `[rembg]` (background removal), `[agent]` (agent) and `[build]` (PyInstaller).
+- `pyproject.toml` (setuptools ≥ 77, MIT license metadata) defines dependencies and the commands (`mirobot-sketch` (GUI), `mirobot-strokes`, `mirobot-svg`, `mirobot-draw`, `mirobot-sim`, `mirobot-setup-rviz`, `mirobot-calibrate`), with optional extras `[rembg]` (background removal), `[agent]` (agent) and `[build]` (PyInstaller).
 - **File locations** are decided in one place, [`paths.py`](../mirobot_sketch/paths.py). Running from the repository uses `robot/drawing_config.json`, `LOG/runs/` and `out/`; an installed build or the .exe uses `%APPDATA%\MirobotSketch\` (the default config is copied from inside the package). The environment variable `MIROBOT_CONFIG` can point at a config file directly.
 
 ### 9.2 Windows .exe (PyInstaller)
 
-- [`packaging/mirobot_sketch.spec`](../packaging/mirobot_sketch.spec): a **one-folder (onedir)** build. `MirobotSketch.exe` (GUI, no console) and `mirobot.exe` (command line: `draw`, `strokes`, `sim`, `setup-rviz`, `mcp`) sit in one folder.
+- [`packaging/mirobot_sketch.spec`](../packaging/mirobot_sketch.spec): a **one-folder (onedir)** build. `MirobotSketch.exe` (GUI, no console) and `mirobot.exe` (command line: `draw`, `strokes`, `svg`, `sim`, `setup-rviz`, `mcp`) sit in one folder.
 - **Why onedir instead of onefile:** faster start and fewer antivirus false positives.
 - rembg and onnxruntime are excluded for size, and the build runs in a clean build-only virtual environment. The RViz playback script, the setup script and the face model are bundled as data.
 - Because sub-commands import modules by string name, hidden imports are declared with `collect_submodules`.

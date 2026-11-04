@@ -91,7 +91,7 @@ cd OSS-2026-Mirobot-Photo-Sketch
 pip install -e .
 ```
 
-This provides the commands `mirobot-sketch` (GUI), `mirobot-strokes`, `mirobot-draw` and `mirobot-sim`. Running from the repository uses `robot/drawing_config.json`, `LOG/runs/` and `out/` directly. Install extra features only when needed:
+This provides the commands `mirobot-sketch` (GUI), `mirobot-strokes`, `mirobot-svg`, `mirobot-draw` and `mirobot-sim`. Running from the repository uses `robot/drawing_config.json`, `LOG/runs/` and `out/` directly. Install extra features only when needed:
 
 | Extra feature | Command |
 |---|---|
@@ -191,8 +191,22 @@ mirobot-strokes photo.jpg --type photo --out out/photo
 - `--merge 4` : joins strokes whose end points meet to reduce pen lifts (default 4 px, 0 = off)
 - `--lines dark` : draws the center lines of dark strokes in clean line art.
 - `--box W H` : drawing box size in mm. The default is 100 × 100.
+- `--svg` : also saves an SVG for pen plotters and GRBL machines (`out/photo.svg`). See [Using other machines](#using-other-machines-svg) below.
 
 This creates `out/photo.json` and a comparison image `out/photo_preview.png` (input / line candidates / strokes / drawing order).
+
+#### Using other machines (SVG)
+
+The strokes JSON uses millimetres from the paper center, so it is not tied to the robot. To use the extracted lines on a pen plotter such as AxiDraw or a GRBL-based machine, export them as SVG.
+
+```bash
+mirobot-strokes photo.jpg --type photo --out out/photo --svg   # straight from a photo
+mirobot-svg out/photo.json                                      # from an existing JSON (including one saved by the GUI) -> out/photo.svg
+```
+
+- The document is the real paper size (A4 landscape, 297 × 210 mm), and one SVG unit is 1 mm. The drawing sits where it is in the JSON (at the paper center).
+- Each stroke becomes one `<path>`, in drawing order.
+- The SVG can be passed to tools that read SVG, such as AxiDraw (Inkscape extension or `axicli`), [vpype](https://github.com/abey79/vpype), or an SVG → G-code converter. Reading it back with vpype gives the same paper size, position and stroke count as the JSON. It has not been tested on real AxiDraw or GRBL hardware.
 
 ### 2. Strokes JSON → robot
 

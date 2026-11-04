@@ -196,12 +196,12 @@ WSL이 없거나 ROS 환경이 없는 PC를 위해 [`rviz_setup.py`](../mirobot_
 ### 9.1 파이썬 패키지
 
 - 공용 코드는 `mirobot_sketch/` 패키지에 두고 상대 import를 씁니다. `CV/`, `robot/`, `sim/`의 진입 파일은 예전 명령이 그대로 동작하게 하는 얇은 래퍼입니다.
-- `pyproject.toml`(setuptools ≥ 77, MIT 라이선스 표기)이 의존성과 실행 명령(`mirobot-sketch`(GUI), `mirobot-strokes`, `mirobot-draw`, `mirobot-sim`, `mirobot-setup-rviz`, `mirobot-calibrate`)을 정의하고, 선택 설치로 `[rembg]`(배경 제거), `[agent]`(에이전트), `[build]`(PyInstaller)를 둡니다.
+- `pyproject.toml`(setuptools ≥ 77, MIT 라이선스 표기)이 의존성과 실행 명령(`mirobot-sketch`(GUI), `mirobot-strokes`, `mirobot-svg`, `mirobot-draw`, `mirobot-sim`, `mirobot-setup-rviz`, `mirobot-calibrate`)을 정의하고, 선택 설치로 `[rembg]`(배경 제거), `[agent]`(에이전트), `[build]`(PyInstaller)를 둡니다.
 - **파일 위치 규칙**은 [`paths.py`](../mirobot_sketch/paths.py) 한곳에 있습니다. 저장소에서 실행하면 `robot/drawing_config.json`, `LOG/runs/`, `out/`을 쓰고, 설치판이나 .exe는 `%APPDATA%\MirobotSketch\`를 씁니다(기본 설정은 패키지 안 파일을 복사). 환경 변수 `MIROBOT_CONFIG`로 설정 파일을 직접 지정할 수 있습니다.
 
 ### 9.2 Windows .exe (PyInstaller)
 
-- [`packaging/mirobot_sketch.spec`](../packaging/mirobot_sketch.spec): **폴더형(onedir)** 빌드. `MirobotSketch.exe`(GUI, 콘솔 없음)와 `mirobot.exe`(명령줄: `draw`·`strokes`·`sim`·`setup-rviz`·`mcp`)가 한 폴더에 들어갑니다.
+- [`packaging/mirobot_sketch.spec`](../packaging/mirobot_sketch.spec): **폴더형(onedir)** 빌드. `MirobotSketch.exe`(GUI, 콘솔 없음)와 `mirobot.exe`(명령줄: `draw`·`strokes`·`svg`·`sim`·`setup-rviz`·`mcp`)가 한 폴더에 들어갑니다.
 - **onefile이 아니라 onedir인 이유:** 실행이 빠르고 백신 오탐이 적습니다.
 - rembg·onnxruntime은 용량 때문에 제외하고, 깨끗한 빌드 전용 가상환경에서 빌드합니다. RViz 재생 스크립트, 설치 스크립트, 얼굴 모델은 데이터로 포함합니다.
 - 하위 명령이 모듈을 문자열 이름으로 불러오므로 `collect_submodules`로 숨은 import를 알려 줍니다.
