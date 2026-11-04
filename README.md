@@ -28,6 +28,7 @@
 - [3D 시뮬레이션](#3d-시뮬레이션-로봇-없이-확인)
 - [기술 스택과 설계 문서](#기술-스택과-설계-문서)
 - [배포 (CI/CD)](#배포-cicd)
+- [업스트림 기여](#업스트림-기여)
 - [테스트 · 폴더 · 라이선스](#테스트)
 
 ## 주요 기능
@@ -287,6 +288,18 @@ git tag -a v0.3.0 -m "..." && git push origin v0.3.0
 ```
 
 `mirobot_sketch/__init__.py`의 `__version__`도 함께 올립니다.
+
+## 업스트림 기여
+
+이 프로젝트는 [WLKATA 공식 ROS 2 저장소](https://github.com/wlkata/Wlkata_Mirobot_Ros2)의 URDF와 메시를 사용합니다. 그런데 이 저장소는 새로 받아 빌드하면 실패합니다. 원인을 찾아 고친 내용을 업스트림에 PR로 올렸습니다. 각 PR에는 `ros:humble` 컨테이너에서 수정 전후를 비교한 결과를 적었습니다.
+
+| PR | 문제 | 수정 |
+|---|---|---|
+| [#2](https://github.com/wlkata/Wlkata_Mirobot_Ros2/pull/2) | `wlkata_mirobot_description`이 저장소에 없는 `textures/` 폴더를 설치하려다 빌드에 실패합니다([이슈 #1](https://github.com/wlkata/Wlkata_Mirobot_Ros2/issues/1)의 오류). | 쓰이지 않는 설치 규칙을 지웠습니다(메시는 모두 STL). |
+| [#3](https://github.com/wlkata/Wlkata_Mirobot_Ros2/pull/3) | `wlkata_mirobot_moveit_config`가 저장소에 없는 `.setup_assistant`를 설치하려다 빌드에 실패합니다. 이 파일이 없으면 MoveIt Setup Assistant로 패키지를 다시 열 수도 없습니다. | 패키지 안의 URDF·SRDF·ros2_control 설정에 맞춰 `.setup_assistant`를 추가했습니다. |
+| [#4](https://github.com/wlkata/Wlkata_Mirobot_Ros2/pull/4) | `wlkatapython.py`가 소스에 없고 커밋된 `build/`에만 있습니다. 그래서 `pip install .`이 현재 소스가 아닌 예전 빌드 파일을 설치합니다. | 모듈 파일을 추가하고, `build/`·`egg-info`·`.pyc`를 지우고, `.gitignore`를 추가했습니다. |
+
+PR이 병합되기 전까지 이 프로젝트의 설치 스크립트([`packaging/wsl/setup_ros_env.sh`](packaging/wsl/setup_ros_env.sh))는 커밋 `c0a7ad4`를 고정하고, 빈 `textures/` 폴더를 만든 뒤 빌드합니다. 이 프로젝트는 `wlkata_mirobot_description`만 빌드하므로 업스트림 PR #3·#4가 다루는 문제에는 영향을 받지 않습니다.
 
 ## 테스트
 
