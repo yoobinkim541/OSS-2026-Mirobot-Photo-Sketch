@@ -30,6 +30,7 @@ photo ─▶ line-extraction pipeline ─▶ strokes (paper mm) ─▶ checks (a
 - [3D simulation](#3d-simulation-check-without-a-robot)
 - [Tech stack and design docs](#tech-stack-and-design-docs)
 - [Delivery (CI/CD)](#delivery-cicd)
+- [Upstream contributions](#upstream-contributions)
 - [Tests · folders · license](#tests)
 
 ## Features
@@ -305,6 +306,18 @@ git tag -a v0.3.0 -m "..." && git push origin v0.3.0
 ```
 
 Also bump `__version__` in `mirobot_sketch/__init__.py`.
+
+## Upstream contributions
+
+This project uses the URDF and meshes from [WLKATA's official ROS 2 repository](https://github.com/wlkata/Wlkata_Mirobot_Ros2), which fails to build on a fresh clone. I traced the causes and sent the fixes upstream as pull requests. Each PR shows a before/after comparison run in a `ros:humble` container.
+
+| PR | Problem | Fix |
+|---|---|---|
+| [#2](https://github.com/wlkata/Wlkata_Mirobot_Ros2/pull/2) | `wlkata_mirobot_description` tries to install a `textures/` directory that is not in the repository, so the build fails (the error in [issue #1](https://github.com/wlkata/Wlkata_Mirobot_Ros2/issues/1)). | Removed the unused install rule (all meshes are STL). |
+| [#3](https://github.com/wlkata/Wlkata_Mirobot_Ros2/pull/3) | `wlkata_mirobot_moveit_config` tries to install a `.setup_assistant` that is not in the repository, so the build fails. Without this file, MoveIt Setup Assistant also cannot reopen the package. | Added `.setup_assistant` based on the package's URDF, SRDF, and ros2_control config. |
+| [#4](https://github.com/wlkata/Wlkata_Mirobot_Ros2/pull/4) | `wlkatapython.py` is missing from the sources and exists only in the committed `build/`, so `pip install .` installs old build copies instead of the current sources. | Added the module file, removed `build/`, `egg-info`, and `.pyc` files, and added a `.gitignore`. |
+
+Until these PRs are merged, this project's setup script ([`packaging/wsl/setup_ros_env.sh`](packaging/wsl/setup_ros_env.sh)) pins commit `c0a7ad4` and creates an empty `textures/` directory before building. This project builds only `wlkata_mirobot_description`, so the problems fixed by upstream PRs #3 and #4 do not affect it.
 
 ## Tests
 
