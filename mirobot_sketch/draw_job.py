@@ -6,11 +6,15 @@ ok 응답마다 진행 파일을 써서 RViz 따라가기가 같은 위치를 �
 
 events(kind, **data):
   step      id, status(active|done|failed), message, hint
-  progress  acked, total, stroke, strokes, elapsed_s, remaining_s
+  progress  acked, total, stroke, strokes, drawn, elapsed_s, remaining_s   (drawn: plan의 앞에서부터 다 그린 획 수)
+  plan      strokes (그리는 순서의 획 mm 목록, ⑤ 시작 때 한 번)
   rviz      ok, message
+  paused    acked, total   (⑤에서 [멈춤]: 펜을 뗀 뒤 일시정지. job.resume()으로 이어 그리거나 job.finish()로 끝냄)
+  resumed   (이어서를 골라 멈춘 자리부터 다시 그림)
   finished  result, record_path
 """
 
+import bisect
 import copy
 import json
 import math
@@ -77,18 +81,23 @@ class DrawJob:
         self._return_origin = True
         self._confirm = threading.Event()
         self._stop = threading.Event()
+        self._stop_presses = 0            # [멈춤]을 누른 횟수: 펜을 떼는 중·호밍 자세로 돌아가는 중에 한 번 더 누르면 그 자리에서 멈춤
+        self._decision = queue.Queue()    # ⑤ 일시정지 중 사람이 고른 것: resume(이어서) / finish(끝내기) / end(그 자리에서 끝)
+        self._end_requested = False       # 창을 닫음: 일시정지에서 기다리지 않고 그 자리에서 끝냄
         self._choice = {}
         self._thread = None
         self._calibration_reply = None
         self._calibration_reply_lock = threading.Lock()
         self._start_pose = False
         self.start_pose_setup = None      # ③ 시작 자세 맞추기 중일 때만 (화면이 jog·accept를 보냄)
+        self._live = None                 # ⑤ 그리는 중: 보내는 명령 목록·획 (끝점 물림을 남은 명령에 적용할 때)
 
     # ---------------------------------------------------------------- 사람이 누르는 것
     def start(self, virtual=True, virtual_speed=20.0, pending=False, recalibrate=False, return_to_origin=True,
               start_pose=False):
         """pending: 실물 확인 전 넓은 범위(limits_pending_verification) 허용 — ① 사전 검사부터 적용 (④에서 바꿀 수도 있음).
-        return_to_origin: 그림이 끝까지 그려지면 펜을 처음 상태(종이 중심에 살짝 닿은 시작 자세)로 되돌림 (공중 모드는 해당 없음).
+        return_to_origin: 그림이 끝까지 그려지면 펜을 처음 상태로 되돌림 (공중 모드는 해당 없음). 저장된 대기 자세로 시작했으면
+        (start_pose와 requested_start_pose) 호밍 자세(관절 0)로 돌아가고, [멈춤]을 눌렀을 때도 펜을 뗀 뒤 같은 곳으로 돌아감.
         start_pose: ②호밍 뒤 ③에서 저장된 시작 자세로 자동 이동하고, 사람이 조그로 맞춘 뒤 [기억하고 계속]을 누르면
         그 자세를 저장하고 이번 실행의 종이 중심으로 씀 (start_pose.StartPoseSetup, 다시 보정을 고르면 쓰지 않음)."""
         self._virtual, self._speed, self._pending = bool(virtual), float(virtual_speed), bool(pending)
@@ -108,7 +117,12 @@ class DrawJob:
         self._confirm.set()
 
     def stop(self):
-        """⑤에서는 다음 명령부터 보내지 않음(멈춤), 그 전 단계에서는 취소."""
+        """⑤에서는 다음 명령부터 보내지 않고 펜을 종이에서 떼어 일시정지 (resume으로 이어 그리거나 finish로 끝냄).
+        떼는 중이나 끝내고 돌아가는 중에 한 번 더 누르면 그 자리에서 멈춤. 일시정지 중에 누르면 그 자리에서 끝냄
+        (창을 닫을 때). 그 전 단계에서는 취소."""
+        if self.state == "paused":
+            self._decision.put("end")
+        self._stop_presses += 1
         self._stop.set()
         self._confirm.set()
         with self._calibration_reply_lock:
@@ -120,6 +134,23 @@ class DrawJob:
                 pass
 
     cancel = stop
+
+    def resume(self):
+        """⑤ 일시정지 중일 때만: 멈춘 자리부터 이어 그림."""
+        if self.state == "paused":
+            self._decision.put("resume")
+
+    def finish(self):
+        """⑤ 일시정지 중일 때만: 그리기를 끝냄. 저장된 대기 자세로 시작했고 '처음 위치로 되돌리기'를 켰으면 호밍 자세로 돌아감."""
+        if self.state == "paused":
+            self._decision.put("finish")
+
+    def end(self):
+        """창을 닫을 때: 어느 단계든 그 자리에서 끝냄.
+        그리는 중이면 펜을 떼지 않고 바로 끝낸다. 이미 일시정지면 기다리지 않고 끝냄."""
+        self._end_requested = True
+        self._decision.put("end")
+        self.stop()
 
     def jog(self, dx, dy, dz):
         """③ 시작 자세 맞추기 중일 때만: 로봇 좌표로 (dx, dy, dz) mm 움직이기 요청 (바쁘면 버려짐)."""
@@ -133,6 +164,29 @@ class DrawJob:
         if setup is not None:
             setup.accept()
 
+    def set_pen_backoff(self, values):
+        """⑤ 그리는 중: 아직 보내지 않은 명령의 끝점 물림(pen.start/end_backoff_mm)을 values로 바꿈.
+        값이 바뀌는 것은 접촉 자세의 X(종이에서 0~1 mm 뒤)뿐이라 명령 수·순서는 그대로입니다.
+        반환: 시작점부터 새 값으로 그리는 첫 획 번호. 그리는 중이 아니거나 공중 모드면 None."""
+        live = self._live
+        if live is None or live["air"] or self.state != "drawing":
+            return None
+        cfg = copy.deepcopy(self.cfg)
+        cfg["pen"]["start_backoff_mm"], cfg["pen"]["end_backoff_mm"] = values["start"], values["end"]
+        new = de.Planner(cfg).plan(live["strokes"])
+        cmds = live["cmds"]
+        if len(new) != len(cmds):
+            return None
+        first = live["acked"] + 2          # 실행기가 이미 꺼냈을 수 있는 바로 다음 명령은 그대로 둠
+        for i in range(first, len(cmds)):
+            if new[i] != cmds[i]:
+                cmds[i] = new[i]           # 목록 항목 교체는 원자적: 실행기는 보낼 때 그 자리 항목을 읽음
+        self.cfg["pen"]["start_backoff_mm"], self.cfg["pen"]["end_backoff_mm"] = values["start"], values["end"]
+        for i in range(first, len(cmds)):
+            if cmds[i][1].endswith(" pen-down"):
+                return int(cmds[i][1].split(" ")[1])
+        return len(live["strokes"])
+
     def join(self, timeout=None):
         if self._thread:
             self._thread.join(timeout)
@@ -145,6 +199,11 @@ class DrawJob:
         if status == "active":
             self.state = sid
         self.events("step", id=sid, status=status, message=message, hint=hint)
+
+    def timing_for(self, air):
+        """확인 화면에 보여줄 예상 시간. 공중 체크와 같은 air로 다시 계산한다."""
+        strokes = (self._snap or {}).get("strokes") or []
+        return de.estimate_time(strokes, self.cfg, air=bool(air))
 
     def answer_calibration_input(self, value):
         """GUI에서 받은 사람 응답을 캘리브레이션 작업 스레드에 전달."""
@@ -231,9 +290,10 @@ class DrawJob:
             with s.lock:
                 if s.result is None or s.sim is None:
                     raise de.DrawError("preflight", "처리 결과나 시뮬레이션이 없습니다.", "이미지를 다시 처리하세요.")
-                snap = {"strokes": [[tuple(pt) for pt in st] for st in s.result["strokes_mm"]],
+                snap = {"strokes": [[tuple(pt) for pt in st] for st in s.robot_strokes_mm()],   # 종이 맞춤 적용
                         "sim_raw": s.sim["raw"], "verdict": s.sim["summary"]["verdict"], "path": s.result["path"],
-                        "params": dict(s.result["params"]), "placement": dict(s.result["placement"])}
+                        "params": dict(s.result["params"]), "placement": dict(s.result["placement"]),
+                        "paper_fit": dict(s.paper_fit) if s.paper_fit else None}
             self._snap = snap
             verdict = snap["verdict"]
             if verdict.startswith("FAIL"):
@@ -307,6 +367,9 @@ class DrawJob:
                                           should_cancel=self._stop.is_set)
             self._step("connect", "done", f"캘리브레이션 완료 · {calibration_path.name}"
                        if calibration_path is not None and measured.get("result") == "ready" else "Idle")
+            if not self._virtual:
+                read = de.require_controller_settings(self.link, self.cfg)
+                self.summary["controller_settings"] = read if read is not None else "확인 꺼짐(설정 null)"
             # ③ 시작 위치
             self._step("start", "active", "펜 끝 위치를 확인합니다")
             used_start_pose = self._start_pose and not calibrated
@@ -384,18 +447,33 @@ class DrawJob:
                 controller.drawing_started()
             started, est = time.monotonic(), pre["timing"]["total_s"]
             starts = [i for i, (_, label) in enumerate(pre["cmds"]) if label.endswith("pen-down")]
+            # 획마다 마지막 명령 번호 (그리는 순서): 그 명령까지 ok가 오면 그 획은 다 그린 것
+            ends = {}
+            for i, (_, label) in enumerate(pre["cmds"]):
+                parts = label.split(" ")
+                if parts[0] == "stroke" and len(parts) > 1 and parts[1].isdigit():
+                    ends[int(parts[1])] = i
+            order = list(ends)
+            last_cmds = [ends[k] for k in order]
+            self.events("plan", strokes=[strokes[k] for k in order])
 
             def on_ack(acked, n):
+                self._live["acked"] = acked
                 writer.write(state="running", acked=acked)
                 el = time.monotonic() - started
                 ratio = el / max(est * acked / n, 1e-6) if acked else 1.0   # 실제/예상 속도 비로 보정
                 self.events("progress", acked=acked, total=n, stroke=sum(1 for i in starts if i < acked),
-                            strokes=len(strokes), elapsed_s=el, remaining_s=est * (1 - acked / n) * ratio)
+                            strokes=len(strokes), drawn=bisect.bisect_left(last_cmds, acked),
+                            elapsed_s=el, remaining_s=est * (1 - acked / n) * ratio)
 
-            result = de.execute(self.link, pre["cmds"], self.cfg, progress=lambda *_: None,
-                                on_ack=on_ack, should_stop=self._stop.is_set)
+            self._live = {"cmds": pre["cmds"], "strokes": strokes, "air": ch["air"], "acked": 0}
+            result, decision = self._draw_with_pauses(pre["cmds"], pre["planner"], on_ack)
             if result["result"] == "completed" and self._return_origin and (not ch["air"] or self.cfg.get("requested_start_pose")):
                 ok, why = self._return_to_origin(pre["planner"])
+                result = {**result, "returned_to_origin": ok, **({"return_error": why} if why else {})}
+            elif (result["result"] == "stopped_by_user" and decision == "finish" and self._return_origin
+                  and requested_mode):
+                ok, why = self._return_after_stop(pre["planner"])
                 result = {**result, "returned_to_origin": ok, **({"return_error": why} if why else {})}
             final = {"completed": "done", "stopped_by_user": "stopped"}.get(result["result"], "error")
             writer.write(state=final, message=result.get("error", result["result"]))
@@ -405,16 +483,24 @@ class DrawJob:
                                f"{result.get('return_error', '')} 다음 그림 전에 호밍하거나 펜 위치를 확인하세요.")
                 else:
                     self._step("drawing", "done", "완료")
+            elif final == "stopped" and result.get("returned_to_origin"):
+                self._step("drawing", "failed", "사용자 멈춤", "펜을 종이에서 떼고 호밍 자세(관절 0)로 돌아왔습니다.")
+            elif final == "stopped" and result.get("returned_to_origin") is False:
+                self._step("drawing", "failed", "사용자 멈춤 (호밍 자세로 돌아가지 못했습니다)",
+                           f"{result.get('return_error', '')} 펜과 로봇 상태를 확인하세요.")
+            elif final == "stopped" and result.get("pen_lifted"):
+                self._step("drawing", "failed", "사용자 멈춤", "펜을 종이에서 떼고 그 자리에 두었습니다.")
             else:
                 self._step("drawing", "failed", "사용자 멈춤" if final == "stopped" else result.get("error", ""),
+                           (f"{result['lift_error']} " if result.get("lift_error") else "") +
                            "자동 복구를 하지 않았습니다. 펜과 로봇 상태를 확인하세요.")
             record = de.write_run_record({
                 "strokes_json": str(strokes_path), "stroke_count": len(strokes), "command_count": total,
                 "air_mode": ch["air"], "pending_limits": ch["pending"], "estimated_time": pre["timing"],
-                "return_to_origin": self._return_origin,
+                "return_to_origin": self._return_origin, "paper_fit": snap["paper_fit"],
                 "source": {"image": snap["path"], "params": snap["params"]},
                 "virtual": self._virtual, "virtual_speed": self._speed if self._virtual else None,
-                "port": self.summary["port"],
+                "port": self.summary["port"], "controller_settings": self.summary.get("controller_settings"),
                 "run_id": run_id, "trajectory": str(traj)}, result, self.cfg)
         except de.DrawError as e:
             self._step(e.step, "failed", e.message, e.hint)
@@ -426,6 +512,7 @@ class DrawJob:
             result = {"result": "error", "error": str(e)}
             writer.write(state="error", message=str(e))
         finally:
+            self._live = None               # 끝점 물림은 보내는 중일 때만 바꿀 수 있음
             self._air_cancel.set()          # 남은 공중 경로 계산이 CPU를 쓰지 않게
             if self.link is not None:
                 try:
@@ -433,7 +520,8 @@ class DrawJob:
                 except Exception as e:  # 닫기 실패해도 finished는 보내야 GUI 잠금이 풀림
                     self.events("step", id="done", status="failed", message=f"포트 닫기 실패: {e}",
                                 hint="USB를 뺐다 꽂고 앱을 다시 시작하세요.")
-            controller.finished(result.get("result"), link_open=self.link is not None)
+            controller.finished(result.get("result"), link_open=self.link is not None,
+                                returned_to_origin=result.get("returned_to_origin"))
             self._step("done", "active", "")
             self._step("done", "done", result["result"])
             self.state = "done"
@@ -457,6 +545,128 @@ class DrawJob:
         finally:
             self.start_pose_setup = None
 
+    def _draw_with_pauses(self, cmds, planner, on_ack):
+        """⑤ 명령을 보내다 [멈춤]이 눌리면 펜을 종이에서 떼고 일시정지한다. 사람이 [이어서]를 고르면 멈춘 자리에 다시 펜을
+        대고 다음 명령부터 이어 보낸다(이미 그은 부분은 다시 긋지 않음). 같은 연결·같은 명령 목록을 그대로 쓴다.
+        반환: (실행 결과(구간들을 합침), 마지막 선택: None(멈춤 없이 끝남·오류) / "finish"(끝내기) / "end"(그 자리에서 끝))."""
+        start, segments, pauses = 0, [], 0
+        while True:
+            r = de.execute(self.link, cmds, self.cfg, progress=lambda *_: None, on_ack=on_ack,
+                           should_stop=self._stop.is_set, start=start)
+            segments.append(r)
+            if r["result"] != "stopped_by_user":
+                return self._merged(segments, r, pauses), None
+            sent = r["commands_sent"]
+            while True:     # 일시정지: 펜 떼기 → 사람의 선택 → (이어서) 멈춘 자리에 다시 펜 대기
+                pauses += 1
+                lifted, lift_error = self._lift_for_pause(planner)
+                if lift_error:
+                    return self._merged(segments, {**r, "lift_error": lift_error}, pauses), "end"
+                decision = self._wait_pause_decision(sent, len(cmds), lifted)
+                if decision != "resume":
+                    return self._merged(segments, {**r, "pen_lifted": lifted}, pauses), decision
+                try:
+                    start = self._approach_for_resume(planner, cmds, sent)
+                except (de.ControllerError, OSError) as e:
+                    failed = {**r, "result": "stopped_on_error", "error": f"이어 그리려고 펜을 대는 중 오류: {e}"}
+                    return self._merged(segments, failed, pauses), None
+                if start is not None:
+                    break
+
+    @staticmethod
+    def _merged(segments, last, pauses):
+        """이어 그린 구간들의 실행 결과를 하나로: 마지막 구간의 결과·보낸 수에 걸린 시간과 컨트롤러 기록을 합침."""
+        merged = {**last, "elapsed_s": round(sum(s.get("elapsed_s", 0.0) for s in segments), 1),
+                  "controller_trace": [t for s in segments for t in s.get("controller_trace", [])]}
+        if pauses:
+            merged["pauses"] = pauses
+        return merged
+
+    def _lift_for_pause(self, planner):
+        """[멈춤] 직후: 멈춰 선 자리에서 펜을 종이 반대쪽(X)으로 펜업 높이까지 곧게 뗀다(옆으로 가지 않음).
+        공중 모드는 이미 종이에서 떨어져 있어 움직이지 않는다. 떼는 중에 한 번 더 누르면 그 자리에서 멈춤.
+        창을 닫는 중(end)이면 움직이지 않고 그 자리에서 바로 끝낸다 (창이 오래 기다리지 않게).
+        반환: (뗐는지, 오류 문구 또는 "")."""
+        if planner.air or self._end_requested:
+            return False, ""
+        base = self._stop_presses     # 멈춤은 보내던 명령의 ok 뒤에야 걸리므로, 떼기 시작한 뒤 누른 것만 셈
+
+        def again():
+            return self._stop_presses > base
+
+        self._step("drawing", "active", "멈춤: 펜을 종이에서 떼는 중입니다. 다시 누르면 그 자리에서 멈춥니다")
+        try:
+            self._lift_straight(planner, again)
+        except de.StopRequested:
+            return False, ""
+        except de.ControllerError as e:
+            return False, f"펜을 떼는 중 오류: {e}"
+        except OSError as e:
+            return False, f"로봇과 USB 통신이 끊겼습니다: {e}"
+        return True, ""
+
+    def _lift_straight(self, planner, should_stop):
+        """멈춰 선 자리(Y·Z 그대로)에서 X만 펜업 높이까지 뺀다. 이미 그 높이 이상 떨어져 있으면 보내지 않는다."""
+        x, y, z = self._settled_tcp(should_stop)
+        target = (planner._farther_x(x, planner.contact_x(y, z) + planner.up_dx), y, z)
+        if should_stop():
+            raise de.StopRequested()
+        if abs(target[0] - x) > 0.05:
+            self.link.send_and_ack(planner.gcode(target, planner.feeds["approach"]), self.cfg["ack_timeout_s"],
+                                   should_stop=should_stop)
+            self.link.wait_until_pose(target, self.cfg["idle_timeout_s"], should_stop=should_stop)
+
+    def _pending_pause_decision(self):
+        """펜을 떼는 동안 들어온 선택. finish가 end보다 이기고, 아니면 가장 최근 것을 남긴다."""
+        pending = []
+        while True:
+            try:
+                pending.append(self._decision.get_nowait())
+            except queue.Empty:
+                break
+        if "finish" in pending:
+            return "finish"
+        if "end" in pending:
+            return "end"
+        return pending[-1] if pending else None
+
+    def _wait_pause_decision(self, sent, total, lifted):
+        """일시정지: 사람이 resume / finish / end 중 하나를 고를 때까지 기다린다 (포트는 연 채로, 로봇은 그 자리에).
+        펜을 떼는 동안 이미 고른 finish/end는 기다리지 않고 쓴다. 창을 닫는 중이면(end) 기다리지 않는다."""
+        early = self._pending_pause_decision()
+        if early == "finish":
+            return "finish"
+        if early == "end" or self._end_requested:
+            return "end"
+        if early is not None:
+            self._decision.put(early)
+        where = "펜을 종이에서 뗐습니다" if lifted else "로봇이 그 자리에 있습니다"
+        self._step("drawing", "active", f"일시정지 (명령 {sent:,}/{total:,}): {where}. "
+                                        "[▶ 이어서 그리기]를 누르면 멈춘 자리부터 다시 그립니다")
+        self.state = "paused"
+        self.events("paused", acked=sent, total=total)
+        decision = self._decision.get()
+        if decision == "resume":
+            self._stop.clear()
+            self.events("resumed")
+        return decision
+
+    def _approach_for_resume(self, planner, cmds, sent):
+        """이어서: 멈춘 자리에 펜을 다시 댄다(de.resume_commands). 반환: 이어 보낼 첫 명령 번호. 펜을 대는 중에
+        [멈춤]을 누르면 None(다시 일시정지)."""
+        prefix, start = de.resume_commands(planner, cmds, sent)
+        self._step("drawing", "active", "이어 그리기: 멈춘 자리에 펜을 다시 대는 중입니다" if prefix else "그리는 중 (이어서)")
+        try:
+            for line, _label in prefix:
+                self.link.send_and_ack(line, self.cfg["ack_timeout_s"], should_stop=self._stop.is_set)
+                target = tuple(float(v) for v in de._XYZ.search(line).groups())
+                self.link.wait_until_pose(target, self.cfg["idle_timeout_s"], should_stop=self._stop.is_set)
+        except de.StopRequested:
+            return None
+        if prefix:
+            self._step("drawing", "active", "그리는 중 (이어서)")
+        return start
+
     def _return_to_origin(self, planner):
         """완료 뒤 펜을 처음 상태로 되돌림. 반환: (성공 여부 또는 None(공중 모드라 해당 없음), 오류 문구).
         자동 복구는 하지 않는다: 멈춤·오류가 나면 그 자리에서 멈추고 사람에게 알린다."""
@@ -466,7 +676,7 @@ class DrawJob:
             try:
                 sp.execute_requested_return(self.link, self.cfg, should_stop=self._stop.is_set)
                 return True, ""
-            except (sp.StartPoseError, de.ControllerError) as e:
+            except (sp.StartPoseError, de.ControllerError, OSError) as e:
                 return False, f"호밍 자세 복귀 실패: {e}"
         cmds = planner.return_to_origin()
         if not cmds:
@@ -485,6 +695,56 @@ class DrawJob:
         except Exception as e:   # 이미 끝까지 그린 그림이 되돌리기의 예상 못 한 오류 때문에 실패로 바뀌지 않게
             return False, f"시작 위치로 돌아가는 중 오류: {type(e).__name__}: {e}"
         return True, ""
+
+    def _return_after_stop(self, planner):
+        """일시정지에서 [끝내기]: 펜을 종이 반대쪽으로 펜업 높이까지 곧게 뗀 다음(일시정지에서 이미 뗐으면 보내지 않음),
+        1번 대기 자세를 거쳐 호밍 자세(관절 0)로. 펜이 종이를 누른 채일 수 있어 먼저 떼야 관절 이동이 종이를 긁지 않는다.
+        대기 자세로 가는 관절 경로는 start_pose가 펜 끝과 종이 거리를 검사하고, 통과하지 못하면 움직이지 않는다.
+        돌아가는 중에 [멈춤]을 누르면 그 자리에서 멈춤. 반환: (성공 여부, 오류 문구)."""
+        from . import start_pose as sp
+
+        base = self._stop_presses     # 돌아가기 시작한 뒤 누른 것만 셈
+
+        def again():
+            return self._stop_presses > base
+
+        self._step("drawing", "active", "끝내기: 펜을 종이에서 떼고 호밍 자세(관절 0)로 돌아가는 중입니다. "
+                                        "다시 누르면 그 자리에서 멈춥니다")
+        try:
+            self._lift_straight(planner, again)
+            sp.execute_requested_return(self.link, self.cfg, should_stop=again)
+        except de.StopRequested:
+            return False, "다시 [멈춤]을 눌러 그 자리에 두었습니다."
+        except sp.StartPoseError as e:
+            if again():               # 관절 이동 사이에 [멈춤]: start_pose는 '취소했습니다'로 멈춤
+                return False, "다시 [멈춤]을 눌러 그 자리에 두었습니다."
+            return False, f"호밍 자세 복귀 실패: {e}"
+        except de.ControllerError as e:
+            return False, f"펜을 떼고 돌아가는 중 오류: {e}"
+        except OSError as e:
+            return False, f"로봇과 USB 통신이 끊겼습니다: {e}"
+        return True, ""
+
+    def _settled_tcp(self, should_stop, samples=3, tol_mm=0.05):
+        """멈춘 직전에 보낸 명령이 끝나 Idle에서 같은 좌표가 samples번 이어 보고될 때까지 기다린 TCP.
+        ok는 명령을 받았다는 뜻일 뿐이라, 첫 Idle만 보고 다음 명령을 계산하면 아직 움직일 자리를 놓칠 수 있다."""
+        deadline = time.monotonic() + self.cfg["idle_timeout_s"]
+        last, same = None, 0
+        while time.monotonic() < deadline:
+            if should_stop():
+                raise de.StopRequested()
+            state, tcp, raw = self.link.query_status()
+            if any(t in raw.lower() for t in de.ERROR_TOKENS):
+                raise de.ControllerError(f"멈춘 뒤 오류 상태: {raw}")
+            if state == "Idle" and tcp is not None:
+                same = same + 1 if last is not None and max(abs(a - b) for a, b in zip(tcp, last)) <= tol_mm else 1
+                last = tcp
+                if same >= samples:
+                    return tuple(float(v) for v in tcp)
+            else:
+                last, same = None, 0
+            time.sleep(0.1)
+        raise de.ControllerError("멈춘 뒤 로봇이 멈춰 선 위치를 확인하지 못했습니다")
 
     def _start_air_simulation(self, strokes):
         """공중 경로 시뮬레이션을 백그라운드 스레드로 시작 (그림·설정은 이 시점의 사본을 씀)."""

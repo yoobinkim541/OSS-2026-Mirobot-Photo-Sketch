@@ -18,6 +18,13 @@ CFG = golden.default_cfg()
 SQUARE = [[(-10.0, -10.0), (10.0, -10.0), (10.0, 10.0), (-10.0, 10.0), (-10.0, -10.0)]]
 
 
+def homed(cfg, **kw):
+    """호밍을 마친(Idle) 가상 로봇. 실행기는 호밍 뒤에 불리고, 가상 로봇도 Idle이 아니면 도착 확인을 통과시키지 않는다."""
+    v = VirtualMirobotLink(cfg, homing_s=0.0, **kw)
+    v.wait_for_homing(1, lambda *_: None)
+    return v
+
+
 class VirtualLinkTest(unittest.TestCase):
     def test_homing_reports_idle_at_paper_center(self):
         v = VirtualMirobotLink(CFG, homing_s=0.05)
@@ -38,8 +45,7 @@ class VirtualLinkTest(unittest.TestCase):
 
     def test_ack_takes_expected_time_scaled_by_speed(self):
         cmds = de.Planner(CFG).plan(SQUARE)
-        v = VirtualMirobotLink(CFG, speed=50)
-        v.wait_for_homing(1, lambda *_: None)
+        v = homed(CFG, speed=50)
         t0 = time.monotonic()
         result = de.execute(v, cmds, CFG, progress=lambda *_: None)
         took = time.monotonic() - t0
@@ -56,16 +62,16 @@ class VirtualLinkTest(unittest.TestCase):
 
     def test_fail_and_timeout(self):
         cmds = de.Planner(CFG).plan(SQUARE)
-        r = de.execute(VirtualMirobotLink(CFG, speed=100, fail_at=3), cmds, CFG, progress=lambda *_: None)
+        r = de.execute(homed(CFG, speed=100, fail_at=3), cmds, CFG, progress=lambda *_: None)
         self.assertEqual((r["result"], r["commands_sent"]), ("stopped_on_error", 2))
         cfg = {**CFG, "ack_timeout_s": 0.2}
-        r = de.execute(VirtualMirobotLink(cfg, speed=100, timeout_at=2), cmds, cfg, progress=lambda *_: None)
+        r = de.execute(homed(cfg, speed=100, timeout_at=2), cmds, cfg, progress=lambda *_: None)
         self.assertEqual((r["result"], r["commands_sent"]), ("stopped_on_error", 1))
         self.assertIn("시간 초과", r["error"])
 
     def test_stop_interrupts_a_long_move_quickly(self):
         cmds = de.Planner(CFG).plan(SQUARE)
-        v = VirtualMirobotLink(CFG, speed=1)                  # 1배속: 한 명령이 몇 초
+        v = homed(CFG, speed=1)                               # 1배속: 한 명령이 몇 초
         stop = threading.Event()
         threading.Timer(0.3, stop.set).start()
         t0 = time.monotonic()
@@ -77,7 +83,7 @@ class VirtualLinkTest(unittest.TestCase):
     def test_on_ack_called_for_every_command(self):
         cmds = de.Planner(CFG).plan(SQUARE)
         seen = []
-        de.execute(VirtualMirobotLink(CFG, speed=500), cmds, CFG, progress=lambda *_: None,
+        de.execute(homed(CFG, speed=500), cmds, CFG, progress=lambda *_: None,
                    on_ack=lambda a, n: seen.append((a, n)))
         self.assertEqual(seen, [(i + 1, len(cmds)) for i in range(len(cmds))])
 

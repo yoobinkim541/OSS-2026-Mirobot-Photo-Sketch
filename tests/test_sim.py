@@ -5,6 +5,7 @@
 
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +38,20 @@ class KinematicsTest(unittest.TestCase):
 
 
 class PathTest(unittest.TestCase):
+    def test_normal_segment_rejects_deviation_from_fk_joint_path(self):
+        targets = [(np.array([0., 0., 0.]), 'start', False, 0),
+                   (np.array([10., 0., 0.]), 'stroke 0 pen-down', False, 200)]
+        samples = [(np.zeros(6), np.array([10., 0., 0.]), 'stroke 0 pen-down', False, 0)]
+        transform = np.eye(4)
+        transform[:3, 3] = [10., 0., 1.]
+        with mock.patch.object(ms, 'fk', return_value=(transform, [])):
+            self.assertTrue(ms.check_normal_segments(targets, samples))
+
+    def test_normal_segment_rejects_diagonal_command_even_if_fk_matches(self):
+        targets = [(np.array([0., 0., 0.]), 'start', False, 0),
+                   (np.array([10., 0., 1.]), 'stroke 0 pen-down', False, 200)]
+        self.assertTrue(ms.check_normal_segments(targets, []))
+
     def test_orientation_f_passes(self):
         _, strokes = ms.de.load_strokes(ROOT / "trajectories" / "orientation-test-F.json")
         result = ms.simulate(ms.plan_targets(strokes, CFG))

@@ -26,6 +26,7 @@ class Recorder:
         self.events, self.lock = [], threading.Lock()
         self.ready = threading.Event()
         self.done = threading.Event()
+        self.paused = threading.Event()
 
     def __call__(self, kind, **data):
         with self.lock:
@@ -34,6 +35,8 @@ class Recorder:
             self.ready.set()
         if kind == "finished":
             self.done.set()
+        if kind == "paused":
+            self.paused.set()
 
     def steps(self):
         return [(d["id"], d["status"]) for k, d in self.events if k == "step"]
@@ -46,6 +49,9 @@ class PhysicalLinkStub:
 
     def close(self):
         self.closed = True
+
+    def read_settings(self, timeout=10.0):
+        return {"$3": "123", "$23": "60"}
 
 
 class DrawJobTest(unittest.TestCase):
@@ -97,6 +103,13 @@ class DrawJobTest(unittest.TestCase):
         self.assertEqual(saved_strokes[0], [tuple(pt) for pt in self.session.result["strokes_mm"][0]])
         prog = [d for k, d in rec.events if k == "progress"]
         self.assertEqual(prog[-1]["acked"], prog[-1]["total"])
+        # 카메라 선 확인용: 그리는 순서의 획 목록 한 번, 진행마다 다 그린 획 수 (처음 0 → 끝에 전부, 줄지 않음)
+        plan = next(d for k, d in rec.events if k == "plan")["strokes"]
+        self.assertEqual(len(plan), len(saved_strokes))
+        drawn = [d["drawn"] for d in prog]
+        self.assertEqual(drawn, sorted(drawn))
+        self.assertEqual(drawn[-1], len(plan))
+        self.assertLess(drawn[0], len(plan))
         live = lp.read_progress(Path(self.tmp.name) / "live.json")
         self.assertEqual((live["state"], live["acked"]), ("done", live["total"]))
         self.assertTrue(Path(lp.to_local_path(live["trajectory"])).exists())
@@ -160,11 +173,29 @@ class DrawJobTest(unittest.TestCase):
         while not any(k == "progress" for k, _ in rec.events) and time.monotonic() < deadline:
             time.sleep(0.02)
         job.stop()
+        self.assertTrue(rec.paused.wait(10))                 # 멈춤은 작업을 끝내지 않고 일시정지
+        self.assertEqual(job.state, "paused")
+        self.assertFalse(rec.done.is_set())
+        job.stop()                                            # 일시정지 중에 한 번 더: 그 자리에서 끝냄
         self.assertTrue(rec.done.wait(10))
         fin = next(d for k, d in rec.events if k == "finished")
         self.assertEqual(fin["result"]["result"], "stopped_by_user")
         self.assertEqual(lp.read_progress(Path(self.tmp.name) / "live.json")["state"], "stopped")
         self.assertEqual(job.link.state, "closed")
+
+    def test_closing_while_drawing_ends_without_waiting_in_the_pause(self):
+        rec = Recorder()
+        job = self.job(rec)
+        job.start(virtual=True, virtual_speed=1)
+        self.assertTrue(rec.ready.wait(10))
+        job.confirm(checked=True)
+        deadline = time.monotonic() + 30
+        while not any(k == "progress" for k, _ in rec.events) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        job.end()
+        self.assertTrue(rec.done.wait(10))
+        self.assertFalse(rec.paused.is_set())
+        self.assertEqual(next(d for k, d in rec.events if k == "finished")["result"]["result"], "stopped_by_user")
 
     def test_cancel_at_confirmation_closes_without_record(self):
         rec = Recorder()
@@ -254,6 +285,79 @@ class DrawJobTest(unittest.TestCase):
         fin = next(d for k, d in rec.events if k == "finished")
         self.assertEqual(fin["result"]["result"], "completed")
         self.assertTrue(link.closed)
+
+    def test_mismatched_controller_settings_stop_before_any_motion(self):
+        cfg = golden.default_cfg()
+        session = SketchSession(cfg)
+        session.set_image(Path(self.tmp.name) / "line.png")
+        session.update_params({"box_mm": 40, "epsilon_px": 4.0})
+        session.run_current()
+        session.simulate()
+        rec = Recorder()
+        job = self.job(rec)
+        job.session, job.cfg = session, cfg
+        c = cfg["paper_center_tcp_mm"]
+        link = PhysicalLinkStub()
+        link.sent = []
+        link.read_settings = lambda timeout=10.0: {"$3": "127", "$23": "56"}
+        link.send_and_ack = lambda *args, **kwargs: link.sent.append(args[:1])
+        with mock.patch.object(de, "open_link", return_value=link), \
+             mock.patch.object(de, "connect_and_home", return_value=(c["x"], c["y"], c["z"])), \
+             mock.patch.object(de, "execute") as execute:
+            job.start(virtual=False, return_to_origin=False)
+            self.assertTrue(rec.done.wait(15), rec.events[-5:])
+            execute.assert_not_called()
+        fin = next(d for k, d in rec.events if k == "finished")
+        self.assertEqual(fin["result"]["result"], "not_started")
+        self.assertIn("127", fin["result"]["error"])
+        self.assertIn("123", fin["result"]["error"])
+        self.assertEqual(link.sent, [])
+        self.assertTrue(link.closed)
+
+    def test_pen_backoff_changed_while_drawing_applies_only_to_commands_not_yet_sent(self):
+        """카메라 보정이 그리는 중에 끝점 물림을 바꾸면, 이미 보낸 명령은 그대로이고 남은 획의 접촉 X만 뒤로 물러남."""
+        cfg = golden.default_cfg()
+        session = SketchSession(cfg)
+        session.set_image(Path(self.tmp.name) / "line.png")
+        session.update_params({"box_mm": 40, "epsilon_px": 4.0})
+        session.run_current()
+        session.simulate()
+        rec = Recorder()
+        job = self.job(rec)
+        job.session, job.cfg = session, cfg
+        c = cfg["paper_center_tcp_mm"]
+        sent, change_at, applied = [], 5, []
+
+        def fake_execute(link, cmds, cfg_, progress=None, on_ack=None, should_stop=None, start=0):
+            before = list(cmds)
+            for i in range(start, len(cmds)):
+                sent.append(cmds[i])          # 실제 실행기처럼 보낼 때 그 자리 항목을 읽음
+                if on_ack:
+                    on_ack(i + 1, len(cmds))
+                if i + 1 == change_at:
+                    applied.append(job.set_pen_backoff({"start": 0.4, "end": 0.6}))
+            return {"result": "completed", "commands_sent": len(cmds), "elapsed_s": 0.1, "before": before}
+
+        with mock.patch.object(de, "open_link", return_value=PhysicalLinkStub()), \
+             mock.patch.object(de, "connect_and_home", return_value=(c["x"], c["y"], c["z"])), \
+             mock.patch.object(de, "execute", side_effect=fake_execute):
+            job.start(virtual=False, return_to_origin=False)
+            self.assertTrue(rec.ready.wait(15), rec.events[-5:])
+            job.confirm(air=False, pending=False, checked=True)
+            self.assertTrue(rec.done.wait(10), rec.events[-5:])
+        before = next(d for k, d in rec.events if k == "finished")["result"]["before"]
+        self.assertEqual([l for _, l in sent], [l for _, l in before])
+        x = lambda line: float(re.search(r"X([-\d.]+)", line).group(1))
+        sign = cfg["pen"]["retract_x_sign"]
+        first = change_at + 1                                   # 바로 다음 명령은 이미 꺼냈을 수 있어 그대로
+        self.assertEqual(sent[:first], before[:first])
+        downs = [i for i, (_, l) in enumerate(before) if l.endswith("pen-down") and i >= first]
+        self.assertTrue(downs)
+        for i in downs:
+            self.assertAlmostEqual((x(sent[i][0]) - x(before[i][0])) * sign, 0.4, places=3)
+        self.assertEqual(applied[0], int(before[downs[0]][1].split()[1]))
+        self.assertEqual((cfg["pen"]["start_backoff_mm"], cfg["pen"]["end_backoff_mm"]), (0.4, 0.6))
+        self.assertIsNone(job.set_pen_backoff({"start": 0.0, "end": 0.0}))   # 끝난 뒤에는 바꾸지 않음
 
     def _start_pose_run(self, dx, air=True):
         """실물 연결(보정 안 함)에서 호밍 자세가 설정 파일의 종이 중심에서 X로 dx mm 벗어난 상황."""
@@ -508,8 +612,10 @@ class DrawJobTest(unittest.TestCase):
             job._air_thread.join(5)
             self.assertFalse(job._air_thread.is_alive(), "남은 공중 경로 계산이 계속 돌고 있음")
 
-    def _finish_run(self, air=False, return_to_origin=True, link_kw=None, stop_after=None, link_cls=None):
-        """가상 로봇으로 끝까지(또는 중간까지) 그린다. 반환: (job, link, finished 결과, 이벤트 기록)."""
+    def _finish_run(self, air=False, return_to_origin=True, link_kw=None, stop_after=None, link_cls=None,
+                    on_pause=lambda job: job.finish()):
+        """가상 로봇으로 끝까지(또는 중간까지) 그린다. stop_after: 명령을 이만큼 보낸 뒤 [멈춤], 일시정지가 되면 on_pause(job).
+        반환: (job, link, finished 결과, 이벤트 기록)."""
         rec = Recorder()
         job = self.job(rec)
         holder = {}
@@ -528,6 +634,9 @@ class DrawJobTest(unittest.TestCase):
                 while len(holder["link"].sent) < stop_after and not rec.done.is_set() and time.monotonic() < deadline:
                     time.sleep(0.005)
                 job.stop()
+                self.assertTrue(rec.paused.wait(30))
+                rec.sent_at_pause = len(holder["link"].sent)   # 펜 떼기까지 끝난 뒤, 사람이 고르기 전
+                on_pause(job)
             self.assertTrue(rec.done.wait(90))
         fin = next(d for k, d in rec.events if k == "finished")
         return job, holder["link"], fin, rec
@@ -556,14 +665,55 @@ class DrawJobTest(unittest.TestCase):
         self.assertEqual(fin["result"]["result"], "completed")
         self.assertIsNone(fin["result"].get("returned_to_origin"))
 
-    def test_no_automatic_movement_after_stop_or_error(self):
+    @staticmethod
+    def _planned(job, rec):
+        """이번 실행이 보낸 그림 명령 목록 (그리는 순서의 획으로 다시 계획)."""
+        strokes = next(d for kind, d in rec.events if kind == "plan")["strokes"]
+        return de.Planner(job.cfg).plan(strokes)
+
+    @staticmethod
+    def _after_stop(link, cmds, k, rec):
+        """멈춘 뒤 보낸 것. 가상 로봇은 ok 전에 멈춘 명령도 sent에 남기지만 실행하지는 않으므로 뺀다
+        (일시정지가 되기 전에 보낸 것 중 다음 계획 명령과 같은 줄)."""
+        before_pause = link.sent[k:rec.sent_at_pause]
+        aborted = bool(before_pause) and k < len(cmds) and before_pause[0] == cmds[k][0]
+        return link.sent[k + 1:] if aborted else link.sent[k:]
+
+    def test_stop_only_lifts_the_pen_straight_and_error_does_not_move(self):
         job, link, fin, rec = self._finish_run(stop_after=20)
         self.assertEqual(fin["result"]["result"], "stopped_by_user")
         self.assertNotIn("returned_to_origin", fin["result"])
+        k = next(d for kind, d in rec.events if kind == "paused")["acked"]
+        after = self._after_stop(link, self._planned(job, rec), k, rec)
+        self.assertLessEqual(len(after), 1)                    # 끝내기까지 보낸 것은 많아야 펜 떼기 하나
+        if after:                                              # 이미 떨어져 있었으면 보내지 않음
+            yz = lambda line: line.split(" Y")[1].split(" A")[0]
+            self.assertEqual(yz(after[0]), yz(link.sent[k - 1]))     # 옆으로 가지 않고 종이 반대쪽으로만
+            self.assertTrue(fin["result"]["pen_lifted"])
         job2, link2, fin2, rec2 = self._finish_run(link_kw={"fail_at": 30})
         self.assertEqual(fin2["result"]["result"], "stopped_on_error")
         self.assertNotIn("returned_to_origin", fin2["result"])
         self.assertEqual(len(link2.sent), 30)
+
+    def test_resume_after_stop_finishes_the_drawing_without_redrawing(self):
+        _, base_link, base_fin, _ = self._finish_run()
+        job, link, fin, rec = self._finish_run(stop_after=40, on_pause=lambda job: job.resume())
+        res = fin["result"]
+        self.assertEqual((res["result"], res["pauses"], res["returned_to_origin"]), ("completed", 1, True))
+        self.assertEqual(res["commands_sent"], base_fin["result"]["commands_sent"])
+        base = base_link.sent                                  # 멈추지 않고 그린 실행에서 보낸 것
+        cmds = self._planned(job, rec)
+        self.assertEqual(base[:len(cmds)], [line for line, _ in cmds])
+        k = next(d for kind, d in rec.events if kind == "paused")["acked"]
+        prefix, start = de.resume_commands(de.Planner(job.cfg), cmds, k)
+        rest = base[start:]                                    # 남은 그림 명령 + 끝나고 돌아가는 명령
+        self.assertEqual(link.sent[:k], base[:k])
+        after = self._after_stop(link, cmds, k, rec)
+        self.assertEqual(after[len(after) - len(rest):], rest)
+        middle = after[:len(after) - len(rest)]                # 펜 떼기(이미 떨어져 있으면 없음) + 다시 대기
+        self.assertIn(len(middle) - len(prefix), (0, 1))
+        self.assertEqual(middle[len(middle) - len(prefix):], [line for line, _ in prefix])
+        self.assertEqual(sum(1 for kind, _ in rec.events if kind == "resumed"), 1)
 
     def test_failure_while_returning_is_reported_without_recovery(self):
         _probe_job, _probe_link, probe, _ = self._finish_run()

@@ -9,6 +9,7 @@
 """
 
 import copy
+import math
 import json
 
 import numpy as np
@@ -21,13 +22,23 @@ LEGACY_PENDING = (60.0, 60.0)     # 예전 기본 넓은 범위 (±60mm) — 사
 class Region:
     def __init__(self, x_max, y_min, roof):
         self.x_max, self.y_min = float(x_max), float(y_min)
-        roof = sorted((float(x), float(y)) for x, y in roof)
-        self._rx = np.array([p[0] for p in roof])
-        self._ry = np.array([p[1] for p in roof])
+        deduped = []
+        for x, y in sorted((float(x), float(y)) for x, y in roof):
+            if deduped and deduped[-1][0] == x:
+                if y < deduped[-1][1]:
+                    deduped[-1] = (x, y)
+            else:
+                deduped.append((x, y))
+        if not deduped:
+            raise ValueError("지붕(roof_mm)이 비어 있습니다")
+        self._rx = np.array([p[0] for p in deduped])
+        self._ry = np.array([p[1] for p in deduped])
 
     @classmethod
     def from_cfg(cls, lim):
         if "roof_mm" in lim:
+            if not lim["roof_mm"]:
+                raise ValueError("지붕(roof_mm)이 비어 있습니다")
             return cls(lim["x_max_mm"], lim["y_min_mm"], lim["roof_mm"])
         x, y = float(lim["max_abs_paper_x_mm"]), float(lim["max_abs_paper_y_mm"])
         return cls(x, -y, [(0, y), (x, y)])
@@ -55,6 +66,8 @@ class Region:
 
     def fit(self, w, h, eps=1e-6):
         """w×h 그림 상자를 둘 중심 (0, cy). 종이 중심에 들어가면 (0, 0), 아니면 가장 적게 아래로. 안 되면 None."""
+        if not _positive_finite(w, h):
+            return None
         if w / 2 > self.x_max + eps:
             return None
         ceiling = self._ceiling(w / 2)
@@ -64,8 +77,10 @@ class Region:
         return 0.0, float(cy)
 
     def max_scale(self, w, h):
-        """fit(s·w, s·h)가 되는 가장 큰 s."""
-        lo, hi = 0.0, 2 * self.x_max / max(w, 1e-12)
+        """fit(s·w, s·h)가 되는 가장 큰 s. 크기가 유한한 양수가 아니면 0."""
+        if not _positive_finite(w, h):
+            return 0.0
+        lo, hi = 0.0, 2 * self.x_max / w
         for _ in range(60):
             mid = (lo + hi) / 2
             if self.fit(mid * w, mid * h) is None:
@@ -73,6 +88,10 @@ class Region:
             else:
                 lo = mid
         return lo
+
+
+def _positive_finite(w, h):
+    return math.isfinite(w) and math.isfinite(h) and w > 0 and h > 0
 
 
 def executor_region(cfg):
@@ -97,6 +116,8 @@ def migrate(cfg):
 
 def effective_long_mm(region, box_mm, w, h):
     """긴 변 box_mm로 요청한 w×h 그림이 영역에 맞춰 실제로 그려질 긴 변 (mm). 큰 세로 그림은 위쪽 한계 때문에 줄어듦."""
+    if not _positive_finite(w, h) or not (math.isfinite(box_mm) and box_mm > 0):
+        return 0.0
     long_side = max(w, h)
     scale = min(box_mm / long_side, region.max_scale(w, h))
     return scale * long_side

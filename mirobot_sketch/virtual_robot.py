@@ -104,13 +104,25 @@ class VirtualMirobotLink:
                 self.abc = tuple(abc)
             self.pos = target
 
-    def wait_idle(self, timeout):
+    def read_settings(self, timeout=10.0):
+        reply = getattr(self, "settings_reply", None)
+        if reply is None:
+            return {"$3": "123", "$23": "60"}
+        return dict(reply)
+
+    def wait_idle(self, timeout, should_stop=None):
+        if should_stop and should_stop():
+            raise StopRequested()
         return self.pos
 
     def wait_until_x(self, target_x, timeout, tol=1.5):
         return self.pos
 
-    def wait_until_pose(self, pose, timeout, tol=1.5, yz_tol=1.0, contact_sign=1.0):
+    def wait_until_pose(self, pose, timeout, tol=1.5, yz_tol=1.0, contact_sign=1.0, should_stop=None):
+        if should_stop and should_stop():
+            raise StopRequested()
+        if self.state != "Idle" or any(abs(a - b) > tol for a, b in zip(self.pos, pose)):
+            raise ControllerError("가상 로봇이 목표 위치에 도착하지 않았습니다")
         return self.pos
 
     def wait_until_left_contact(self, contact_x, timeout, retract_sign=-1.0, min_mm=5.0):

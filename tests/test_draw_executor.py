@@ -73,6 +73,38 @@ SQUARE = [[(-10.0, -10.0), (10.0, -10.0), (10.0, 10.0), (-10.0, 10.0), (-10.0, -
 
 
 class PlannerTest(unittest.TestCase):
+    def test_radial_retraction_uses_distance_and_caps_at_three_mm(self):
+        cfg = copy.deepcopy(CFG)
+        cfg['plane_compensation'].update(a_per_mm_y=0.0, b_per_mm_z=0.0,
+                                         radial_retract_max_mm=3.0, radial_retract_radius_mm=60.0)
+        p = de.Planner(cfg)
+        center = p.pose(0, 0, True)[0]
+        for x, y, amount in [(0, 0, 0), (30, 0, 1.5), (0, -30, 1.5),
+                             (36, 48, 3), (90, 0, 3)]:
+            self.assertAlmostEqual(p.pose(x, y, True)[0], center - amount)
+        self.assertAlmostEqual(p.pose(30, 0, False)[0] - p.pose(30, 0, True)[0],
+                               -cfg['pen']['up_clearance_mm'])
+
+    def test_last_10mm_approach_and_first_10mm_retract_are_normal_and_slow(self):
+        cfg = self._high_pen_up_cfg(20.0)
+        cfg['pen']['slow_zone_mm'] = 10.0
+        cfg['pen']['down_extra_mm'] = 0.0
+        cfg['plane_compensation']['a_per_mm_y'] = 0.013
+        cfg['plane_compensation']['b_per_mm_z'] = -0.02
+        planner = de.Planner(cfg)
+        cmds = planner.plan([[(3.0, 4.0), (5.0, 7.0)]])
+        by_label = {label: line for line, label in cmds}
+        def pose(label):
+            return tuple(float(v) for v in re.search(r'X([-\d.]+) Y([-\d.]+) Z([-\d.]+).* F([\d.]+)', by_label[label]).groups())
+        descent, down, end, lift = (pose('stroke 0 descend'), pose('stroke 0 pen-down'),
+                                    pose('stroke 0 draw'), pose('stroke 0 lift'))
+        self.assertEqual(descent[1:3], down[1:3])
+        self.assertAlmostEqual(abs(descent[0] - down[0]), 10.0, places=3)
+        self.assertEqual(end[1:3], lift[1:3])
+        self.assertAlmostEqual(abs(end[0] - lift[0]), 10.0, places=3)
+        self.assertEqual(down[3], cfg['feeds_mm_per_min']['approach'])
+        self.assertEqual(lift[3], cfg['feeds_mm_per_min']['approach'])
+
     def test_pen_sequence_and_retract_direction(self):
         planner = de.Planner(CFG)
         cmds = planner.plan(SQUARE)
@@ -84,6 +116,29 @@ class PlannerTest(unittest.TestCase):
         down_x = planner.pose(0, 0, True)[0]
         self.assertAlmostEqual(down_x, CFG["paper_center_tcp_mm"]["x"])
         self.assertAlmostEqual(down_x - up_x, CFG["pen"]["up_clearance_mm"])  # 펜업은 벽에서 멀어짐
+
+    def test_end_backoff_moves_only_first_and_last_contact_points_away_from_paper(self):
+        cfg = copy.deepcopy(CFG)
+        cfg["pen"].update(start_backoff_mm=0.4, end_backoff_mm=0.6)
+        base = de.Planner(CFG).plan(SQUARE)
+        backed = de.Planner(cfg).plan(SQUARE)
+        self.assertEqual([l for _, l in base], [l for _, l in backed])     # 명령 수·순서 그대로
+        xyz = lambda line: tuple(float(v) for v in re.search(r"X([-\d.]+) Y([-\d.]+) Z([-\d.]+)", line).groups())
+        sign = CFG["pen"]["retract_x_sign"]
+        draws = [i for i, (_, l) in enumerate(base) if l == "stroke 0 draw"]
+        down = next(i for i, (_, l) in enumerate(base) if l == "stroke 0 pen-down")
+        expected = {down: 0.4, draws[-1]: 0.6}
+        for i, ((a, _), (b, _)) in enumerate(zip(base, backed)):
+            pa, pb = xyz(a), xyz(b)
+            self.assertEqual(pa[1:], pb[1:])
+            self.assertAlmostEqual((pb[0] - pa[0]) * sign, expected.get(i, 0.0), places=3)
+
+    def test_end_backoff_outside_zero_to_one_mm_is_refused(self):
+        for bad in (-0.1, 1.5):
+            cfg = copy.deepcopy(CFG)
+            cfg["pen"]["end_backoff_mm"] = bad
+            with self.assertRaises(ValueError):
+                de.Planner(cfg)
 
     def test_pen_lifts_in_place_before_the_next_move(self):
         cfg = self._high_pen_up_cfg(20.0)
@@ -189,6 +244,24 @@ class PlannerTest(unittest.TestCase):
         self.assertAlmostEqual(ry, c["y"] + CFG["paper_x_to_robot_y_sign"] * 10)
         self.assertAlmostEqual(rz, c["z"] + 5)
 
+    def test_drawing_warp_moves_sent_points_and_limit_check_uses_them(self):
+        cfg = copy.deepcopy(CFG)
+        from mirobot_sketch.limits import Region
+        x_max = Region.from_cfg(cfg["limits"]).x_max
+        outside = [[(x_max + 2.0, 0.0), (x_max + 2.0, 1.0)]]
+        self.assertTrue(de.check_limits(outside, cfg))
+        cfg["drawing_warp"] = {"x": [0.9, 0.0, 0.0, 0.002, 0.0], "y": [0.0, 1.1, 0.0, 0.0, 0.0]}
+        c = cfg["paper_center_tcp_mm"]
+        ry, rz = de.Planner(cfg).robot_yz(10.0, 5.0)
+        self.assertAlmostEqual(ry, c["y"] + cfg["paper_x_to_robot_y_sign"] * (0.9 * 10.0 + 0.002 * 50.0))
+        self.assertAlmostEqual(rz, c["z"] + cfg["paper_y_to_robot_z_sign"] * 5.5)
+        self.assertEqual(de.check_limits(outside, cfg), [])      # 실제로 보낼 좌표(0.9배)는 범위 안
+        line = [[(0.0, 0.0), (20.0, 0.0)]]
+        self.assertAlmostEqual(de.estimate_time(line, cfg)["pen_down_mm"], 18.0, places=1)   # 시간도 보낼 길이로
+        cfg["drawing_warp"]["x"][0] = 2.0
+        with self.assertRaises(ValueError):
+            de.Planner(cfg)
+
     def test_plane_compensation(self):
         cfg = copy.deepcopy(CFG)
         cfg["plane_compensation"]["a_per_mm_y"] = 0.01
@@ -205,6 +278,129 @@ class PlannerTest(unittest.TestCase):
         line = de.Planner(CFG).plan(SQUARE)[0][0]
         self.assertRegex(line, r"^M20 G90 G01 X[-\d.]+ Y[-\d.]+ Z[-\d.]+ A[-\d.]+ B[-\d.]+ C[-\d.]+ F\d+$")
 
+    def test_j1_offset_turns_targets_against_arrival_and_takes_up_where_j1_reverses(self):
+        cfg = copy.deepcopy(CFG)
+        cfg["pen"]["j1_direction_offset_deg"] = 0.6
+        stroke = [[(0.0, 0.0), (10.0, 0.0), (0.0, 0.0)]]        # 가로로 갔다가 같은 줄로 되돌아옴
+        planner = de.Planner(cfg)
+        cmds = planner.plan(stroke)
+        base = de.Planner(CFG).plan(stroke)
+        labels = [label for _, label in cmds]
+        self.assertEqual(labels.count("stroke 0 j1-takeup draw"), 1)              # 종이 위에서는 되돌아오는 점에서만
+        self.assertIn("stroke 0 j1-approach travel", labels)                       # 첫 방향은 공중에서 미리 맞춤
+        self.assertEqual([l for l in labels if "j1-" not in l], [l for _, l in base])
+        self.assertEqual(planner.plan(stroke), cmds)                               # 다시 계획해도 같음
+        xyz = lambda line: tuple(float(v) for v in re.search(r"X([-\d.]+) Y([-\d.]+) Z([-\d.]+)", line).groups())
+        j1 = lambda p: np.degrees(np.arctan2(p[1], p[0]))
+        sent = {label: [] for label in labels}
+        for line, label in cmds:
+            sent[label].append(xyz(line))
+        wanted = [xyz(line) for line, label in base if label == "stroke 0 draw"]
+        out_and_back = sent["stroke 0 draw"]
+        going = 1 if j1(wanted[0]) > j1(xyz(base[2][0])) else -1                  # 첫 그리기 이동의 J1 방향
+        self.assertAlmostEqual(j1(out_and_back[0]) - j1(wanted[0]), -0.3 * going, places=3)
+        self.assertAlmostEqual(j1(out_and_back[1]) - j1(wanted[1]), 0.3 * going, places=3)
+        takeup = sent["stroke 0 j1-takeup draw"][0]                                # 되돌아오는 점에 새 보정값으로 먼저 감
+        self.assertAlmostEqual(j1(takeup) - j1(wanted[0]), 0.3 * going, places=3)
+        self.assertAlmostEqual(np.hypot(*takeup[:2]), np.hypot(*wanted[0][:2]), places=2)
+
+    def test_j1_offset_keeps_j1_still_while_the_pen_goes_down_touches_and_lifts(self):
+        cfg = self._high_pen_up_cfg(10.0)
+        cfg["pen"].update(j1_direction_offset_deg=0.6, start_backoff_mm=0.4, end_backoff_mm=0.4)
+        cmds = de.Planner(cfg).plan([[(20.0, 10.0), (30.0, 10.0), (30.0, 16.0)]])   # 종이 중심에서 떨어진 획
+        j1 = {}
+        for line, label in cmds:
+            x, y = (float(v) for v in re.search(r"X([-\d.]+) Y([-\d.]+)", line).groups())
+            j1.setdefault(label, []).append(np.degrees(np.arctan2(y, x)))
+        touching = (" pen-down", " draw", " lift")
+        self.assertFalse([l for l in j1 if "j1-takeup" in l and l.endswith(touching)])   # 닿아 있을 때는 메우지 않음
+        down = [j1["stroke 0 travel"][0], j1["stroke 0 descend"][0], j1["stroke 0 pen-down"][0]]
+        self.assertLess(np.ptp(down), 2e-3)                                        # 내려가는 동안 J1 그대로
+        up = [j1["stroke 0 draw"][-1], j1["stroke 0 lift"][0], j1["stroke 0 pen-up"][0]]
+        self.assertLess(np.ptp(up), 2e-3)                                          # 들어올리는 동안 J1 그대로
+
+    def test_j1_offset_in_air_mode_follows_the_drawing_shape(self):
+        cfg = copy.deepcopy(CFG)
+        cfg["pen"]["j1_direction_offset_deg"] = 0.6
+        stroke = [[(20.0, 10.0), (30.0, 10.0), (30.0, 16.0), (20.0, 16.0)]]
+        pick = lambda cmds: [tuple(float(v) for v in re.search(r"X([-\d.]+) Y([-\d.]+)", line).groups())
+                             for line, label in cmds if label == "stroke 0 draw"]
+        on, off = pick(de.Planner(cfg, air=True).plan(stroke)), pick(de.Planner(CFG, air=True).plan(stroke))
+        for a, b in zip(on, off):                     # 같은 반지름에서 J1만 보정의 절반만큼 돌아감 (모양이 줄지 않음)
+            self.assertAlmostEqual(np.hypot(*a), np.hypot(*b), places=2)
+            self.assertAlmostEqual(abs(np.degrees(np.arctan2(a[1], a[0]) - np.arctan2(b[1], b[0]))), 0.3, places=2)
+
+    def test_j1_offset_plan_keeps_its_commands_when_end_backoff_changes(self):
+        # 그리는 중 끝점 물림을 바꿔 다시 계획할 때(draw_job.set_pen_backoff) 명령 수·순서가 같아야 바꿔 끼울 수 있다
+        cfg = self._high_pen_up_cfg(10.0)
+        cfg["pen"]["j1_direction_offset_deg"] = 0.6
+        strokes = [[(20.0, 10.0), (30.0, 10.0), (20.0, 12.0)], [(-30.0, -20.0), (-40.0, -20.0)]]
+        backed = copy.deepcopy(cfg)
+        backed["pen"].update(start_backoff_mm=1.0, end_backoff_mm=1.0)
+        self.assertEqual([l for _, l in de.Planner(cfg).plan(strokes)], [l for _, l in de.Planner(backed).plan(strokes)])
+
+    def test_j1_offset_command_count_estimate_matches_plan(self):
+        cfg = self._high_pen_up_cfg(10.0)
+        cfg["pen"]["j1_direction_offset_deg"] = 0.6
+        strokes = SQUARE + [[(20.0, 10.0), (30.0, 10.0), (20.0, 12.0)]]
+        self.assertEqual(de.estimate_time(strokes, cfg)["command_count"], len(de.Planner(cfg).plan(strokes)))
+
+    def test_j1_offset_beyond_three_degrees_is_refused(self):
+        cfg = copy.deepcopy(CFG)
+        cfg["pen"]["j1_direction_offset_deg"] = 3.5
+        with self.assertRaises(ValueError):
+            de.Planner(cfg)
+
+
+
+class ResumeTest(unittest.TestCase):
+    STROKES = [[(-10.0, -10.0), (10.0, -10.0), (10.0, 10.0)], [(20.0, 0.0), (30.0, 0.0)]]
+
+    def setUp(self):
+        cfg = copy.deepcopy(CFG)
+        cfg["pen"]["up_clearance_mm"] = 10.0                 # 느린 구간이 따로 있는 2단 내림
+        self.planner = de.Planner(cfg)
+        self.cmds = self.planner.plan(self.STROKES)
+        self.labels = [label for _, label in self.cmds]
+
+    @staticmethod
+    def xyz(line):
+        return tuple(float(v) for v in re.search(r"X([-\d.]+) Y([-\d.]+) Z([-\d.]+)", line).groups())
+
+    def test_stop_with_the_pen_on_paper_puts_it_back_on_the_same_point_then_continues(self):
+        k = self.labels.index("stroke 0 draw") + 1             # 첫 그리기 이동까지 보내고 멈춤 (다음도 그리기)
+        prefix, start = de.resume_commands(self.planner, self.cmds, k)
+        self.assertEqual(start, k)                              # 남은 그리기부터, 그은 부분은 다시 긋지 않음
+        (slow, _), (touch, _) = prefix
+        contact = self.xyz(self.cmds[k - 1][0])
+        self.assertEqual(self.xyz(touch), contact)              # 멈춘 접촉점에 다시 댐
+        self.assertEqual(self.xyz(slow)[1:], contact[1:])       # 바로 위에서 종이 쪽으로만 내려옴
+        self.assertAlmostEqual(self.xyz(slow)[0] - contact[0], self.planner.slow_dx, places=3)
+        self.assertIn(f"F{self.planner.feeds['approach']}", touch)   # 닿는 구간은 느리게
+
+    def test_stop_after_the_last_draw_of_a_stroke_skips_its_lift_and_goes_on_to_the_next(self):
+        k = len(self.labels) - 1 - self.labels[::-1].index("stroke 0 draw") + 1
+        prefix, start = de.resume_commands(self.planner, self.cmds, k)
+        self.assertEqual(prefix, [])                            # 이미 뗐으니 다시 대지도, 다시 떼지도 않음
+        self.assertEqual(self.labels[start], "stroke 1 travel")
+
+    def test_stop_before_the_pen_goes_down_comes_fast_to_the_slow_zone_first(self):
+        k = self.labels.index("stroke 1 pen-down")
+        prefix, start = de.resume_commands(self.planner, self.cmds, k)
+        self.assertEqual(start, k)
+        (slow, _), = prefix
+        target = self.xyz(self.cmds[k][0])
+        self.assertEqual(self.xyz(slow)[1:], target[1:])
+        self.assertIn(f"F{self.planner.feeds['travel']}", slow)
+
+    def test_stop_in_the_air_needs_nothing_before_continuing(self):
+        k = self.labels.index("stroke 1 travel")
+        self.assertEqual(de.resume_commands(self.planner, self.cmds, k), ([], k))
+        air = de.Planner(self.planner.cfg, air=True)
+        cmds = air.plan(self.STROKES)
+        self.assertEqual(de.resume_commands(air, cmds, 5), ([], 5))
+
+
 
 class TimingTest(unittest.TestCase):
     def test_command_count_matches_plan(self):
@@ -219,10 +415,10 @@ class TimingTest(unittest.TestCase):
         t = de.estimate_time(strokes, cfg)
         self.assertEqual(t["command_count"], len(de.Planner(cfg).plan(strokes)))
         f, n = cfg["feeds_mm_per_min"], len(strokes)
-        expected = (10.0 / f["approach"] + n * (7.5 / f["travel"] + 2.5 / f["approach"] + 10.0 / f["travel"])) * 60
+        expected = (10.0 / f["approach"] + n * (2 * 7.5 / f["travel"] + 2 * 2.5 / f["approach"])) * 60
         self.assertAlmostEqual(t["pen_lift_s"], expected, places=1)
         slow_all = 10.0 * (2 * n + 1) / f["approach"] * 60                   # 전 구간 느린 속도였다면
-        self.assertLess(t["pen_lift_s"], slow_all * 0.6)                    # 처음 중심 펜업은 느려서 획이 적으면 절반까지는 안 줄어듦
+        self.assertLessEqual(t["pen_lift_s"], slow_all * 0.6)
         air = de.estimate_time(strokes, cfg, air=True)
         self.assertEqual(air["command_count"], len(de.Planner(cfg, air=True).plan(strokes)))
 
@@ -325,6 +521,38 @@ class GuidedCalibrationCLITest(unittest.TestCase):
 
 
 class ExecuteTest(unittest.TestCase):
+    def test_waits_for_retract_travel_and_descent_before_following_move(self):
+        cfg = copy.deepcopy(self.cfg)
+        cfg['pen']['up_clearance_mm'] = 20.0
+        cfg['pen']['slow_zone_mm'] = 10.0
+        commands = de.Planner(cfg).plan([[(0.0, 0.0), (4.0, 3.0)]])
+        serial = FakeSerial()
+        result = de.execute(de.MirobotLink(serial), commands, cfg, progress=lambda *_: None)
+        self.assertEqual(result['result'], 'completed')
+        by_label = {label: line for line, label in commands}
+        for first, second in [('center pen-up', 'stroke 0 travel'),
+                              ('stroke 0 travel', 'stroke 0 descend'),
+                              ('stroke 0 descend', 'stroke 0 pen-down')]:
+            start = serial.written.index(by_label[first])
+            end = serial.written.index(by_label[second], start + 1)
+            self.assertIn('?', serial.written[start + 1:end], first)
+            self.assertTrue(any(s['command'] == first for s in result['controller_trace']))
+
+    def test_contact_and_stroke_end_are_reached_before_direction_changes(self):
+        cfg = copy.deepcopy(self.cfg)
+        cfg['pen']['up_clearance_mm'] = 20.0
+        cfg['pen']['slow_zone_mm'] = 10.0
+        commands = de.Planner(cfg).plan([[(0.0, 0.0), (4.0, 3.0)]])
+        serial = FakeSerial()
+        result = de.execute(de.MirobotLink(serial), commands, cfg, progress=lambda *_: None)
+        self.assertEqual(result['result'], 'completed')
+        by_label = {label: line for line, label in commands}
+        down = serial.written.index(by_label['stroke 0 pen-down'])
+        draw = serial.written.index(by_label['stroke 0 draw'])
+        lift = serial.written.index(by_label['stroke 0 lift'])
+        self.assertIn('?', serial.written[down + 1:draw])
+        self.assertIn('?', serial.written[draw + 1:lift])
+
     def setUp(self):
         self.cfg = copy.deepcopy(CFG)
         self.cfg["ack_timeout_s"] = 0.5
@@ -370,6 +598,13 @@ class ExecuteTest(unittest.TestCase):
         i = fake.written.index(pen_up)
         self.assertEqual(fake.written[i + 1], "?")          # 펜업 ok 다음, 옆 이동 전에 Idle 확인
 
+    def test_execution_records_reported_retract_coordinates(self):
+        fake = FakeSerial()
+        result = de.execute(de.MirobotLink(fake), self.cmds, self.cfg, progress=lambda *_: None)
+        samples = result['controller_trace']
+        self.assertTrue(any(s['command'].endswith('pen-up') and s['tcp_mm'] is not None for s in samples))
+        self.assertTrue(all('state' in s and 'time_s' in s for s in samples))
+
     def test_stops_immediately_on_soft_limit(self):
         fake = FakeSerial(fail_at=4)
         result = de.execute(de.MirobotLink(fake), self.cmds, self.cfg, progress=lambda *_: None)
@@ -383,6 +618,22 @@ class ExecuteTest(unittest.TestCase):
         fake.readline = lambda: b""
         result = de.execute(de.MirobotLink(fake), self.cmds, self.cfg, progress=lambda *_: None)
         self.assertEqual(result["result"], "stopped_on_error")
+
+    def test_usb_read_failure_stops_with_a_result_instead_of_raising(self):
+        fake = FakeSerial()
+        real_readline, reads = fake.readline, []
+
+        def readline():
+            reads.append(1)
+            if len(reads) > 6:
+                raise OSError(22, "ReadFile failed")      # serial.SerialException도 OSError
+            return real_readline()
+
+        fake.readline = readline
+        result = de.execute(de.MirobotLink(fake), self.cmds, self.cfg, progress=lambda *_: None)
+        self.assertEqual(result["result"], "stopped_on_error")
+        self.assertIn("USB", result["error"])
+        self.assertLess(result["commands_sent"], len(self.cmds))
 
 
 def _status(state, x=None, y=0.0, z=230.477):
@@ -419,6 +670,34 @@ class ScriptedStatus:
 
 
 class RetractConfirmTest(unittest.TestCase):
+    def test_wait_for_xyz_rejects_moving_and_wrong_yz(self):
+        fake = ScriptedStatus([_status('Idle', 230, y=5), _status('Run', 230, y=0), _status('Idle', 230, y=0)])
+        result = de.MirobotLink(fake).wait_until_pose((230, 0, 230.477), 2.0)
+        self.assertEqual(result, (230, 0, 230.477))
+        self.assertEqual(fake.written.count('?'), 3)
+
+    def test_wait_for_xyz_honors_stop_without_querying(self):
+        fake = ScriptedStatus([_status('Run', 230.0)])
+        with self.assertRaises(de.StopRequested):
+            de.MirobotLink(fake).wait_until_pose((230, 0, 230.477), 2.0, should_stop=lambda: True)
+        self.assertEqual(fake.written, [])
+
+    def test_observer_receives_each_actual_status_sample(self):
+        fake = ScriptedStatus([_status("Idle", 240.0), _status("Run", 230.0), _status("Idle", 230.0)])
+        link = de.MirobotLink(fake)
+        seen = []
+        link.status_observer = lambda state, tcp, raw: seen.append((state, tcp, raw))
+        link.wait_until_left_contact(240.0, 2.0, -1.0, 10.0)
+        self.assertEqual([sample[0] for sample in seen], ["Idle", "Run", "Idle"])
+        self.assertEqual(seen[-1][1], (230.0, 0.0, 230.477))
+
+    def test_retract_does_not_complete_while_controller_is_still_moving(self):
+        fake = ScriptedStatus([_status("Idle", 240.0), _status("Run", 230.0), _status("Idle", 230.0)])
+        link = de.MirobotLink(fake)
+        tcp = link.wait_until_left_contact(240.0, 2.0, -1.0, 10.0)
+        self.assertEqual(tcp[0], 230.0)
+        self.assertEqual(fake.written.count("?"), 3)
+
     def _run(self, statuses, timeout=1.0):
         clock = {"t": 0.0}
 
