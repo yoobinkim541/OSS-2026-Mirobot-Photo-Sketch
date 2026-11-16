@@ -99,7 +99,10 @@ def _from_file_uri(text):
         return None
     if parsed.netloc and parsed.netloc.lower() not in ("localhost", ""):
         return "\\\\" + parsed.netloc + unquote(parsed.path).replace("/", "\\")
-    return url2pathname(unquote(parsed.path))
+    path = unquote(parsed.path)
+    if re.match(r"^/[A-Za-z]:[\\/]", path):        # file:///C:/... 은 어느 OS에서 읽어도 Windows 경로 (Linux의 url2pathname은 /C:/...로 둠)
+        return path[1:]
+    return url2pathname(path)
 
 
 def _strip_extended(text):
