@@ -7,13 +7,14 @@ import math
 import sys
 import unittest
 from pathlib import Path
-
+from unittest import mock
 import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from mirobot_sketch import paper_mapping as pm  # noqa: E402
 from mirobot_sketch import sketch_pipeline as sp  # noqa: E402
+from mirobot_sketch import limits, stages  # noqa: E402
 
 
 def blank(h=200, w=300):
@@ -148,6 +149,55 @@ class DedupeTest(unittest.TestCase):
         edges2[48, 20:280] = 255
         kept = sp.drop_ink_twins(sp.trace_strokes(edges2, 5), light, gap_px=12)
         self.assertGreater(sum(sp.polyline_length(s) for s in kept), 480)
+
+    def test_discarded_partner_samples_do_not_erase_a_farther_stroke(self):
+        # A(가장 김)가 B의 머리만 지운 뒤, 그 버린 머리가 C를 지우면 안 된다. C는 A에서 18px, B 머리에서 6px.
+        gray = np.full((140, 420), 30, np.uint8)
+        strokes = [
+            np.array([[0, 50], [400, 50]], float),
+            np.array([[0, 62], [120, 62], [120, 94], [320, 94]], float),
+            np.array([[10, 68], [90, 68]], float),
+        ]
+        out = sp.drop_ink_twins(strokes, gray, gap_px=12)
+        kept = [s for s in out if abs(float(np.mean(s[:, 1])) - 68) < 2]
+        self.assertEqual(len(kept), 1)
+        self.assertGreater(sp.polyline_length(kept[0]), 60)
+
+
+class InkTwinGapTest(unittest.TestCase):
+    def image(self, width):
+        gray = np.full((80, width), 240, np.uint8)
+        gray[35:46, :] = 20                              # 위·아래 경계가 약 11px 떨어진 굵은 선
+        return gray
+
+    def params(self, **over):
+        p = stages.default_params()
+        p.update(dedupe_px=4, blur_ksize=1, min_length_px=20, merge_join_px=0, epsilon_px=1.5,
+                 smooth_sigma_px=0, face_detail=False, declutter=False, tone_levels=0, lineart=False,
+                 canny_low=30, canny_high=80)
+        p.update(over)
+        return p
+
+    def inputs(self, gray):
+        return {"gray": gray, "color": cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR), "faces": [],
+                "region": limits.Region.from_cfg({"max_abs_paper_x_mm": 400, "max_abs_paper_y_mm": 400})}
+
+    def length(self, out):
+        return sum(sp.polyline_length(s) for s in out["dedupe"]["strokes"])
+
+    def test_twin_gap_follows_the_line_width_in_the_image_not_the_paper_size(self):
+        narrow_img = stages.Pipeline().run(self.inputs(self.image(300)), "a", self.params())   # 2% = 6px < 11px
+        wide_img = stages.Pipeline().run(self.inputs(self.image(600)), "b", self.params())     # 2% = 12px > 11px
+        self.assertGreater(self.length(narrow_img), 2 * 250)          # 두 경계가 그대로
+        self.assertLess(self.length(wide_img), 1.5 * 560)             # 먹 쌍은 하나로
+        pl = stages.Pipeline()
+        inputs = self.inputs(self.image(600))
+        pl.run(inputs, "c", {**self.params(), "box_mm": 100})
+        before = dict(pl.run_counts)
+        pl.run(inputs, "c", {**self.params(), "box_mm": 40})
+        self.assertEqual(pl.run_counts["dedupe"], before["dedupe"])  # 종이 크기만 바꾸면 다시 계산하지 않음 (편집 번호 유지)
+
+
 class ResizeTest(unittest.TestCase):
     def test_small_image_is_upscaled_to_max_side(self):
         # 저해상도 원본도 긴 변 800px로 맞춰야 px 파라미터 의미가 같고 선이 매끄러움
@@ -282,6 +332,27 @@ class DiscardedTest(unittest.TestCase):
         self.assertEqual({r for _, r in disc}, {"overlap"})
         plain = sp.dedupe_strokes([a, b], (100, 200), 4)
         self.assertEqual([p.tolist() for p in out], [p.tolist() for p in plain])
+
+
+class ChainNearTest(unittest.TestCase):
+    def test_only_strokes_starting_near_the_previous_end_are_joined(self):
+        a = np.array([[0, 0], [10, 0]], float)
+        b = np.array([[11, 0], [20, 0]], float)           # 1px 떨어져 시작: 이어 그림
+        c = np.array([[30, 0], [40, 0]], float)           # 10px: 펜을 듦
+        out = sp.chain_near([a, b, c], join_px=2.0)
+        self.assertEqual(len(out), 2)
+        np.testing.assert_array_equal(out[0], np.vstack([a, b]))
+        np.testing.assert_array_equal(out[1], c)
+        self.assertEqual(len(sp.chain_near([a, b, c], join_px=0.0)), 3)
+
+    def test_gaps_inside_a_face_ellipse_stay_lifted(self):
+        a = np.array([[0, 0], [10, 0]], float)
+        b = np.array([[11, 0], [20, 0]], float)
+        c = np.array([[100, 0], [110, 0]], float)
+        d = np.array([[111, 0], [120, 0]], float)
+        out = sp.chain_near([a, b, c, d], join_px=2.0, apart=[((10.0, 0.0), (5.0, 5.0))])   # 얼굴은 a·b 사이
+        self.assertEqual(len(out), 3)
+        np.testing.assert_array_equal(out[2], np.vstack([c, d]))       # 얼굴 밖 틈은 그대로 이음
 
 
 if __name__ == "__main__":

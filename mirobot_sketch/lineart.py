@@ -6,18 +6,16 @@ SHA256을 확인한 뒤 캐시 폴더(paths.cache_dir()/models)에 둡니다.
 원본: https://huggingface.co/rocca/informative-drawings-line-art-onnx (model.onnx)
 """
 
-import hashlib
-import os
-import urllib.request
-
 import cv2
 import numpy as np
+
+from . import models
 
 MODEL_NAME = "informative_drawings.onnx"
 MODEL_URL = ("https://github.com/yoobinkim541/OSS-2026-Mirobot-Photo-Sketch/releases/download/"
              "models-v1/informative_drawings.onnx")
 MODEL_SHA256 = "1fef40b8f7126d827e30fbebccf95ae9b0b391795df926bf9366a821bad4f498"
-DOWNLOAD_TIMEOUT_S = 60
+DOWNLOAD_TIMEOUT_S = models.DOWNLOAD_TIMEOUT_S
 MAX_SIDE = 768
 STRONG_INK = 165      # 이 이상 진한 점이 있는 선만 남기고 (잡결 제거)
 WEAK_INK = 225        # 그 선을 따라 옅은 끝부분까지 이어 남김 (속눈썹·입술처럼 가는 선이 끊기지 않게)
@@ -31,38 +29,15 @@ class LineartUnavailable(RuntimeError):
 
 
 def model_path():
-    from . import paths
-    return paths.cache_dir() / "models" / MODEL_NAME
-
-
-def _sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for block in iter(lambda: f.read(1 << 20), b""):
-            h.update(block)
-    return h.hexdigest()
+    return models.cache_path(MODEL_NAME)
 
 
 def ensure_model(url=MODEL_URL, timeout=DOWNLOAD_TIMEOUT_S):
     """모델 파일 경로. 없으면 내려받고, 받은 파일의 SHA256이 다르면 버리고 LineartUnavailable."""
-    path = model_path()
-    if path.exists():
-        return path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    part = path.with_suffix(".part")
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp, open(part, "wb") as out:
-            for block in iter(lambda: resp.read(1 << 20), b""):
-                out.write(block)
-        if _sha256(part) != MODEL_SHA256:
-            raise LineartUnavailable("내려받은 선화 모델이 손상됐습니다 (SHA256 불일치).")
-        os.replace(part, path)
-    except OSError as e:          # 인터넷 없음, 시간 초과, 디스크 오류 (URLError도 OSError)
-        raise LineartUnavailable(f"선화 모델을 내려받지 못했습니다: {e}") from None
-    finally:
-        if part.exists():
-            part.unlink()
-    return path
+        return models.fetch(MODEL_NAME, url, MODEL_SHA256, "선화 모델", timeout)
+    except models.ModelUnavailable as e:
+        raise LineartUnavailable(str(e)) from None
 
 
 def _load():

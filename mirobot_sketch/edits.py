@@ -83,6 +83,11 @@ def smooth(p, strength=2):
             m = d.copy()
             m[1:-1] = (d[:-2] + 2 * d[1:-1] + d[2:]) / 4
             d = m
+    if closed:
+        approx = cv2.approxPolyDP(d[:-1].astype(np.float32).reshape(-1, 1, 2), 0.5, closed=True).reshape(-1, 2)
+        if len(approx) >= 3:
+            return np.vstack([approx, approx[:1]]).astype(np.float64)
+        return d
     approx = cv2.approxPolyDP(d.astype(np.float32).reshape(-1, 1, 2), 0.5, closed=False).reshape(-1, 2)
     out = approx.astype(np.float64) if len(approx) >= 2 else d[[0, -1]]
     out[0], out[-1] = d[0], d[-1]
@@ -118,7 +123,11 @@ def remove_matching(strokes, removed, shape):
     hit, keep = [False] * len(removed), []
     for i, s in enumerate(strokes):
         d = np.round(densify(s)).astype(int)
-        lab = label[np.clip(d[:, 1], 0, h - 1), np.clip(d[:, 0], 0, w - 1)]
+        inside = (d[:, 0] >= 0) & (d[:, 0] < w) & (d[:, 1] >= 0) & (d[:, 1] < h)
+        if not inside.any():
+            keep.append(i)
+            continue
+        lab = label[d[inside, 1], d[inside, 0]]
         if (lab > 0).mean() >= MATCH_FRACTION:
             for k in np.unique(lab[lab > 0]):
                 hit[int(k) - 1] = True
@@ -162,7 +171,11 @@ def render_edit_view(shape, table, views, region_px=None, numbered=True, show_ca
         return np.round((np.asarray(p) - (x0, y0)) * scale).astype(np.int32)
 
     def visible(q):
-        return ((q[:, 0] >= 0) & (q[:, 0] < W) & (q[:, 1] >= 0) & (q[:, 1] < H)).any()
+        if ((q[:, 0] >= 0) & (q[:, 0] < W) & (q[:, 1] >= 0) & (q[:, 1] < H)).any():
+            return True
+        rect = (0, 0, W, H)
+        return any(cv2.clipLine(rect, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])))[0]
+                   for a, b in zip(q[:-1], q[1:]))
 
     labels = []
     for i, e in sorted(table.items()):

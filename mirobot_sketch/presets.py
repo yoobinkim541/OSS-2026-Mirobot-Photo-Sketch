@@ -16,8 +16,9 @@ DETAIL_PRESETS = {
 IMAGE_TYPES = {
     "photo": {
         "label": "실사 사진",
-        "detail": "high", "rembg": True, "median": 0, "lineart": True,
-        "why": "실사를 선화로 바꾼 뒤 그 선을 그대로 따라 그리고, 배경은 rembg로 지움",
+        "detail": "high", "rembg": True, "median": 0, "lineart": True, "tone_levels": 0, "hair_flow": True,
+        "why": "실사를 선화로 바꾼 뒤 그 선을 그대로 따라 그리고(얼굴은 원본 해상도로 한 번 더), 머리카락은 결 방향 선으로 "
+               "그리며(채색 전 스케치라 면을 빗금으로 메우지 않음), 배경은 rembg로 지움",
     },
     "illustration": {
         "label": "컬러 일러스트",

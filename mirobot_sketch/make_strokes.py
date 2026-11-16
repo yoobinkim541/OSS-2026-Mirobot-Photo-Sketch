@@ -60,6 +60,9 @@ def main():
     detail = args.detail or t.get("detail", "medium")
     rembg = args.rembg if args.rembg is not None else t.get("rembg", False)
     median = args.median if args.median is not None else t.get("median", 0)
+    lineart_on = bool(t.get("lineart", False))
+    tone_levels = int(t.get("tone_levels", 0))
+    hair_flow = bool(t.get("hair_flow", False))
     low, high, min_len, eps = presets.DETAIL_PRESETS[detail]
     if args.canny:
         low, high = args.canny
@@ -69,13 +72,33 @@ def main():
         eps = args.epsilon
 
     try:
-        gray = (sp.remove_background(args.image, args.max_side, cache_dir=paths.cache_dir()) if rembg
-                else sp.load_gray(args.image, args.max_side))
+        if lineart_on or tone_levels:
+            color = (sp.remove_background_bgr(args.image, args.max_side, cache_dir=paths.cache_dir()) if rembg
+                     else sp.load_color(args.image, args.max_side))
+            gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = (sp.remove_background(args.image, args.max_side, cache_dir=paths.cache_dir()) if rembg
+                    else sp.load_gray(args.image, args.max_side))
     except (RuntimeError, ValueError) as e:  # rembg 미설치, 이미지 읽기 실패 등
         print(f"오류: {e}")
         return 2
-    edges, strokes_px = sp.run_pipeline(gray, low, high, args.blur, min_len, eps, args.method, args.lines,
-                                        median, merge_join_px=args.merge, dedupe_px=args.dedupe)
+    if lineart_on or tone_levels:
+        from . import stages
+        params = {**stages.default_params(), "median_ksize": median or 0, "blur_ksize": args.blur,
+                  "edge_mode": "dark" if args.lines == "dark" else "luma",
+                  "canny_low": low, "canny_high": high, "min_length_px": min_len,
+                  "spur_px": 6, "dedupe_px": args.dedupe or 0, "merge_join_px": args.merge or 0,
+                  "epsilon_px": eps, "lineart": lineart_on, "tone_levels": tone_levels, "hair_flow": hair_flow,
+                  "box_mm": float(max(args.box))}
+        outs = stages.Pipeline().run({"gray": gray, "color": color}, None, params)
+        if outs["edges"].get("lineart_missing"):
+            print(outs["edges"]["lineart_missing"])
+        edges = outs["edges"]["edges"]
+        strokes_px = sp.order_strokes(list(outs["simplify"]["strokes"])
+                                      + list(outs["tone"].get("hatch_strokes") or []))
+    else:
+        edges, strokes_px = sp.run_pipeline(gray, low, high, args.blur, min_len, eps, args.method, args.lines,
+                                            median, merge_join_px=args.merge, dedupe_px=args.dedupe)
     if not strokes_px:
         print("획이 하나도 없습니다. --detail high 또는 Canny 임계값을 낮춰보세요.")
         return 1
@@ -94,6 +117,7 @@ def main():
             "min_length_px": min_len, "epsilon_px": eps, "max_side": args.max_side,
             "method": args.method, "line_source": args.lines, "median_ksize": median, "rembg": rembg,
             "dedupe_px": args.dedupe, "merge_join_px": args.merge,
+            "lineart": lineart_on, "tone_levels": tone_levels, "hair_flow": hair_flow,
         },
     }
     doc = pm.build_strokes_document(strokes_mm, placement, metrics, source)

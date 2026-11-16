@@ -154,7 +154,8 @@ def compute_dark_mask(gray_img, blur_ksize=5, threshold=None):
         _, mask = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     else:
         _, mask = cv2.threshold(blurred, float(threshold), 255, cv2.THRESH_BINARY_INV)
-    # 작은 점 잡음 제거
+    # 3×3 열기: 잡점과 1~2px 폭의 결(명암 경계)을 지운다. 1px 선도 지워지지만, 면적 기준으로 바꾸면 실제 일러스트
+    # (illust1, 상세도 보통)에서 결 조각이 88 → 129획으로 늘어 자글자글해져 열기를 유지한다 (2026-11-13 비교).
     return cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
 
 
@@ -415,36 +416,30 @@ def drop_ink_twins(strokes, gray, gap_px, ink_max=200, turn=0.85, min_keep_px=8,
     dens = [_densify(s).astype(np.float64) for s in strokes]
     order = sorted(range(len(dens)), key=lambda i: -polyline_length(dens[i]))
     step = max(1, int(gap_px // 2))
-    samples, owners, tangents = [], [], []
-    for i, pts in enumerate(dens):
-        for k in range(0, len(pts), step):
-            samples.append(pts[k])
-            owners.append(i)
-            a, b = max(0, k - step), min(len(pts) - 1, k + step)
-            v = pts[b] - pts[a]
-            n = np.hypot(*v)
-            tangents.append(v / n if n > 1e-6 else np.zeros(2))
-    tree = cKDTree(np.asarray(samples))
-    accepted = set()
+    kept_samples, kept_tangents = [], []
+    tree = None
     out = []
     for i in order:
         pts = dens[i]
         twin = np.zeros(len(pts), bool)
-        if accepted:
+        if tree is not None:
             near_face = None
             if protect_xy is not None and protect_px > 0:
                 lm = np.asarray(protect_xy, np.float64)
                 near_face = np.min(np.linalg.norm(pts[:, None, :] - lm[None, :, :], axis=2), axis=1) <= protect_px
-            for k in range(len(pts)):
-                if near_face is not None and near_face[k]:
+            samples = np.asarray(kept_samples)
+            tangents = np.asarray(kept_tangents)
+            for k, js in enumerate(tree.query_ball_point(pts, gap_px)):
+                if not js or (near_face is not None and near_face[k]):
                     continue                                    # 눈·코·입 근처는 붙어 있어도 둘 다 남김
-                for j in tree.query_ball_point(pts[k], gap_px):
-                    if owners[j] not in accepted:
-                        continue
-                    a, b = max(0, k - step), min(len(pts) - 1, k + step)
-                    v = pts[b] - pts[a]
-                    nrm = np.hypot(*v)
-                    if nrm < 1e-6 or abs(float((v / nrm) @ tangents[j])) < turn:
+                a, b = max(0, k - step), min(len(pts) - 1, k + step)
+                v = pts[b] - pts[a]
+                nrm = np.hypot(*v)
+                if nrm < 1e-6:
+                    continue
+                direction = v / nrm
+                for j in js:
+                    if abs(float(direction @ tangents[j])) < turn:
                         continue
                     a_pt, b_pt = pts[k], samples[j]
                     steps = max(3, int(np.hypot(*(b_pt - a_pt))))
@@ -469,8 +464,20 @@ def drop_ink_twins(strokes, gray, gap_px, ink_max=200, turn=0.85, min_keep_px=8,
             k = j
         if discarded is not None and twin.any():
             discarded.append((pts[twin], "overlap"))
+        # 남긴 점만 다음 선의 쌍이 된다. 이미 버린 구간은 트리에 넣지 않음.
         if keep.mean() >= 0.5:
-            accepted.add(i)
+            added = False
+            for k in range(0, len(pts), step):
+                if not keep[k]:
+                    continue
+                a, b = max(0, k - step), min(len(pts) - 1, k + step)
+                v = pts[b] - pts[a]
+                nrm = np.hypot(*v)
+                kept_samples.append(pts[k])
+                kept_tangents.append(v / nrm if nrm > 1e-6 else np.zeros(2))
+                added = True
+            if added:
+                tree = cKDTree(np.asarray(kept_samples, np.float64))
     return out
 
 
@@ -614,37 +621,79 @@ def _end_tangent(s, at_start, k=5):
 
 def join_gaps(strokes, gap=10.0, turn=0.85):
     """점선처럼 끊긴 선을 잇기: 끝점이 gap 이내이고 진행 방향이 거의 같으면(코사인 turn 이상) 한 획으로.
-    직각으로 꺾이는 두 선은 잇지 않음."""
+    직각으로 꺾이는 두 선은 잇지 않음. 가장 가까운 쌍부터 잇는다.
+
+    끝점 좌표는 이어도 바뀌지 않으므로 후보 쌍은 처음 한 번만 찾고(KD-트리), 거리 순 힙에서 꺼낼 때 지금 획 모양으로
+    방향을 다시 본다. 이은 획의 끝 방향은 짧은 획이면 달라질 수 있어, 바뀐 획의 후보는 다시 넣는다."""
+    import heapq
+
     from scipy.spatial import cKDTree
 
     strokes = [np.asarray(s, np.float64) for s in strokes if len(s) >= 2]
+    ends, owners = [], []
+    for i, s in enumerate(strokes):
+        if not is_closed(s):
+            ends += [s[0], s[-1]]
+            owners += [(i, True), (i, False)]
+    if len(ends) < 2:
+        return strokes
+    ends = np.asarray(ends)
+    pairs = cKDTree(ends).query_pairs(gap, output_type="ndarray")
+    if not len(pairs):
+        return strokes
+    dist = np.hypot(*(ends[pairs[:, 1]] - ends[pairs[:, 0]]).T)
+    near = [[] for _ in ends]                       # 끝점마다 후보 쌍 번호
+    for k, (a, b) in enumerate(pairs):
+        near[a].append(k)
+        near[b].append(k)
+    heap = sorted((float(dist[k]), int(pairs[k, 0]), int(pairs[k, 1])) for k in range(len(pairs)))
+    # 지금 획: 살아 있는 획 번호마다 배열. 끝점 → (지금 그 끝을 가진 획, 그 획의 시작 끝인지), 다 쓰면 None
     alive = [True] * len(strokes)
-    while True:
-        ends, owners = [], []
-        for i, s in enumerate(strokes):
-            if alive[i] and not is_closed(s):
-                ends += [s[0], s[-1]]
-                owners += [(i, True), (i, False)]
-        if len(ends) < 2:
-            break
-        best = None
-        for a, b in cKDTree(np.asarray(ends)).query_pairs(gap):
-            (i, ia), (j, jb) = owners[a], owners[b]
-            if i == j:
-                continue
-            out_i = -_end_tangent(strokes[i], True) if ia else _end_tangent(strokes[i], False)   # i에서 나가는 방향
-            into_j = _end_tangent(strokes[j], True) if jb else -_end_tangent(strokes[j], False)  # j로 들어가는 방향
-            bridge = np.asarray(ends[b]) - np.asarray(ends[a])
-            d = float(np.hypot(*bridge))
-            if out_i @ into_j > turn and (d < 1.5 or (bridge / d) @ out_i > turn) and (best is None or d < best[0]):
-                best = (d, i, ia, j, jb)
-        if best is None:
-            break
-        _, i, ia, j, jb = best
+    at = {e: owners[e] for e in range(len(ends))}
+    holder = {(i, s): e for e, (i, s) in at.items()}  # (획, 시작인지) → 끝점 번호
+
+    def ok(a, b):
+        (i, ia), (j, jb) = at[a], at[b]
+        if not alive[i] or not alive[j]:
+            return False
+        if i == j and (ia == jb or polyline_length(strokes[i]) < 4 * gap):   # 제 양 끝: 충분히 긴 고리만 닫음
+            return False
+        out_i = -_end_tangent(strokes[i], True) if ia else _end_tangent(strokes[i], False)   # i에서 나가는 방향
+        into_j = _end_tangent(strokes[j], True) if jb else -_end_tangent(strokes[j], False)  # j로 들어가는 방향
+        bridge = ends[b] - ends[a]
+        d = float(np.hypot(*bridge))
+        return out_i @ into_j > turn and (d < 1.5 or (bridge / d) @ out_i > turn)
+
+    while heap:
+        d, a, b = heapq.heappop(heap)
+        if at[a] is None or at[b] is None or not ok(a, b):
+            continue
+        (i, ia), (j, jb) = at[a], at[b]
+        if i == j:                                   # 점선 고리의 마지막 틈: 시작점을 붙여 닫음
+            strokes[i] = np.vstack([strokes[i], strokes[i][:1]])
+            holder.pop((i, True), None)
+            holder.pop((i, False), None)
+            at[a] = at[b] = None
+            continue
+        if i > j:                                    # 이은 획은 번호가 작은 쪽 자리에 (원래 순서 유지)
+            (i, ia), (j, jb), a, b = (j, jb), (i, ia), b, a
+        far_i, far_j = holder.get((i, not ia)), holder.get((j, not jb))
         si = strokes[i][::-1] if ia else strokes[i]
         sj = strokes[j] if jb else strokes[j][::-1]
         strokes[i] = np.vstack([si, sj])
         alive[j] = False
+        for key in ((i, True), (i, False), (j, True), (j, False)):
+            holder.pop(key, None)
+        at[a] = at[b] = None
+        closed = is_closed(strokes[i])
+        for e, start in ((far_i, True), (far_j, False)):
+            if e is None:
+                continue
+            at[e] = None if closed else (i, start)
+            if not closed:
+                holder[(i, start)] = e
+                for k in near[e]:                    # 끝 방향이 바뀌었을 수 있음: 이 끝의 후보를 다시 본다
+                    heapq.heappush(heap, (float(dist[k]), int(pairs[k, 0]), int(pairs[k, 1])))
     return [s for s, a in zip(strokes, alive) if a]
 
 
@@ -809,6 +858,43 @@ def order_strokes(strokes, start=None):
         alive[cand_owner == i] = False
         pos = s[-1]
     return ordered
+
+
+def chain_near(strokes, join_px, apart=()):
+    """그리는 순서대로 놓인 획에서, 앞 획 끝과 다음 획 시작이 join_px 이내면 펜을 들지 않고 이어 그린다
+    (사이를 짧은 직선으로 잇는다). 펜 올림·내림이 획마다 약 5초(펜 20mm 올림)라 시간의 대부분이다.
+    apart: 잇지 않을 타원 ((cx, cy), (ax, ay)) 목록. 얼굴은 수 cm라 0.5mm 펜의 1mm 이음선이 눈 밑·눈꺼풀 위에
+    삐친 자국으로 보였다(4배 확대, 실제 펜 굵기). 이음 구간 가운데가 타원 안이면 잇지 않는다. 반환: 새 획 목록 (순서 유지)."""
+    out = []
+    for s in strokes:
+        s = np.asarray(s, dtype=np.float64)
+        if out and join_px > 0 and np.hypot(*(s[0] - out[-1][-1])) <= join_px:
+            mx, my = 0.5 * (s[0, :2] + out[-1][-1, :2])
+            if not any(((mx - cx) / ax) ** 2 + ((my - cy) / ay) ** 2 <= 1 for (cx, cy), (ax, ay) in apart):
+                out[-1] = np.vstack([out[-1], s])
+                continue
+        out.append(s)
+    return out
+
+
+def cut_by_mask(strokes, mask):
+    """마스크(True) 안에 든 부분을 잘라 낸 (남는 조각들, 잘려 나간 조각들). 잘린 획은 1px 간격 점으로."""
+    h, w = mask.shape
+    keep, gone = [], []
+    for q in strokes:
+        q = np.asarray(q, np.float64)
+        d = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(q, axis=0), axis=1))])
+        s = np.arange(0.0, d[-1] + 1e-9, 1.0) if d[-1] > 0 else np.zeros(1)
+        dense = np.column_stack([np.interp(s, d, q[:, 0]), np.interp(s, d, q[:, 1])])
+        ins = mask[np.clip(np.round(dense[:, 1]).astype(int), 0, h - 1), np.clip(np.round(dense[:, 0]).astype(int), 0, w - 1)]
+        if not ins.any():
+            keep.append(q)
+            continue
+        edges = np.flatnonzero(np.diff(ins.astype(np.int8))) + 1
+        for seg, flag in zip(np.split(dense, edges), np.split(ins, edges)):
+            if len(seg) >= 2:
+                (gone if flag[0] else keep).append(seg)
+    return keep, gone
 
 
 # ---------------------------------------------------------------------------
