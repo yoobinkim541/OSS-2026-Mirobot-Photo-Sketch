@@ -28,6 +28,7 @@
 - [3D 시뮬레이션](#3d-시뮬레이션-로봇-없이-확인)
 - [기술 스택과 설계 문서](#기술-스택과-설계-문서)
 - [배포 (CI/CD)](#배포-cicd)
+- [업스트림 기여](#업스트림-기여)
 - [테스트 · 폴더 · 라이선스](#테스트)
 
 ## 주요 기능
@@ -89,7 +90,7 @@ cd OSS-2026-Mirobot-Photo-Sketch
 pip install -e .
 ```
 
-`mirobot-sketch`(GUI), `mirobot-strokes`, `mirobot-draw`, `mirobot-sim` 명령이 생깁니다. 저장소에서 실행하면 `robot/drawing_config.json`, `LOG/runs/`, `out/`을 그대로 씁니다. 필요한 기능만 추가로 설치합니다.
+`mirobot-sketch`(GUI), `mirobot-strokes`, `mirobot-svg`, `mirobot-draw`, `mirobot-sim` 명령이 생깁니다. 저장소에서 실행하면 `robot/drawing_config.json`, `LOG/runs/`, `out/`을 그대로 씁니다. 필요한 기능만 추가로 설치합니다.
 
 | 추가 기능 | 명령 |
 |---|---|
@@ -214,8 +215,22 @@ mirobot-strokes photo.jpg --type photo --out out/photo
 - `--merge 4` : 끝점이 만나는 획을 이어 그려 펜 올림 횟수를 줄입니다 (기본 4px, 0=끔)
 - `--lines dark` : 깨끗한 선화에서 어두운 선의 중심선을 그립니다.
 - `--box W H` : 그리기 상자 크기(mm). 기본값은 100 × 100입니다.
+- `--svg` : 펜 플로터·GRBL 장비용 SVG(`out/photo.svg`)도 저장합니다. 아래 [다른 장비에서 쓰기](#다른-장비에서-쓰기-svg)를 보세요.
 
 `out/photo.json`과 비교 이미지 `out/photo_preview.png`(입력 / 선 후보 / 획 / 그리는 순서)가 만들어집니다.
+
+#### 다른 장비에서 쓰기 (SVG)
+
+획 JSON은 종이 중심 기준 mm 좌표라 로봇과 무관합니다. 선 추출 결과를 AxiDraw 같은 펜 플로터나 GRBL 기반 장비에서 쓰려면 SVG로 내보냅니다.
+
+```bash
+mirobot-strokes photo.jpg --type photo --out out/photo --svg   # 사진에서 바로
+mirobot-svg out/photo.json                                      # 이미 만든 JSON(GUI에서 저장한 파일 포함) -> out/photo.svg
+```
+
+- 문서 크기는 실제 종이 크기(A4 가로 297 × 210mm)이고, SVG 한 단위가 1mm입니다. 그림은 JSON과 같은 자리(종이 중심)에 놓입니다.
+- 획 하나가 `<path>` 하나이고, 그리는 순서를 그대로 둡니다.
+- AxiDraw(Inkscape 확장·`axicli`), [vpype](https://github.com/abey79/vpype), SVG → G-code 변환기처럼 SVG를 읽는 도구에 넘길 수 있습니다. vpype로 다시 읽어 종이 크기·위치·획 수가 JSON과 같은지 확인했고, AxiDraw·GRBL 실물 장비에서는 확인하지 않았습니다.
 
 ### 2. 획 JSON → 로봇
 
@@ -314,6 +329,18 @@ git tag -a v0.3.0 -m "..." && git push origin v0.3.0
 ```
 
 `mirobot_sketch/__init__.py`의 `__version__`도 함께 올립니다.
+
+## 업스트림 기여
+
+이 프로젝트는 [WLKATA 공식 ROS 2 저장소](https://github.com/wlkata/Wlkata_Mirobot_Ros2)의 URDF와 메시를 사용합니다. 그런데 이 저장소는 새로 받아 빌드하면 실패합니다. 원인을 찾아 고친 내용을 업스트림에 PR로 올렸습니다. 각 PR에는 `ros:humble` 컨테이너에서 수정 전후를 비교한 결과를 적었습니다.
+
+| PR | 문제 | 수정 |
+|---|---|---|
+| [#2](https://github.com/wlkata/Wlkata_Mirobot_Ros2/pull/2) | `wlkata_mirobot_description`이 저장소에 없는 `textures/` 폴더를 설치하려다 빌드에 실패합니다([이슈 #1](https://github.com/wlkata/Wlkata_Mirobot_Ros2/issues/1)의 오류). | 쓰이지 않는 설치 규칙을 지웠습니다(메시는 모두 STL). |
+| [#3](https://github.com/wlkata/Wlkata_Mirobot_Ros2/pull/3) | `wlkata_mirobot_moveit_config`가 저장소에 없는 `.setup_assistant`를 설치하려다 빌드에 실패합니다. 이 파일이 없으면 MoveIt Setup Assistant로 패키지를 다시 열 수도 없습니다. | 패키지 안의 URDF·SRDF·ros2_control 설정에 맞춰 `.setup_assistant`를 추가했습니다. |
+| [#4](https://github.com/wlkata/Wlkata_Mirobot_Ros2/pull/4) | `wlkatapython.py`가 소스에 없고 커밋된 `build/`에만 있습니다. 그래서 `pip install .`이 현재 소스가 아닌 예전 빌드 파일을 설치합니다. | 모듈 파일을 추가하고, `build/`·`egg-info`·`.pyc`를 지우고, `.gitignore`를 추가했습니다. |
+
+PR이 병합되기 전까지 이 프로젝트의 설치 스크립트([`packaging/wsl/setup_ros_env.sh`](packaging/wsl/setup_ros_env.sh))는 커밋 `c0a7ad4`를 고정하고, 빈 `textures/` 폴더를 만든 뒤 빌드합니다. 이 프로젝트는 `wlkata_mirobot_description`만 빌드하므로 업스트림 PR #3·#4가 다루는 문제에는 영향을 받지 않습니다.
 
 ## 테스트
 

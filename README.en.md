@@ -30,6 +30,7 @@ photo ─▶ line-extraction pipeline ─▶ strokes (paper mm) ─▶ checks (a
 - [3D simulation](#3d-simulation-check-without-a-robot)
 - [Tech stack and design docs](#tech-stack-and-design-docs)
 - [Delivery (CI/CD)](#delivery-cicd)
+- [Upstream contributions](#upstream-contributions)
 - [Tests · folders · license](#tests)
 
 ## Features
@@ -91,7 +92,7 @@ cd OSS-2026-Mirobot-Photo-Sketch
 pip install -e .
 ```
 
-This provides the commands `mirobot-sketch` (GUI), `mirobot-strokes`, `mirobot-draw` and `mirobot-sim`. Running from the repository uses `robot/drawing_config.json`, `LOG/runs/` and `out/` directly. Install extra features only when needed:
+This provides the commands `mirobot-sketch` (GUI), `mirobot-strokes`, `mirobot-svg`, `mirobot-draw` and `mirobot-sim`. Running from the repository uses `robot/drawing_config.json`, `LOG/runs/` and `out/` directly. Install extra features only when needed:
 
 | Extra feature | Command |
 |---|---|
@@ -216,8 +217,22 @@ mirobot-strokes photo.jpg --type photo --out out/photo
 - `--merge 4` : joins strokes whose end points meet to reduce pen lifts (default 4 px, 0 = off)
 - `--lines dark` : draws the center lines of dark strokes in clean line art.
 - `--box W H` : drawing box size in mm. The default is 100 × 100.
+- `--svg` : also saves an SVG for pen plotters and GRBL machines (`out/photo.svg`). See [Using other machines](#using-other-machines-svg) below.
 
 This creates `out/photo.json` and a comparison image `out/photo_preview.png` (input / line candidates / strokes / drawing order).
+
+#### Using other machines (SVG)
+
+The strokes JSON uses millimetres from the paper center, so it is not tied to the robot. To use the extracted lines on a pen plotter such as AxiDraw or a GRBL-based machine, export them as SVG.
+
+```bash
+mirobot-strokes photo.jpg --type photo --out out/photo --svg   # straight from a photo
+mirobot-svg out/photo.json                                      # from an existing JSON (including one saved by the GUI) -> out/photo.svg
+```
+
+- The document is the real paper size (A4 landscape, 297 × 210 mm), and one SVG unit is 1 mm. The drawing sits where it is in the JSON (at the paper center).
+- Each stroke becomes one `<path>`, in drawing order.
+- The SVG can be passed to tools that read SVG, such as AxiDraw (Inkscape extension or `axicli`), [vpype](https://github.com/abey79/vpype), or an SVG → G-code converter. Reading it back with vpype gives the same paper size, position and stroke count as the JSON. It has not been tested on real AxiDraw or GRBL hardware.
 
 ### 2. Strokes JSON → robot
 
@@ -316,6 +331,18 @@ git tag -a v0.3.0 -m "..." && git push origin v0.3.0
 ```
 
 Also bump `__version__` in `mirobot_sketch/__init__.py`.
+
+## Upstream contributions
+
+This project uses the URDF and meshes from [WLKATA's official ROS 2 repository](https://github.com/wlkata/Wlkata_Mirobot_Ros2), which fails to build on a fresh clone. I traced the causes and sent the fixes upstream as pull requests. Each PR shows a before/after comparison run in a `ros:humble` container.
+
+| PR | Problem | Fix |
+|---|---|---|
+| [#2](https://github.com/wlkata/Wlkata_Mirobot_Ros2/pull/2) | `wlkata_mirobot_description` tries to install a `textures/` directory that is not in the repository, so the build fails (the error in [issue #1](https://github.com/wlkata/Wlkata_Mirobot_Ros2/issues/1)). | Removed the unused install rule (all meshes are STL). |
+| [#3](https://github.com/wlkata/Wlkata_Mirobot_Ros2/pull/3) | `wlkata_mirobot_moveit_config` tries to install a `.setup_assistant` that is not in the repository, so the build fails. Without this file, MoveIt Setup Assistant also cannot reopen the package. | Added `.setup_assistant` based on the package's URDF, SRDF, and ros2_control config. |
+| [#4](https://github.com/wlkata/Wlkata_Mirobot_Ros2/pull/4) | `wlkatapython.py` is missing from the sources and exists only in the committed `build/`, so `pip install .` installs old build copies instead of the current sources. | Added the module file, removed `build/`, `egg-info`, and `.pyc` files, and added a `.gitignore`. |
+
+Until these PRs are merged, this project's setup script ([`packaging/wsl/setup_ros_env.sh`](packaging/wsl/setup_ros_env.sh)) pins commit `c0a7ad4` and creates an empty `textures/` directory before building. This project builds only `wlkata_mirobot_description`, so the problems fixed by upstream PRs #3 and #4 do not affect it.
 
 ## Tests
 

@@ -8,6 +8,7 @@
   calibration     종이 평면·실물 허용 사각형 보정             (mirobot-calibrate)
   mirobot_sim      기구학 시뮬레이션, 관절 한계 검사           (mirobot-sim)
   make_strokes     사진 -> 획 JSON 명령줄 도구                 (mirobot-strokes)
+  svg_export       획 JSON -> SVG (펜 플로터·GRBL 장비용)      (mirobot-svg)
   gui              데스크톱 GUI                                (mirobot-sketch)
   stages / edits   단계별 파이프라인(캐시), 획 편집 제안
   draw_job         로봇으로 그리기(①~⑥ 안전 절차), virtual_robot 가상 시뮬레이션, live_progress RViz 따라가기

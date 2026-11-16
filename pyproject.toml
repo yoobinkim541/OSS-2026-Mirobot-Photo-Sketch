@@ -46,6 +46,7 @@ mirobot-sketch = "mirobot_sketch.gui:main"
 
 [project.scripts]
 mirobot-strokes = "mirobot_sketch.make_strokes:main"
+mirobot-svg = "mirobot_sketch.svg_export:main"
 mirobot-draw = "mirobot_sketch.draw_executor:main"
 mirobot-sim = "mirobot_sketch.mirobot_sim:main"
 mirobot-setup-rviz = "mirobot_sketch.rviz_setup:main"

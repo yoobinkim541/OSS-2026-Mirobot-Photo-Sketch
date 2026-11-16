@@ -36,3 +36,4 @@ jobs:
         run: |
           mirobot-draw trajectories/orientation-test-F.json --gcode-out F.gcode
           mirobot-sim trajectories/orientation-test-F.json
+          mirobot-svg trajectories/orientation-test-F.json -o F.svg
