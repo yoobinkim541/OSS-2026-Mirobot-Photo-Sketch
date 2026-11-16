@@ -208,7 +208,7 @@ For PCs without WSL or a ROS environment, [`rviz_setup.py`](../mirobot_sketch/rv
 
 - [`packaging/mirobot_sketch.spec`](../packaging/mirobot_sketch.spec): a **one-folder (onedir)** build. `MirobotSketch.exe` (GUI, no console) and `mirobot.exe` (command line: `draw`, `strokes`, `svg`, `sim`, `setup-rviz`, `mcp`) sit in one folder.
 - **Why onedir instead of onefile:** faster start and fewer antivirus false positives.
-- rembg and onnxruntime are excluded for size, and the build runs in a clean build-only virtual environment. The .exe therefore has no background removal, photo line art or face landmarks (eye, brow and mouth redraw). Text removal runs on OpenCV dnn (`TextDetectionModel_DB`) and is not affected. The RViz playback script, the setup script and the face model are bundled as data.
+- rembg and onnxruntime are excluded for size, and the build runs in a clean build-only virtual environment. The .exe therefore has no background removal and no photo line art, and so none of what follows it: declutter, face landmarks (eye, brow and mouth redraw) and text removal (the declutter stage runs only when line art was used, and text removal is part of it). The RViz playback script, the setup script and the face model are bundled as data.
 - Because sub-commands import modules by string name, hidden imports are declared with `collect_submodules`.
 
 ### 9.3 Installer (Inno Setup)

@@ -209,7 +209,7 @@ WSL이 없거나 ROS 환경이 없는 PC를 위해 [`rviz_setup.py`](../mirobot_
 
 - [`packaging/mirobot_sketch.spec`](../packaging/mirobot_sketch.spec): **폴더형(onedir)** 빌드. `MirobotSketch.exe`(GUI, 콘솔 없음)와 `mirobot.exe`(명령줄: `draw`·`strokes`·`svg`·`sim`·`setup-rviz`·`mcp`)가 한 폴더에 들어갑니다.
 - **onefile이 아니라 onedir인 이유:** 실행이 빠르고 백신 오탐이 적습니다.
-- rembg·onnxruntime은 용량 때문에 제외하고, 깨끗한 빌드 전용 가상환경에서 빌드합니다. 그래서 .exe에는 배경 제거, 실사 선화, 얼굴 점(눈·눈썹·입 다시 그리기)이 없습니다. 사진 속 글자 지우기는 OpenCV dnn(`TextDetectionModel_DB`)으로 돌아 제외되지 않습니다. RViz 재생 스크립트, 설치 스크립트, 얼굴 모델은 데이터로 포함합니다.
+- rembg·onnxruntime은 용량 때문에 제외하고, 깨끗한 빌드 전용 가상환경에서 빌드합니다. 그래서 .exe에는 배경 제거, 실사 선화와 그 뒤의 잔선 정리·얼굴 점(눈·눈썹·입 다시 그리기)·사진 속 글자 지우기가 없습니다(잔선 정리 단계는 선화를 쓴 경우에만 돌고, 글자 지우기는 그 단계 안에 있음). RViz 재생 스크립트, 설치 스크립트, 얼굴 모델은 데이터로 포함합니다.
 - 하위 명령이 모듈을 문자열 이름으로 불러오므로 `collect_submodules`로 숨은 import를 알려 줍니다.
 
 ### 9.3 설치 프로그램 (Inno Setup)
