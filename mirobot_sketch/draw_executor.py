@@ -33,6 +33,7 @@ CV/make_strokes.py 또는 GUI가 만든 sketch_strokes JSON(종이 중심 기준
 
 import argparse
 import json
+import math
 import re
 import sys
 import time
@@ -94,10 +95,44 @@ def active_limits(cfg, pending=False):
     return cfg["limits_pending_verification"] if pending else cfg["limits"]
 
 
+def drawing_warp(cfg):
+    """그림 좌표 미리 비틀기 계수 {"x": [5], "y": [5]} 또는 None(끔).
+    계획한 종이 좌표 (x, y)를 c1·x + c2·y + c3·x² + c4·xy + c5·y²로 바꿔 보내면 실제로는 계획대로 그려진다
+    (종이 중심 고정). 높이에 따라 가로·세로 배율이 달라지는 팔을 사진 측정으로 맞춘 값이다."""
+    w = cfg.get("drawing_warp")
+    if not w:
+        return None
+    try:
+        cx, cy = [float(v) for v in w["x"]], [float(v) for v in w["y"]]
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("drawing_warp는 x·y 계수 5개씩이어야 합니다.") from None
+    if len(cx) != 5 or len(cy) != 5 or not all(math.isfinite(v) for v in cx + cy):
+        raise ValueError("drawing_warp는 x·y 계수 5개씩(유한한 숫자)이어야 합니다.")
+    if not (0.5 <= cx[0] <= 1.5 and 0.5 <= cy[1] <= 1.5):
+        raise ValueError(f"drawing_warp의 1차 배율이 0.5~1.5 밖입니다 (x {cx[0]}, y {cy[1]}): 측정 실수로 보고 멈춥니다.")
+    return {"x": cx, "y": cy}
+
+
+def warp_xy(warp, x, y):
+    """계획 종이 좌표 → 로봇에 보낼 종이 좌표 (warp가 None이면 그대로)."""
+    if warp is None:
+        return x, y
+    t = (x, y, x * x, x * y, y * y)
+    return sum(c * v for c, v in zip(warp["x"], t)), sum(c * v for c, v in zip(warp["y"], t))
+
+
 def check_limits(strokes, cfg, pending=False):
+    """범위 검사는 실제로 보낼 좌표(미리 비틀기 적용 후)로 하고, 벗어난 점은 계획 좌표로 알린다."""
     from .limits import Region
     region = Region.from_cfg(active_limits(cfg, pending))
-    return [(i, x, y) for i, s in enumerate(strokes) for x, y in s if not region.contains(x, y)]
+    warp = drawing_warp(cfg)
+    return [(i, x, y) for i, s in enumerate(strokes) for x, y in s if not region.contains(*warp_xy(warp, x, y))]
+
+
+END_BACKOFF_MAX_MM = 1.0   # 끝점을 뒤로 물리는 최대량 (이보다 크면 끝점에서 선이 끊김)
+J1_OFFSET_MAX_DEG = 3.0   # J1 방향 보정 상한 (측정값 약 0.66°: 이보다 크면 설정 실수로 봄)
+J1_TURN_EPS_RAD = math.radians(0.01)   # 이보다 작은 J1 변화는 방향이 바뀐 것으로 보지 않음
+J1_APPROACH_MARGIN_RAD = math.radians(0.2)   # 획 시작 전 공중에서 미리 돌리는 양 = 보정값 + 이만큼
 
 
 class Planner:
@@ -122,27 +157,62 @@ class Planner:
         self.two_stage = (not air) and clearance > self.slow_zone + 1e-9
         self.slow_dx = pen["retract_x_sign"] * (self.slow_zone + press)
         self.down_extra = -pen["retract_x_sign"] * press  # 누르는 방향 = 후퇴의 반대
+        # 끝점 덜 누르기: 펜을 내린 첫 점과 떼기 직전 마지막 점만 종이에서 이만큼 뒤로(후퇴 방향) 둠.
+        # 세게 누른 채 내리거나 떼면 펜 끝이 미끄러져 끝점에 세로 줄이 생김 (카메라 확인: pen_correction).
+        self.start_backoff = float(pen.get("start_backoff_mm", 0.0))
+        self.end_backoff = float(pen.get("end_backoff_mm", 0.0))
+        for v in (self.start_backoff, self.end_backoff):
+            if not (math.isfinite(v) and 0.0 <= v <= END_BACKOFF_MAX_MM):
+                raise ValueError(f"끝점 뒤로 물리는 양은 0~{END_BACKOFF_MAX_MM:g} mm여야 합니다 (지금 {v}).")
         pc = cfg["plane_compensation"]
         self.pa, self.pb = pc["a_per_mm_y"], pc["b_per_mm_z"]
+        self.radial_max = float(pc.get("radial_retract_max_mm", 0.0))
+        self.radial_radius = float(pc.get("radial_retract_radius_mm", 60.0))
+        if not math.isfinite(self.radial_max) or self.radial_max < 0 or not math.isfinite(self.radial_radius) or self.radial_radius <= 0:
+            raise ValueError("방사형 후퇴량은 0 이상, 기준 거리는 0보다 커야 합니다.")
+        self.retract_sign = float(pen["retract_x_sign"])
+        # J1 방향 보정: 같은 J1 목표라도 J1이 늘어나며 도착할 때와 줄어들며 도착할 때 실제 각이 이만큼 다르다
+        # (늘어나며 도착 - 줄어들며 도착, 2026-11-12 대기 자세 사진 비교로 약 +0.66°). 0이면 끔.
+        # 목표점마다 도착 방향을 보고 반대쪽으로 절반씩 돌려 보내고, 방향이 바뀌는 점에서는 같은 점으로 한 번 더
+        # 보내 유격을 먼저 메운다 (그리는 도중 방향이 바뀌어도 선이 옆으로 밀리지 않게).
+        self.j1_offset = math.radians(float(pen.get("j1_direction_offset_deg", 0.0)))
+        if not (math.isfinite(self.j1_offset) and abs(self.j1_offset) <= math.radians(J1_OFFSET_MAX_DEG)):
+            raise ValueError(f"J1 방향 보정은 ±{J1_OFFSET_MAX_DEG:g}° 안이어야 합니다.")
+        self._j1_dir = 1            # 대기 자세에는 J1 -90° → 0°로, 늘어나며 도착한다
+        self._j1_prev = None        # 마지막으로 보낸 목표점(보정 전)
         self.feeds = cfg["feeds_mm_per_min"]
+        self.warp = drawing_warp(cfg)
 
     def robot_yz(self, px, py):
+        px, py = warp_xy(self.warp, px, py)
         return self.cy + self.sy * px, self.cz + self.sz * py
 
     def contact_x(self, ry, rz):
-        return self.cx + self.pa * (ry - self.cy) + self.pb * (rz - self.cz) + self.down_extra
+        distance = math.hypot(ry - self.cy, rz - self.cz)
+        radial = self.retract_sign * self.radial_max * min(float(distance) / self.radial_radius, 1.0)
+        return self.cx + self.pa * (ry - self.cy) + self.pb * (rz - self.cz) + self.down_extra + radial
+
+    def _off_paper(self, contact, x):
+        """접촉점에서 종이 수직 방향(X)으로 x까지 뺀 점. J1 방향 보정이 켜져 있으면 베이스 축에서 접촉점으로 뻗은
+        선(같은 J1) 위로 빼서, 펜을 내리고 올리는 동안 J1이 반대로 돌아 유격 상태가 바뀌지 않게 한다.
+        공중 모드는 종이에 닿지 않으므로 그대로 X만 뺀다 (공중 경로가 그림 모양을 그대로 따라가게)."""
+        cx, ry, rz = contact
+        return x, (ry * x / cx if self.j1_offset and not self.air else ry), rz
 
     def pose(self, px, py, pen_down):
         ry, rz = self.robot_yz(px, py)
         x = self.contact_x(ry, rz)
-        if not pen_down or self.air:
-            x += self.up_dx
+        if not pen_down:
+            return self._off_paper((x, ry, rz), x + self.up_dx)
+        if self.air:     # 공중 모드의 그리는 점: 펜업 높이에서 같은 Y·Z (그림 모양을 그대로 따라감)
+            return x + self.up_dx, ry, rz
         return x, ry, rz
 
     def pose_slow_zone(self, px, py):
         """종이에 닿기 직전 느린 구간이 시작되는 높이(접촉면에서 slow_zone_mm 위)."""
         ry, rz = self.robot_yz(px, py)
-        return self.contact_x(ry, rz) + self.slow_dx, ry, rz
+        x = self.contact_x(ry, rz)
+        return self._off_paper((x, ry, rz), x + self.slow_dx)
 
     def gcode(self, pose, feed):
         x, y, z = pose
@@ -154,46 +224,94 @@ class Planner:
         sign = self.cfg["pen"]["retract_x_sign"]
         return current if sign * (current - other) >= 0 else other
 
+    def _rotated(self, pose, angle):
+        """베이스 축 둘레로 angle(rad)만큼 돌린 목표점 (자세 A·B·C는 그대로)."""
+        x, y, z = pose
+        c, s = math.cos(angle), math.sin(angle)
+        return x * c - y * s, x * s + y * c, z
+
+    def _j1_turned(self, pose):
+        """J1 도착 방향의 반대쪽으로 보정의 절반만큼 돌린 목표점."""
+        return self._rotated(pose, -0.5 * self.j1_offset * self._j1_dir)
+
+    def _first_j1_dir(self, stroke):
+        """획의 첫 그리기 이동에서 J1이 도는 방향(+1/-1). 보정이 꺼져 있거나 J1이 거의 안 돌면 0."""
+        if not self.j1_offset or len(stroke) < 2:
+            return 0
+        a, b = self.pose(*stroke[0], True), self.pose(*stroke[1], True)
+        turn = math.atan2(b[1], b[0]) - math.atan2(a[1], a[0])
+        return 0 if abs(turn) <= J1_TURN_EPS_RAD else (1 if turn > 0 else -1)
+
+    def _emit(self, items):
+        """[(목표점, 속도, 설명)] -> [(gcode, 설명)]. J1 방향 보정이 켜져 있으면 방향이 바뀌는 점마다
+        직전 목표점으로 새 보정값을 먼저 보내는 'j1-takeup' 명령을 넣는다 (설명 끝말은 원래 명령과 같게)."""
+        out = []
+        for pose, feed, label in items:
+            if self.j1_offset and self._j1_prev is not None:
+                turn = math.atan2(pose[1], pose[0]) - math.atan2(self._j1_prev[1], self._j1_prev[0])
+                if abs(turn) > J1_TURN_EPS_RAD and (turn > 0) != (self._j1_dir > 0):
+                    self._j1_dir = 1 if turn > 0 else -1
+                    head, _, tail = label.rpartition(" ")
+                    out.append((self.gcode(self._j1_turned(self._j1_prev), feed), f"{head} j1-takeup {tail}"))
+            out.append((self.gcode(self._j1_turned(pose) if self.j1_offset else pose, feed), label))
+            self._j1_prev = pose
+        return out
+
     def return_to_origin(self):
         """그림을 다 그린 뒤 펜을 처음 상태(종이 중심, 펜 끝이 종이에 살짝 닿음)로 되돌리는 명령들.
-        plan()이 종이 중심 위에서 펜업으로 끝난 뒤 이어 보낸다. 공중 모드는 해당 없음."""
+        plan()이 종이 중심 위에서 펜업으로 끝난 뒤 이어 보낸다(J1 방향 보정 상태도 이어받음). 공중 모드는 해당 없음."""
         if self.air:
             return []
         f = self.feeds
-        cmds = []
+        items = []
         if self.two_stage:
-            cmds.append((self.gcode(self.pose_slow_zone(0, 0), f["travel"]), "return origin descend"))
-        cmds.append((self.gcode(self.pose(0, 0, True), f["approach"]), "return origin"))
-        return cmds
+            items.append((self.pose_slow_zone(0, 0), f["travel"], "return origin descend"))
+        items.append((self.pose(0, 0, True), f["approach"], "return origin"))
+        return self._emit(items)
+
+    def _backed(self, pose, mm):
+        """접촉 자세를 종이에서 mm만큼 뒤로 (공중 모드는 이미 떠 있으므로 그대로)."""
+        if self.air or not mm:
+            return pose
+        return self._off_paper(pose, pose[0] + self.retract_sign * mm)
 
     def plan(self, strokes):
-        """[(gcode, 설명)] 리스트. 획이 끝나면 그 자리에서 펜업하고, 그 X를 유지한 채 다음 위치로 간 뒤에만 내린다."""
+        """[(gcode, 설명)] 리스트. 획이 끝나면 그 자리에서 펜업하고, 그 X를 유지한 채 다음 위치로 간 뒤에만 내린다.
+        시작은 종이 중심 펜다운(사람이 맞춘 시작 자세)이고, J1 방향 보정 상태는 매번 처음부터 다시 센다."""
         f = self.feeds
+        self._j1_dir, self._j1_prev = 1, self.pose(0, 0, True)
         home = self.pose(0, 0, False)
-        cmds = [(self.gcode(home, f["approach"]), "center pen-up")]
+        items = [(home, f["approach"], "center pen-up")]
         held_x = home[0]
         for i, s in enumerate(strokes):
             x0, y0 = s[0]
             up = self.pose(x0, y0, False)
             travel_x = self._farther_x(held_x, up[0])
-            cmds.append((self.gcode((travel_x, up[1], up[2]), f["travel"]), f"stroke {i} travel"))
+            travel = self._off_paper(self.pose(x0, y0, True), travel_x)
+            first = self._first_j1_dir(s)
+            if first:   # 첫 그리기 방향으로 공중에서 미리 J1을 움직여, 종이 위 첫 이동에서 유격을 메우지 않게
+                lead = -first * (abs(self.j1_offset) + J1_APPROACH_MARGIN_RAD)
+                items.append((self._rotated(travel, lead), f["travel"], f"stroke {i} j1-approach travel"))
+            items.append((travel, f["travel"], f"stroke {i} travel"))
             if self.two_stage:   # 높이 띄운 곳에서 빠르게 내려오다 접촉 직전부터 천천히
-                cmds.append((self.gcode(self.pose_slow_zone(x0, y0), f["travel"]), f"stroke {i} descend"))
-            cmds.append((self.gcode(self.pose(x0, y0, True), f["approach"]), f"stroke {i} pen-down"))
-            for x, y in s[1:]:
-                cmds.append((self.gcode(self.pose(x, y, True), f["draw"]), f"stroke {i} draw"))
+                items.append((self.pose_slow_zone(x0, y0), f["travel"], f"stroke {i} descend"))
+            items.append((self._backed(self.pose(x0, y0, True), self.start_backoff), f["approach"], f"stroke {i} pen-down"))
+            last = len(s) - 1
+            for j, (x, y) in enumerate(s[1:], 1):
+                pose = self.pose(x, y, True)
+                if j == last:
+                    pose = self._backed(pose, self.end_backoff)
+                items.append((pose, f["draw"], f"stroke {i} draw"))
             x1, y1 = s[-1]
             # 그 자리(같은 Y·Z)에서만 뒤로 뺀다. 옆으로 가는 명령은 이 다음이다.
-            if self.two_stage and self.down_extra:
-                cmds.append((self.gcode(self.pose_slow_zone(x1, y1), f["approach"]), f"stroke {i} lift"))
+            if self.two_stage:
+                items.append((self.pose_slow_zone(x1, y1), f["approach"], f"stroke {i} lift"))
             end_up = self.pose(x1, y1, False)
-            cmds.append((self.gcode(end_up, f["travel"] if self.two_stage else f["approach"]),
-                         f"stroke {i} pen-up"))
+            items.append((end_up, f["travel"] if self.two_stage else f["approach"], f"stroke {i} pen-up"))
             held_x = end_up[0]
         back = self.pose(0, 0, False)
-        cmds.append((self.gcode((self._farther_x(held_x, back[0]), back[1], back[2]), f["travel"]),
-                     "return center pen-up"))
-        return cmds
+        items.append(((self._farther_x(held_x, back[0]), back[1], back[2]), f["travel"], "return center pen-up"))
+        return self._emit(items)
 
 
 def estimate_time(strokes, cfg, air=False):
@@ -206,9 +324,13 @@ def estimate_time(strokes, cfg, air=False):
       command_count, latency_s  명령마다 ok 응답을 기다리는 지연 (timing 설정의 가정값)
       motion_s     = draw + travel + pen_lift (가감속 제외 이론값)
       total_s      = motion + latency
+    길이는 로봇에 실제로 보낼(drawing_warp로 미리 비튼) 좌표로 잽니다.
     """
     f = cfg["feeds_mm_per_min"]
     clear = cfg["pen"]["up_clearance_mm"]
+    warp = drawing_warp(cfg)                              # 종이 중심(0, 0)은 비틀어도 그대로
+    if warp is not None:
+        strokes = [[warp_xy(warp, float(x), float(y)) for x, y in s] for s in strokes]
     down = up = 0.0
     pos = (0.0, 0.0)
     for s in strokes:
@@ -223,7 +345,7 @@ def estimate_time(strokes, cfg, air=False):
     press = float(cfg["pen"].get("down_extra_mm", 0.0))
     lift = clear + press                                   # 누른 점에서 펜업 높이까지 (Planner.up_dx)
     two_stage = (not air) and clear > slow + 1e-9        # Planner.two_stage와 같은 조건
-    slow_lift = two_stage and press > 0          # 누른 뒤에는 종이에서 천천히 든 다음 빠르게 올림
+    slow_lift = two_stage  # 접촉점부터 느린 구간을 먼저 수직으로 벗어난 뒤 빠르게 올림
     if air:
         pen_lift_s = max(clear, float(cfg["pen"].get("air_clearance_mm", 8.0))) / f["approach"] * 60.0
     elif slow_lift:
@@ -235,6 +357,8 @@ def estimate_time(strokes, cfg, air=False):
     else:
         pen_lift_s = lift * (2 * n + 1) / f["approach"] * 60.0
     command_count = 2 + sum(len(s) + 2 for s in strokes) + (n if two_stage else 0) + (n if slow_lift else 0)
+    if float(cfg["pen"].get("j1_direction_offset_deg", 0.0)):   # J1 방향 보정은 획마다 접근점·유격 메우기를 더함
+        command_count = len(Planner(cfg, air=air).plan(strokes))
     latency = cfg.get("timing", {}).get("assumed_command_latency_s", 0.0)
     motion_s = draw_s + travel_s + pen_lift_s
     return {
@@ -242,6 +366,7 @@ def estimate_time(strokes, cfg, air=False):
         "draw_s": round(draw_s, 1), "travel_s": round(travel_s, 1), "pen_lift_s": round(pen_lift_s, 1),
         "command_count": command_count, "latency_s": round(command_count * latency, 1),
         "motion_s": round(motion_s, 1), "total_s": round(motion_s + command_count * latency, 1),
+        "up_clearance_mm": float(clear),
     }
 
 
@@ -274,6 +399,7 @@ class MirobotLink:
     def __init__(self, ser, verbose=False):
         self.ser = ser
         self.verbose = verbose
+        self.status_observer = None
 
     @classmethod
     def open(cls, port, baud, verbose=False):
@@ -298,19 +424,58 @@ class MirobotLink:
             if "<" in buf and ">" in buf:
                 break
         if "<" not in buf:
+            if self.status_observer is not None:
+                self.status_observer("unknown", None, buf)
             return "unknown", None, buf
         body = buf[buf.index("<") + 1:]
         state = body.split(",")[0]
         m = CARTESIAN_RE.search(buf)
         tcp = tuple(float(v) for v in m.groups()) if m else None
+        if self.status_observer is not None:
+            self.status_observer(state, tcp, buf)
         return state, tcp, buf
 
-    def wait_idle(self, timeout):
-        return self._wait_settled(timeout, None, None)
+    def read_settings(self, timeout=10.0):
+        """$$ 설정 덤프. send_and_ack는 쓰지 않음 ($20 설명의 limit가 오류로 잡힘).
+        실물에서 쓰던 방식(LOG/scripts/depth_ladder/plane_ladder.py)과 같다: 입력 버퍼를 비우고 ok까지 읽는다."""
+        self.ser.reset_input_buffer()
+        self.ser.write(b"$$\r\n")
+        deadline = time.monotonic() + timeout
+        buf = b""
+        while time.monotonic() < deadline and b"\nok" not in buf:
+            chunk = self.ser.read(getattr(self.ser, "in_waiting", 0) or 1)
+            if not chunk:
+                time.sleep(0.01)
+                continue
+            buf += chunk if isinstance(chunk, (bytes, bytearray)) else str(chunk).encode()
+        got = {}
+        for ln in buf.decode("utf-8", "replace").splitlines():
+            if not ln.startswith("$") or "=" not in ln:
+                continue
+            key, rest = ln.split("=", 1)
+            got[key] = rest.split(" ")[0]
+        return got
+
+    def wait_idle(self, timeout, should_stop=None):
+        return self._wait_settled(timeout, None, None, should_stop=should_stop)
 
     def wait_until_x(self, target_x, timeout, tol=1.5):
         """뺀 X가 보고될 때까지. 좌표가 없는 Idle은 통과하지 않는다."""
         return self._wait_settled(timeout, float(target_x), float(tol))
+
+    def wait_until_pose(self, target, timeout, tol=0.6, should_stop=None):
+        """컨트롤러가 목표 XYZ에 도착해 Idle이 될 때까지 기다린다."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if should_stop and should_stop():
+                raise StopRequested()
+            state, tcp, raw = self.query_status()
+            if any(t in raw.lower() for t in ERROR_TOKENS):
+                raise ControllerError(f"위치 대기 중 오류 상태: {raw}")
+            if state == "Idle" and tcp is not None and all(abs(a-b) <= tol for a,b in zip(tcp, target)):
+                return tcp
+            time.sleep(0.05)
+        raise ControllerError("목표 위치 도착을 확인하지 못했습니다")
 
     def wait_until_left_contact(self, contact_x, timeout, retract_sign=-1.0, min_mm=5.0):
         """이번 획의 접촉 X를 본 뒤, 종이 반대쪽으로 min_mm 이상 움직인 보고가 올 때까지.
@@ -325,17 +490,20 @@ class MirobotLink:
                 if abs(tcp[0] - contact_x) <= 2.0:
                     saw_contact = True
                 away = (contact_x - tcp[0]) * (-float(retract_sign))
-                if saw_contact and away >= min_mm:
+                if saw_contact and state == "Idle" and away >= min_mm:
                     return tcp
             time.sleep(0.05)
         raise ControllerError("펜이 종이에서 떨어진 위치를 확인하지 못했습니다")
 
-    def _wait_settled(self, timeout, target_x, tol, target_yz=None, yz_tol=1.0, contact_sign=1.0):
+    def _wait_settled(self, timeout, target_x, tol, target_yz=None, yz_tol=1.0, contact_sign=1.0,
+                      should_stop=None):
         deadline = time.monotonic() + timeout
         first = True
         saw_move = False
         saw_contact = False
         while time.monotonic() < deadline:
+            if should_stop and should_stop():
+                raise StopRequested()
             state, tcp, raw = self.query_status()
             if any(t in raw.lower() for t in ERROR_TOKENS):
                 raise ControllerError(f"Idle 대기 중 오류 상태: {raw}")
@@ -465,6 +633,36 @@ def connect_and_home(link, cfg, progress=print, should_cancel=None):
     return tcp
 
 
+DEFAULT_CONTROLLER_SETTINGS = {"$3": 123, "$23": 60}
+
+
+def require_controller_settings(link, cfg):
+    """방향 마스크가 기대와 같아야 움직인다. $$는 send_and_ack로 읽지 않는다.
+    반환: 읽은 값 dict, 또는 설정에서 controller_settings_expected를 null/{}로 둬 끈 경우 None
+    (실물 컨트롤러에서 읽기가 실패해 그리기가 막힐 때의 탈출구. 끈 사실은 실행 기록에 남긴다)."""
+    expected = (cfg or {}).get("controller_settings_expected", DEFAULT_CONTROLLER_SETTINGS)
+    if not expected:
+        return None
+    try:
+        got = link.read_settings()
+    except OSError as e:
+        raise DrawError("start", f"컨트롤러 설정을 읽지 못했습니다: {e}",
+                        "USB 연결을 확인하세요.") from None
+    bad = []
+    for key, want in expected.items():
+        have = got.get(str(key))
+        if have is None or str(have) != str(want):
+            shown = "없음" if have is None else have
+            bad.append(f"{key}={shown} (필요 {want})")
+    if bad:
+        raise DrawError(
+            "start",
+            "컨트롤러 방향 설정이 기대와 다릅니다: " + ", ".join(bad) + ". 움직이지 않았습니다.",
+            "방향 마스크가 펌웨어 기본값이면 팔이 반대로 움직입니다. 설정을 확인한 뒤 다시 시작하세요. "
+            "값이 맞는데 읽기만 실패한다면 설정 파일의 controller_settings_expected를 null로 두면 이 확인을 건너뜁니다.")
+    return {str(k): got.get(str(k)) for k in expected}
+
+
 RETRACTED_START_MAX_MM = 20.0   # 캘리브레이션 직후 펜을 벽에서 뺀 자세로 허용하는 최대 후퇴 거리
 
 
@@ -507,22 +705,85 @@ def write_run_record(meta, result, cfg):
     return path
 
 
+_XYZ = re.compile(r"X([-\d.]+) Y([-\d.]+) Z([-\d.]+)")
 
 
+def resume_commands(planner, cmds, start):
+    """[멈춤]으로 펜을 종이 반대쪽(같은 Y·Z)으로 뗀 뒤 cmds[start:]를 이어 보내기 전에 보낼 명령.
+    반환: (먼저 보낼 [(gcode, 설명)], 이어 보낼 첫 명령 번호).
+    - 펜이 종이에 닿은 채 멈췄으면(마지막으로 보낸 명령이 pen-down·draw): 그 접촉점 바로 위 느린 구간까지 빠르게,
+      같은 접촉점까지 천천히 다시 펜을 대고 남은 획을 잇는다 (이미 그은 부분은 다시 긋지 않음).
+      다만 그 획을 다 그은 뒤라면(다음이 그 획의 lift·pen-up) 이미 뗐으므로 그 둘을 건너뛴다.
+    - 다음 명령이 펜 내림이면 그 접촉점 위 느린 구간까지 먼저 빠르게 내려온다 (뗀 높이에서 끝까지 느리게 내리지 않게).
+    - 공중 모드는 종이에 닿지 않으므로 그대로 잇는다."""
+    if planner.air or start <= 0 or start >= len(cmds):
+        return [], start
+    f = planner.feeds
+    prev_line, prev = cmds[start - 1]
+    if prev.startswith("stroke ") and (prev.endswith(" pen-down") or prev.endswith(" draw")):
+        stroke = prev.split(" ")[1]
+        i = start
+        while (i < len(cmds) and cmds[i][1].startswith(f"stroke {stroke} ")
+               and (cmds[i][1].endswith(" lift") or cmds[i][1].endswith(" pen-up"))):
+            i += 1
+        if i > start:
+            return [], i
+        x, y, z = (float(v) for v in _XYZ.search(prev_line).groups())
+        out = []
+        if planner.two_stage:
+            out.append((planner.gcode((planner.contact_x(y, z) + planner.slow_dx, y, z), f["travel"]),
+                        f"stroke {stroke} resume descend"))
+        out.append((planner.gcode((x, y, z), f["approach"]), f"stroke {stroke} resume pen-down"))
+        return out, start
+    line, label = cmds[start]
+    if planner.two_stage and label.startswith("stroke ") and label.endswith(" pen-down"):
+        _, y, z = (float(v) for v in _XYZ.search(line).groups())
+        return [(planner.gcode((planner.contact_x(y, z) + planner.slow_dx, y, z), f["travel"]),
+                 f"stroke {label.split(' ')[1]} resume descend")], start
+    return [], start
 
-def execute(link, cmds, cfg, progress=print, on_ack=None, should_stop=None):
+
+def execute(link, cmds, cfg, progress=print, on_ack=None, should_stop=None, start=0):
     """계획된 명령을 순서대로 보냅니다. 반환: 실행 결과 dict. 오류·멈춤 시 즉시 멈춥니다(자동 복구 없음).
     on_ack(보낸 수, 전체 수): ok마다 호출 (GUI 진행 표시·RViz 따라가기).
-    should_stop(): True면 다음 명령부터 보내지 않음 (가상 시뮬레이션은 기다리는 중에도 바로 멈춤)."""
+    should_stop(): True면 다음 명령부터 보내지 않음 (가상 시뮬레이션은 기다리는 중에도 바로 멈춤).
+    start: 이 번호의 명령부터 보냄(멈춘 뒤 이어 그리기). 보낸 수(commands_sent)는 cmds 처음부터 센 번호."""
     started = time.monotonic()
-    sent = 0
+    sent = start
     stop = should_stop or (lambda: False)
-    retract_sign = float(cfg["pen"]["retract_x_sign"])
     contact_line = None
+    trace = []
+    context = {"command": "", "target": ""}
+    previous_observer = getattr(link, "status_observer", None)
+
+    def observe(state, tcp, raw):
+        if len(trace) < 20000:
+            parsed = parse_status(raw)
+            trace.append({"time_s": round(time.monotonic() - started, 3),
+                          "command": context["command"], "target": context["target"],
+                          "state": state, "tcp_mm": tcp, "abc_deg": parsed["abc_deg"],
+                          "joints_deg": parsed["joints_deg"]})
+        if previous_observer is not None:
+            previous_observer(state, tcp, raw)
+
+    if hasattr(link, "status_observer"):
+        link.status_observer = observe
+
+    def outcome(**values):
+        return {**values, "controller_trace": trace}
+
     try:
-        for i, (line, label) in enumerate(cmds):
+        for i in range(start, len(cmds)):
+            line, label = cmds[i]   # 그 자리 항목을 보낼 때 읽음 (끝점 물림을 바꾸면 남은 항목이 교체됨)
             if stop():
                 raise StopRequested()
+            # 수직 후퇴 이전에 마지막 그리기 위치에 실제로 도착해야 한다.
+            if (contact_line and hasattr(link, "wait_until_pose") and label.startswith("stroke ")
+                    and (label.endswith(" lift") or (label.endswith(" pen-up") and
+                         (i == start or not cmds[i-1][1].endswith(" lift"))))):
+                context.update(command="stroke endpoint", target=contact_line)
+                endpoint = tuple(float(v) for v in re.search(r"X([-\d.]+) Y([-\d.]+) Z([-\d.]+)", contact_line).groups())
+                link.wait_until_pose(endpoint, cfg["idle_timeout_s"], should_stop=stop)
             if should_stop:
                 link.send_and_ack(line, cfg["ack_timeout_s"], should_stop=stop)
             else:   # 예전 방식의 연결 객체(테스트의 가짜 시리얼 등)와 호환
@@ -532,27 +793,42 @@ def execute(link, cmds, cfg, progress=print, on_ack=None, should_stop=None):
                 on_ack(sent, len(cmds))
             if label.endswith("pen-down") or label.endswith("draw"):
                 contact_line = line
+            # 후퇴·시작점 이동·접근 구간이 각각 끝난 뒤에 다음 구간을 보낸다.
+            if (hasattr(link, "wait_until_pose") and
+                    (label == "center pen-up" or
+                     (label.startswith("stroke ") and
+                      (label.endswith(" travel") or label.endswith(" descend"))))):
+                context.update(command=label, target=line)
+                target = tuple(float(v) for v in re.search(r"X([-\d.]+) Y([-\d.]+) Z([-\d.]+)", line).groups())
+                link.wait_until_pose(target, cfg["idle_timeout_s"], should_stop=stop)
+            if label.startswith("stroke ") and label.endswith("pen-down") and hasattr(link, "wait_until_pose"):
+                context.update(command=label, target=line)
+                target = tuple(float(v) for v in re.search(r"X([-\d.]+) Y([-\d.]+) Z([-\d.]+)", line).groups())
+                link.wait_until_pose(target, cfg["idle_timeout_s"], should_stop=stop)
             if label.endswith("pen-down") or i == len(cmds) - 1:
                 progress(f"  [{sent}/{len(cmds)}] {label}")
             # 고정 대기는 없다. 이번 접촉에서 종이 반대쪽으로 움직인 보고 직후에 다음 위치로 간다.
-            if label.startswith("stroke ") and label.endswith("pen-up") and contact_line and hasattr(link, "wait_until_left_contact"):
-                contact_x = float(re.search(r"X([-\d.]+)", contact_line).group(1))
-                pen_up_x = float(re.search(r"X([-\d.]+)", line).group(1))
-                link.wait_until_left_contact(
-                    contact_x, cfg["idle_timeout_s"], retract_sign,
-                    max(1.0, abs(contact_x - pen_up_x) - 1.5))
+            if label.startswith("stroke ") and label.endswith("pen-up") and contact_line and hasattr(link, "wait_until_pose"):
+                context.update(command=label, target=line)
+                target = tuple(float(v) for v in re.search(r"X([-\d.]+) Y([-\d.]+) Z([-\d.]+)", line).groups())
+                link.wait_until_pose(target, cfg["idle_timeout_s"], should_stop=stop)
         link.wait_idle(cfg["idle_timeout_s"])
-        return {"result": "completed", "commands_sent": sent, "elapsed_s": round(time.monotonic() - started, 1)}
+        return outcome(result="completed", commands_sent=sent, elapsed_s=round(time.monotonic() - started, 1))
     except StopRequested:
-        return {"result": "stopped_by_user", "commands_sent": sent,
-                "elapsed_s": round(time.monotonic() - started, 1)}
+        return outcome(result="stopped_by_user", commands_sent=sent, elapsed_s=round(time.monotonic() - started, 1))
     except ControllerError as e:
-        return {"result": "stopped_on_error", "error": str(e), "commands_sent": sent,
-                "failed_command": cmds[sent][1] if sent < len(cmds) else None,
-                "elapsed_s": round(time.monotonic() - started, 1)}
+        return outcome(result="stopped_on_error", error=str(e), commands_sent=sent,
+                       failed_command=cmds[sent][1] if sent < len(cmds) else None,
+                       elapsed_s=round(time.monotonic() - started, 1))
+    except OSError as e:     # USB 시리얼이 끊김 (serial.SerialException도 OSError): 실행 기록·카메라 기록을 남기도록 결과로 돌려줌
+        return outcome(result="stopped_on_error", error=f"로봇과 USB 통신이 끊겼습니다: {e}", commands_sent=sent,
+                       failed_command=cmds[sent][1] if sent < len(cmds) else None,
+                       elapsed_s=round(time.monotonic() - started, 1))
     except KeyboardInterrupt:
-        return {"result": "interrupted_by_user", "commands_sent": sent,
-                "elapsed_s": round(time.monotonic() - started, 1)}
+        return outcome(result="interrupted_by_user", commands_sent=sent, elapsed_s=round(time.monotonic() - started, 1))
+    finally:
+        if hasattr(link, "status_observer"):
+            link.status_observer = previous_observer
 
 
 # ---------------------------------------------------------------------------

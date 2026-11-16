@@ -11,6 +11,7 @@
 모든 좌표는 다른 획과 같은 작업 이미지 픽셀(x, y)입니다.
 """
 
+import hashlib
 import math
 
 import cv2
@@ -18,7 +19,9 @@ import numpy as np
 
 # 단계 수별 어두운 정도 기준 (0~1). 앞 단계가 가장 밝은 기준이라 넓은 면을 먼저 채움
 LEVEL_THRESHOLDS = {1: (0.55,), 2: (0.45, 0.72), 3: (0.38, 0.58, 0.78)}
-LEVEL_ANGLE_OFFSETS = (0, 90, 45)      # 1단계 방향, 2단계 직각(교차 빗금), 3단계 대각
+# 단계마다 같은 방향 평행선을 사이사이에 더 넣어 진하게 함 (간격 대비 위치). 교차 빗금은 0.5mm 펜으로 그리면 머리카락이
+# 바구니 같은 격자로 보여(사용자 사진) 쓰지 않는다: 2단계는 그 사이 가운데, 3단계는 다시 그 사이.
+LEVEL_PHASES = ((0.0,), (0.5,), (0.25, 0.75))
 MAX_COVERAGE = 0.55                    # 첫 단계가 화면의 이만큼 넘게 덮이면 빗금을 만들지 않음 (배경이 어두운 사진)
 BLANK_NOTE = "배경이 어두워 빗금이 화면 대부분을 덮습니다. 배경 제거를 켜 보세요."
 
@@ -30,8 +33,14 @@ def darkness_map(gray, sigma_px=0.0):
     if int(content.sum()) < 100:
         return np.zeros(g.shape, np.float32)
     lo, hi = np.percentile(g[content], (2, 98))
-    d = np.clip((hi - g) / max(float(hi - lo), 20.0), 0.0, 1.0)
-    d[~content] = 0.0
+    span = float(hi - lo)
+    # 평평한 면은 상대 대비가 0이다. 범위가 좁고 절대적으로 어두우면 그 면을 어두운 것으로 본다.
+    if span < 20.0 and hi <= 80.0:
+        d = np.zeros(g.shape, np.float32)
+        d[content] = 1.0
+    else:
+        d = np.clip((hi - g) / max(span, 20.0), 0.0, 1.0)
+        d[~content] = 0.0
     if sigma_px > 0.5:
         d = cv2.GaussianBlur(d, (0, 0), sigma_px)
     return d
@@ -52,8 +61,9 @@ def _clean_mask(mask, spacing_px):
     return keep
 
 
-def _runs_on_lines(mask, angle_deg, spacing_px, min_len_px):
-    """각도 angle_deg의 평행선을 spacing_px 간격으로 긋고, 마스크 안의 구간을 [(줄 번호, 시작점, 끝점)]으로."""
+def _runs_on_lines(mask, angle_deg, spacing_px, min_len_px, phase=0.0):
+    """각도 angle_deg의 평행선을 spacing_px 간격으로 (phase × 간격만큼 비켜) 긋고, 마스크 안의 구간을
+    [(줄 번호, 시작점, 끝점)]으로."""
     h, w = mask.shape
     th = math.radians(angle_deg)
     u = np.array([math.cos(th), math.sin(th)])
@@ -64,7 +74,7 @@ def _runs_on_lines(mask, angle_deg, spacing_px, min_len_px):
     runs = []
     n_lines = int(math.floor(radius / spacing_px))
     for li, k in enumerate(range(-n_lines, n_lines + 1)):
-        base = center + k * spacing_px * nrm
+        base = center + (k + phase) * spacing_px * nrm
         xs = base[0] + s * u[0]
         ys = base[1] + s * u[1]
         inside = (xs >= 0) & (xs <= w - 1) & (ys >= 0) & (ys <= h - 1)
@@ -118,9 +128,10 @@ def _chain_runs(runs, mask, join_px):
     return [np.array(c, dtype=np.float64) for c in chains]
 
 
-def hatch_strokes(gray, spacing_px, levels, angle_deg=45.0, min_len_px=8.0, bias=0.0):
+def hatch_strokes(gray, spacing_px, levels, angle_deg=45.0, min_len_px=8.0, bias=0.0, keep_out=None):
     """어두운 면의 빗금 획들. 반환: (획 리스트, 안내 문구). levels <= 0이면 ([], "").
-    spacing_px: 빗금 간격, min_len_px: 이보다 짧은 빗금은 버림, bias: +면 기준이 올라가 빗금이 줄고 -면 늘어남."""
+    spacing_px: 빗금 간격, min_len_px: 이보다 짧은 빗금은 버림, bias: +면 기준이 올라가 빗금이 줄고 -면 늘어남.
+    keep_out: True인 곳(얼굴 피부 등)에는 빗금을 긋지 않는 마스크."""
     levels = int(min(max(levels, 0), 3))
     if levels == 0:
         return [], ""
@@ -131,12 +142,157 @@ def hatch_strokes(gray, spacing_px, levels, angle_deg=45.0, min_len_px=8.0, bias
         mask = _clean_mask((d > min(0.95, max(0.05, thr + bias))).astype(np.uint8), spacing_px)
         if level == 0 and mask.mean() > MAX_COVERAGE:
             return [], BLANK_NOTE
+        if keep_out is not None:
+            mask[keep_out] = 0
         if not mask.any():
             continue
-        angle = angle_deg + LEVEL_ANGLE_OFFSETS[level]
-        runs = _runs_on_lines(mask, angle, spacing_px, min_len_px)
-        strokes += _chain_runs(runs, mask, join_px=spacing_px * 2.5)
+        for phase in LEVEL_PHASES[level]:
+            runs = _runs_on_lines(mask, angle_deg, spacing_px, min_len_px, phase)
+            strokes += _chain_runs(runs, mask, join_px=spacing_px * 2.5)
     return strokes, ""
+
+
+def _dense(q, step=1.0):
+    """폴리라인을 step px 간격 점으로."""
+    q = np.asarray(q, np.float64).reshape(-1, 2)
+    if len(q) < 2:
+        return q
+    seg = np.linalg.norm(np.diff(q, axis=0), axis=1)
+    t = np.concatenate([[0.0], np.cumsum(seg)])
+    s = np.arange(0.0, t[-1] + 1e-9, step)
+    return np.column_stack([np.interp(s, t, q[:, 0]), np.interp(s, t, q[:, 1])])
+
+
+def _tensor_flow(g, sig):
+    """구조 텐서(밝기 기울기의 외적을 sig로 흐린 것)의 주된 기울기에 수직인 단위 방향 (fx, fy)."""
+    gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
+    j11 = cv2.GaussianBlur(gx * gx, (0, 0), sig)
+    j22 = cv2.GaussianBlur(gy * gy, (0, 0), sig)
+    j12 = cv2.GaussianBlur(gx * gy, (0, 0), sig)
+    theta = 0.5 * np.arctan2(2 * j12, j11 - j22) + np.pi / 2
+    return np.cos(theta).astype(np.float32), np.sin(theta).astype(np.float32)
+
+
+def edge_tangent_flow(g, mask, radius, iters=3):
+    """경계 접선 흐름(ETF, Kang·Lee·Chui 2007): 기울기에 수직인 접선을 반경 radius 안의 이웃 접선으로 되풀이해
+    다듬는다. 이웃 가중 = 기울기 크기가 더 큰 쪽(1+tanh(ĝ(y)−ĝ(x)))/2 × 방향이 비슷한 정도 |t(x)·t(y)|, 부호는 방향을
+    맞춘다. 약한 곳이 주변 뚜렷한 결의 방향을 따르면서도 가는 결이 남는다(구조 텐서는 넓게 흐려 결이 뭉개짐).
+    계산은 마스크 둘레 상자만 한다. 반환: 단위 방향 (fx, fy), 상자 밖과 접선이 없는 곳은 구조 텐서 방향."""
+    fx, fy = _tensor_flow(g, max(2.0, radius))
+    ys, xs = np.nonzero(mask)
+    r = int(max(2, round(radius)))
+    h, w = g.shape
+    y0, y1 = max(0, ys.min() - 2 * r), min(h, ys.max() + 2 * r + 1)
+    x0, x1 = max(0, xs.min() - 2 * r), min(w, xs.max() + 2 * r + 1)
+    sub = g[y0:y1, x0:x1]
+    gx = cv2.Sobel(sub, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(sub, cv2.CV_32F, 0, 1, ksize=3)
+    mag = np.hypot(gx, gy)
+    mag /= max(float(mag.max()), 1e-6)
+    tx, ty = -gy, gx
+    n = np.hypot(tx, ty)
+    ok = n > 1e-6
+    tx, ty = np.where(ok, tx / np.maximum(n, 1e-6), 0), np.where(ok, ty / np.maximum(n, 1e-6), 0)
+    offs = [(dy, dx) for dy in range(-r, r + 1) for dx in range(-r, r + 1) if 0 < dy * dy + dx * dx <= r * r]
+    sh, sw = sub.shape
+    mp = np.pad(mag, r, mode="edge")
+    for _ in range(iters):
+        tp, qp = np.pad(tx, r, mode="edge"), np.pad(ty, r, mode="edge")
+        ax, ay = np.zeros_like(tx), np.zeros_like(ty)
+        for dy, dx in offs:
+            sx = tp[r + dy:r + dy + sh, r + dx:r + dx + sw]
+            sy = qp[r + dy:r + dy + sh, r + dx:r + dx + sw]
+            dot = tx * sx + ty * sy
+            wgt = 0.5 * (1 + np.tanh(mp[r + dy:r + dy + sh, r + dx:r + dx + sw] - mag)) * dot   # |dot|·부호 = dot
+            ax += wgt * sx
+            ay += wgt * sy
+        n = np.hypot(ax, ay)
+        ok = n > 1e-6
+        tx, ty = np.where(ok, ax / np.maximum(n, 1e-6), tx), np.where(ok, ay / np.maximum(n, 1e-6), ty)
+    has = np.hypot(tx, ty) > 0.5
+    fx[y0:y1, x0:x1] = np.where(has, tx, fx[y0:y1, x0:x1])
+    fy[y0:y1, x0:x1] = np.where(has, ty, fy[y0:y1, x0:x1])
+    return fx, fy
+
+
+_FLOW_CACHE = {}
+
+
+def _cached_flow(g, mask, radius, iters):
+    """edge_tangent_flow를 같은 사진·머리 영역·반경이면 다시 계산하지 않는다. 잔선 강도만 바꾸면 결 획은 다시 긋지만
+    결 방향은 그대로라, 긴 머리 사진은 후보마다 ETF가 40초씩 들어 자동 세팅이 385초 걸렸다. 마지막 하나만 기억한다."""
+    key = (g.shape, float(radius), iters, hashlib.blake2b(g.tobytes(), digest_size=16).digest(),
+           hashlib.blake2b(np.packbits(np.asarray(mask, bool)).tobytes(), digest_size=16).digest())
+    hit = _FLOW_CACHE.get("last")
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    flow = edge_tangent_flow(g, mask, radius, iters)
+    _FLOW_CACHE["last"] = (key, flow)
+    return flow
+
+
+def hair_flow_strokes(gray, mask, spacing_px, min_len_px, max_len_px, obstacles=()):
+    """머리카락 결: 마스크(머리 영역) 안에서 사진의 결 방향을 따라 고르게 띄운 흐름선을 긋는다.
+    결 방향은 edge_tangent_flow(반경 = 간격). 구조 텐서만 쓰면 짧은 머리에서 결이 머리 윤곽을 따라 동심원으로 돌았고,
+    ETF는 정수리에서 앞머리로 흘러내리는 방향이 살아났다(사용자 사진 1). 씨앗 점을 간격마다 놓고
+    양쪽으로 1px씩 따라가다 마스크를 벗어나거나, 이미 그은 선에 간격의 절반보다 가까워지거나, max_len_px에 이르면 멈춘다
+    (Jobard–Lefer 방식). obstacles(선화가 이미 그린 머리 결 획)도 이미 그은 선으로 쳐서, 결 선은 그 사이 빈 곳만 채운다.
+    채색 전 스케치는 면을 빗금으로 메우지 않고 결을 선으로 남기는 편이 자연스럽다.
+    반환: 단순화한 획 목록 (작업 이미지 좌표)."""
+    if mask is None or not mask.any():
+        return []
+    spacing_px = max(float(spacing_px), 3.0)
+    g = cv2.GaussianBlur(gray.astype(np.float32), (0, 0), 1.5)
+    fx, fy = _cached_flow(g, mask, spacing_px, iters=4)
+    h, w = mask.shape
+    cell = spacing_px / 2.0
+    grid = {}
+    for q in obstacles:
+        for p in _dense(q):
+            grid.setdefault((int(p[0] // cell), int(p[1] // cell)), []).append(p)
+
+    def near(p, r):
+        cx, cy = int(p[0] // cell), int(p[1] // cell)
+        for i in range(cx - 1, cx + 2):
+            for j in range(cy - 1, cy + 2):
+                for q in grid.get((i, j), ()):
+                    if (q[0] - p[0]) ** 2 + (q[1] - p[1]) ** 2 < r * r:
+                        return True
+        return False
+
+    def trace(seed, sign):
+        pts, p, prev = [], np.array(seed, np.float64), None
+        for _ in range(int(max_len_px)):
+            ix, iy = int(round(p[0])), int(round(p[1]))
+            if not (0 <= ix < w and 0 <= iy < h) or not mask[iy, ix] or near(p, 0.5 * spacing_px):
+                break
+            d = np.array([fx[iy, ix], fy[iy, ix]])
+            if prev is None:
+                d = d * sign
+            elif d @ prev < 0:
+                d = -d
+            pts.append(p.copy())
+            p, prev = p + d, d
+        return pts
+
+    out = []
+    for y in np.arange(spacing_px / 2, h, spacing_px):
+        for x in np.arange(spacing_px / 2, w, spacing_px):
+            if not mask[int(y), int(x)] or near((x, y), 0.8 * spacing_px):
+                continue
+            fwd, back = trace((x, y), 1.0), trace((x, y), -1.0)
+            line = back[::-1][:-1] + fwd if back and fwd else (back[::-1] or fwd)
+            if len(line) < 2:
+                continue
+            line = np.asarray(line)
+            if float(np.linalg.norm(np.diff(line, axis=0), axis=1).sum()) < min_len_px:
+                continue
+            for q in line:
+                grid.setdefault((int(q[0] // cell), int(q[1] // cell)), []).append(q)
+            out.append(cv2.approxPolyDP(line.astype(np.float32).reshape(-1, 1, 2), 0.8, False).reshape(-1, 2)
+                       .astype(np.float64))
+    return out
 
 
 # ---------------------------------------------------------------------------------- 사진-그림 비교
@@ -154,13 +310,24 @@ def _normalized(blurred):
     return np.clip(blurred / top, 0.0, 1.0) if top > 1e-6 else blurred
 
 
-def compare_report(gray, color, strokes, pen_px, edges=None, outline=None):
+def photo_edges(gray, sigma=1.5):
+    """사진 자체의 뚜렷한 윤곽 (비교 기준). 선화 경로의 선 지도는 획을 만든 바로 그 지도라 비교 기준으로 쓰면
+    정확도가 늘 높게(0.95 안팎) 나오므로, 사진을 살짝 흐린 뒤 밝기 중앙값에 맞춘 Canny로 따로 찾는다.
+    흰 배경(배경 제거)은 중앙값 계산에서 뺀다."""
+    g = cv2.GaussianBlur(np.asarray(gray), (0, 0), sigma)
+    subject = g[g < 250]
+    med = float(np.median(subject)) if subject.size else 128.0
+    return cv2.Canny(g, int(max(10, 0.5 * med)), int(max(20, med)))
+
+
+def compare_report(gray, color, strokes, pen_px, edges=None, outline=None, lineart=False):
     """사진과 그려질 그림을 비교. 반환: (지표 dict, 나란히 보기 BGR 이미지).
 
     tone_match  : 명암 분포의 닮은 정도 (0~1, 클수록 닮음). 크게 흐려서 큰 덩어리의 밝고 어두움을 비교 (1 - 평균 차이)
     edge_recall : 사진의 뚜렷한 윤곽 중 그림에 그려진 비율 (0~1)
     edge_precision : 윤곽 획 중 사진의 윤곽 근처인 비율 (0~1, 낮으면 잡음). 빗금은 윤곽이 아니라서 outline을 주면 뺌
     under_shaded_pct / over_shaded_pct : 사진보다 너무 밝게 / 너무 어둡게 그려진 면적 비율 (%)
+    lineart: 실사 선화 경로면 윤곽 안내를 그 경로의 조절(얼굴 세밀·잔선 정리)로 함 (Canny 기준은 쓰이지 않음)
     """
     h, w = gray.shape[:2]
     photo_d = darkness_map(gray, 0.0)
@@ -190,9 +357,12 @@ def compare_report(gray, color, strokes, pen_px, edges=None, outline=None):
     if metrics["over_shaded_pct"] > 15:
         hint.append("사진보다 너무 어둡게(빽빽하게) 그려진 면이 넓음: tone_levels를 내리거나 tone_spacing_mm를 늘리거나 tone_bias를 올리세요")
     if edges is not None and metrics["edge_recall"] < 0.6:
-        hint.append("사진의 윤곽 중 그려지지 않은 게 많음: canny_low를 낮추거나 min_length_px를 줄이세요")
+        hint.append("사진의 윤곽 중 그려지지 않은 게 많음: " + (
+            "얼굴 세밀 처리를 켜 보세요. 주름·결까지 원하면 잔선 정리(declutter)를 끄세요" if lineart
+            else "canny_low를 낮추거나 min_length_px를 줄이세요"))
     if edges is not None and metrics["edge_precision"] < 0.5 and metrics["ink_coverage_pct"] > 0:
-        hint.append("사진에 없는 선이 많음(잡음·빗금 위주): 상세도를 낮추거나 잡음 획을 지우세요")
+        hint.append("사진에 없는 선이 많음(잡음·빗금 위주): " + (
+            "잔선 정리(declutter)를 켜거나 잡음 획을 지우세요" if lineart else "상세도를 낮추거나 잡음 획을 지우세요"))
     metrics["hints"] = hint or ["큰 문제 없음: 눈으로 원본과 나란히 보고 마무리하세요"]
 
     side = 360

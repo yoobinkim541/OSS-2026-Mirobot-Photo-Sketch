@@ -367,7 +367,9 @@ def run_calibration(link, cfg, start_mm=30, step_mm=5, max_mm=None,
         # 한 변씩 이동하고 각 모서리에서 사람 확인을 받습니다. 짧은 세그먼트마다
         # 정지하면 감속/재가속이 잦아 펜 홀더가 흔들릴 수 있습니다.
         outline = [(rx0, ry0), (rx1, ry0), (rx1, ry1), (rx0, ry1), (rx0, ry0)]
-        for i, (px, py) in enumerate(outline):
+        i = 0
+        while i < len(outline):
+            px, py = outline[i]
             ry, rz = _paper_to_robot(cfg, center, px, py)
             measured = _move_tcp(link, cfg, exploration_x, ry, rz,
                                  cfg["feeds_mm_per_min"]["travel"])
@@ -385,6 +387,7 @@ def run_calibration(link, cfg, start_mm=30, step_mm=5, max_mm=None,
             if action == "q":
                 return {"result": "aborted", "reason": "pen-up path safety not confirmed",
                         "samples": [], "tested_half_sizes_mm": tested}
+            i += 1
         if choose_previous:
             break
         tested.append(report(rect))

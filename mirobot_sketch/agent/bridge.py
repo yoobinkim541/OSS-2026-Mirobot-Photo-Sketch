@@ -13,7 +13,7 @@ import threading
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .tools import TOOLS
+from .tools import tools_for
 
 TOKEN_HEADER = "X-Mirobot-Token"
 
@@ -42,8 +42,8 @@ class BridgeServer:
             def do_GET(self):
                 if not self._authorized():
                     return self._reply(403, {"error": "forbidden"})
-                if self.path == "/tools":
-                    return self._reply(200, {"tools": TOOLS})
+                if self.path == "/tools":   # 세션의 실제 조절 범위(예: box_mm 상한)로 만든 목록
+                    return self._reply(200, {"tools": tools_for(bridge.toolbox.session)})
                 self._reply(404, {"error": "not found"})
 
             def do_POST(self):

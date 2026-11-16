@@ -50,10 +50,13 @@ class PathsTest(unittest.TestCase):
             self.assertEqual(paths.config_path(), Path("C:/x/my.json"))
 
     def test_packaged_default_config_has_same_fields_as_repo_config(self):
-        # 패키지 기본값(설치·exe용)과 저장소 설정의 항목 구조가 어긋나지 않게
+        # 패키지 기본값(설치·exe용)과 저장소 설정의 항목 구조가 어긋나지 않게. 저장된 대기·접촉 자세와 그림 비틀기는
+        # 로봇 한 대에서 잰 값이라 기본값에는 없다(없으면 코드가 기본 동작을 씀).
+        machine = {"requested_start_pose", "start_pose", "drawing_warp"}
         repo = json.loads((ROOT / "robot" / "drawing_config.json").read_text(encoding="utf-8"))
         default = json.loads(paths.asset("drawing_config.json").read_text(encoding="utf-8"))
-        self.assertEqual(keys(repo), keys(default))
+        strip = lambda d: {k: v for k, v in d.items() if k not in machine}  # noqa: E731
+        self.assertEqual(keys(strip(repo)), keys(strip(default)))
 
     def test_icons_are_packaged(self):
         self.assertTrue(paths.asset("app_icon.ico").exists())
@@ -88,6 +91,37 @@ class PortablePathTest(unittest.TestCase):
         clean = paths.scrub_paths(data)
         self.assertEqual(clean, {"a": ["out/a.json", 3, {"b": "b.jpg", "c": "ok"}], "n": None})
         self.assertIn("someone", data["a"][2]["b"])                    # 원본은 그대로
+
+    def test_unc_extended_file_uri_home_and_embedded_paths_are_scrubbed(self):
+        self.assertEqual(paths.portable_path(r"\\nas\share\Users\someone\Pictures\a.jpg"), "a.jpg")
+        self.assertEqual(paths.portable_path(r"\\?\C:\Users\someone\Pictures\가족.jpg"), "가족.jpg")
+        self.assertEqual(paths.portable_path(r"\\?\C:\Users\김철수"), "~")
+        self.assertEqual(paths.portable_path("file:///C:/Users/김철수/Desktop/사진.jpg"), "사진.jpg")
+        self.assertEqual(paths.portable_path(r"C:\Users\김철수"), "~")
+        self.assertEqual(paths.portable_path("/home/someone"), "~")
+        self.assertEqual(paths.portable_path("/home/someone/z.txt"), "z.txt")
+        self.assertEqual(paths.portable_path("https://example.com/a"), "https://example.com/a")
+        msg = paths.scrub_paths("이미지를 열 수 없습니다: C:\\Users\\김철수\\Desktop\\사진.jpg")
+        self.assertNotIn("김철수", msg)
+        self.assertNotIn("Users", msg)
+        self.assertIn("사진.jpg", msg)
+        self.assertEqual(paths.scrub_paths("https://example.com/a"), "https://example.com/a")
+        self.assertEqual(paths.scrub_paths("약 5/6"), "약 5/6")
+
+    def test_run_record_scrubs_embedded_and_korean_user_paths(self):
+        from mirobot_sketch import draw_executor as de
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(paths, "runs_dir", lambda: Path(d) / "runs"):
+                cfg = de.load_config(paths.asset("drawing_config.json"))
+                path = de.write_run_record(
+                    {"source": {"image": r"C:\Users\김철수\Desktop\사진.jpg"},
+                     "note": r"실패: \\nas\share\Users\김철수\Pictures\a.jpg"},
+                    {"result": "completed"}, cfg)
+                text = path.read_text(encoding="utf-8")
+                self.assertNotIn("김철수", text)
+                self.assertNotIn("Users", text)
+                self.assertIn("사진.jpg", text)
+                self.assertIn("a.jpg", text)
 
     def test_run_record_and_calibration_report_carry_no_user_folder(self):
         from mirobot_sketch import calibration, draw_executor as de

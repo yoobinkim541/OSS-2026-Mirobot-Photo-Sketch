@@ -15,6 +15,7 @@ Mirobot Sketch — 사진 -> 스케치 -> 로봇용 획(stroke) 데이터 GUI
 """
 
 import gc
+import logging
 import json
 import queue
 import sys
@@ -34,14 +35,15 @@ except ImportError:  # 설치 안내 후 종료
     print("CustomTkinter가 필요합니다:  pip install customtkinter")
     raise
 
+from . import autotune
 from . import draw_executor as de
 from . import limits, robot_status
 from . import paper_mapping as pm
-from . import paths, presets, stages
+from . import paths, presets, stages, ui_scale
 from . import sketch_pipeline as sp
 from .session import SketchSession
 from .stage_view import BigView, ParamControls, ProposalBar, StageStrip
-from .theme import ACCENT, BAD, BG, BORDER, CARD, MUTED, OK, SURFACE, TEXT, WARN, configure_widgets
+from .theme import ACCENT, BAD, BG, BORDER, CARD, MUTED, OK, SURFACE, TEXT, WARN, FilledButton, configure_widgets
 
 # 한글이 네모로 깨지지 않도록 설치된 한글 글꼴 사용 (Windows: 맑은 고딕)
 FONT = "Malgun Gothic"
@@ -59,6 +61,10 @@ DETAIL_KEYS = ["low", "medium", "high"]
 DETAIL_LABELS = ["낮음", "보통", "높음"]
 LABEL_MAX = 400            # 편집 단계 번호 딱지 최대 개수 (화면을 덮지 않고 빠르게)
 RECOMPUTE_DELAY_MS = 300   # 값을 바꾸고 이만큼 조용하면 다시 계산 (슬라이더를 끄는 동안 계속 계산하지 않게)
+SIDEBAR_W = 340            # 왼쪽 설정 패널 폭 (배율 1.0 단위, 배율에 따라 같이 커짐)
+MAXIMIZE_BELOW_W = 1800    # 화면이 이보다 좁으면(노트북 등) 최대화로 시작
+STATS_SIDE_MIN_W = 900     # 오른쪽 작업 영역이 이보다 넓으면 요약 카드를 큰 보기 옆에 세로로 (배율 1.0 단위)
+STATS_SIDE_W = 250         # 옆에 세운 요약 카드 열의 폭
 
 
 def font(size=13, weight="normal"):
@@ -71,7 +77,7 @@ class Card(ctk.CTkFrame):
     def __init__(self, master, title=None, **kw):
         super().__init__(master, fg_color=CARD, corner_radius=16, border_width=1, border_color=BORDER, **kw)
         if title:
-            ctk.CTkLabel(self, text=title, font=font(13, "bold"), text_color=TEXT,
+            ctk.CTkLabel(self, text=title, font=font(14, "bold"), text_color=TEXT,
                          anchor="w").pack(fill="x", padx=16, pady=(14, 8))
 
 
@@ -80,20 +86,21 @@ class StatCard(ctk.CTkFrame):
 
     def __init__(self, master, title):
         super().__init__(master, fg_color=CARD, corner_radius=14, border_width=1, border_color=BORDER)
-        ctk.CTkLabel(self, text=title, font=font(11), text_color=MUTED, anchor="w").pack(fill="x", padx=16, pady=(12, 2))
+        self.heading = ctk.CTkLabel(self, text=title, font=font(12), text_color=MUTED, anchor="w", justify="left")
+        self.heading.pack(fill="x", padx=16, pady=(10, 0))
         self._value_font = font(23, "bold")
         self.value = ctk.CTkLabel(self, text="—", font=self._value_font, text_color=TEXT,
                                   anchor="w", justify="left")
         self.value.pack(fill="x", padx=16)
-        self.sub = ctk.CTkLabel(self, text="", font=font(11), text_color=MUTED, anchor="w", justify="left",
+        self.sub = ctk.CTkLabel(self, text="", font=font(12), text_color=MUTED, anchor="w", justify="left",
                                 wraplength=230)
-        self.sub.pack(fill="x", padx=16, pady=(2, 12))
+        self.sub.pack(fill="x", padx=16, pady=(0, 10))
         self.bind("<Configure>", self._resize_content, add="+")
 
     def _resize_content(self, event):
         width = max(60, int(event.width / self._get_widget_scaling()) - 32)
-        self.value.configure(wraplength=width)
-        self.sub.configure(wraplength=width)
+        for label in (self.heading, self.value, self.sub):    # 좁은 카드에서도 잘리지 않고 줄바꿈
+            label.configure(wraplength=width)
         size = 18 if width < 160 else 23
         if self._value_font.cget("size") != size:
             self._value_font.configure(size=size)
@@ -117,18 +124,7 @@ class SketchApp:
         self._closing = False
         self._ui_after = self._usb_after = self._icon_after = None
         self.root.title("Mirobot Sketch")
-        # Keep the minimum workspace usable on high-DPI laptop displays.
-        scale = self.root._get_window_scaling()
-        fit = min(1.0, (root.winfo_screenwidth() - 60) / (1200 * scale),
-                  (root.winfo_screenheight() - 100) / (760 * scale))
-        if fit < 1.0:
-            ctk.set_widget_scaling(fit)
-            ctk.set_window_scaling(fit)
-            scale = self.root._get_window_scaling()
-        width = min(1560, int((root.winfo_screenwidth() - 60) / scale))
-        height = min(940, int((root.winfo_screenheight() - 100) / scale))
-        self.root.geometry(f"{width}x{height}")
-        self.root.minsize(1200, 760)
+        self._fit_to_screen()
         self.root.configure(fg_color=BG)
         self._set_icon()
 
@@ -139,6 +135,7 @@ class SketchApp:
         self.session = SketchSession(self.cfg)
         self.busy = False
         self._agent_busy = False
+        self._tuning = False           # 자동 세팅이 후보를 돌리는 중 (조절·재계산·사진 열기·그리기 잠금)
         self.stage_id = "source"
         self._workers = 0              # 돌고 있는 재계산 스레드 수
         self._recompute_after = None   # 예약된 재계산 (after id)
@@ -184,10 +181,14 @@ class SketchApp:
         try:
             while True:
                 fn, args = self._ui_queue.get_nowait()
-                fn(*args)
+                try:
+                    fn(*args)
+                except Exception:
+                    logging.getLogger(__name__).exception("화면 갱신 실패")
         except queue.Empty:
             pass
-        self._ui_after = self.root.after(50, self._poll_ui_queue)
+        if not self._closing:
+            self._ui_after = self.root.after(50, self._poll_ui_queue)
 
     # ------------------------------------------------------------------ 창
     def _set_icon(self):
@@ -203,177 +204,299 @@ class SketchApp:
         except tk.TclError:
             pass
 
+    # ------------------------------------------------------------------ 창 크기·배율
+    def _fit_to_screen(self):
+        """작업 영역에 맞춰 창을 열고(노트북 크기 화면이면 최대화) 그 크기로 위젯 배율을 정한다.
+        그 뒤로는 창 크기를 바꿀 때마다 ui_scale.Zoom이 배율을 다시 맞춘다."""
+        root = self.root
+        x, y, area_w, area_h = ui_scale.work_area(root)
+        scale = ui_scale.window_scaling(root)
+        avail_w, avail_h = area_w / scale, area_h / scale
+        width, height = int(min(1560, avail_w - 40)), int(min(960, avail_h - 64))
+        left = x + max(0, (area_w - round(width * scale)) // 2)
+        top = y + max(0, (area_h - round(height * scale)) // 3)
+        root.geometry(f"{width}x{height}+{left}+{top}")
+        root.minsize(int(min(ui_scale.BASE_W * ui_scale.MIN_ZOOM, avail_w - 40)),
+                     int(min(ui_scale.BASE_H * ui_scale.MIN_ZOOM, avail_h - 64)))
+        self.zoom = ui_scale.Zoom(root, on_change=self._on_zoom)
+        self._max_after = None
+        if avail_w < MAXIMIZE_BELOW_W:
+            # CustomTkinter는 Windows에서 창을 처음 보일 때(deiconify) 최대화를 풀어 버려서, 창이 뜬 뒤에 최대화
+            self._max_after = root.after(100, self._maximize)
+            width, height = avail_w, avail_h - 32          # 제목 표시줄을 뺀 최대화 크기 (Configure가 정확한 값으로 고침)
+        self.zoom.apply_for_size(width, height)
+
+    def _maximize(self):
+        self._max_after = None
+        if self.root.state() != "normal":                  # 숨겨 둔 창(테스트 등)은 그대로
+            return
+        try:
+            self.root.state("zoomed")
+        except tk.TclError:                                 # X11: state zoomed 대신 속성
+            try:
+                self.root.attributes("-zoomed", True)
+            except tk.TclError:
+                pass
+
+    def _on_zoom(self):
+        label = getattr(self, "zoom_label", None)
+        if label is not None:
+            label.configure(text=f"{round(self.zoom.user * 100)}%")
+
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
         self.root.grid_columnconfigure(1, weight=1)
         self.root.grid_rowconfigure(1, weight=1)
 
-        # --- 머리글: 브랜드와 연결 상태를 분리
+        # --- 머리글: 브랜드 / 연결 상태 · 에이전트 · 화면 크기 · 테마
         header = ctk.CTkFrame(self.root, fg_color=CARD, corner_radius=0)
-        header.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 12))
+        header.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         brand = ctk.CTkFrame(header, fg_color="transparent")
-        brand.pack(side="left", padx=24, pady=10)
+        brand.pack(side="left", padx=24, pady=8)
         if paths.asset("app_icon_256.png").exists():
             from PIL import Image
-            logo = ctk.CTkImage(Image.open(paths.asset("app_icon_256.png")), size=(38, 38))
+            logo = ctk.CTkImage(Image.open(paths.asset("app_icon_256.png")), size=(40, 40))
             ctk.CTkLabel(brand, image=logo, text="").pack(side="left", padx=(0, 12))
         title = ctk.CTkFrame(brand, fg_color="transparent")
         title.pack(side="left")
-        ctk.CTkLabel(title, text="Mirobot Sketch", font=font(21, "bold"), anchor="w").pack(anchor="w")
-        ctk.CTkLabel(title, text="사진에서 시작하는 로봇 드로잉 스튜디오", font=font(11),
+        ctk.CTkLabel(title, text="Mirobot Sketch", font=font(22, "bold"), anchor="w").pack(anchor="w")
+        ctk.CTkLabel(title, text="사진에서 시작하는 로봇 드로잉 스튜디오", font=font(12),
                      text_color=MUTED, anchor="w").pack(anchor="w")
         self.mode = ctk.CTkSegmentedButton(header, values=["라이트", "다크"], command=self.set_mode,
-                                          font=font(12), height=32)
+                                          font=font(13), height=36)
         self.mode.set("다크" if ctk.get_appearance_mode() == "Dark" else "라이트")
         self.mode.pack(side="right", padx=(0, 24))
-        self.agent_btn = ctk.CTkButton(header, text="✦ 에이전트", command=self.toggle_agent, font=font(12, "bold"),
-                                       height=34, width=112, fg_color="transparent", border_width=1,
+        # 화면 크기: 창 크기에 맞춘 자동 배율에 곱하는 값 (Ctrl+= / Ctrl+- / Ctrl+0)
+        zoom = ctk.CTkFrame(header, fg_color=BG, corner_radius=10)
+        zoom.pack(side="right", padx=(12, 12))
+        ctk.CTkLabel(zoom, text="화면 크기", font=font(12), text_color=MUTED).pack(side="left", padx=(12, 4))
+        small = dict(width=34, height=32, font=font(16, "bold"), fg_color="transparent", hover_color=SURFACE,
+                     text_color=TEXT)
+        ctk.CTkButton(zoom, text="−", command=lambda: self.zoom.step(-1), **small).pack(side="left", pady=4)
+        self.zoom_label = ctk.CTkButton(zoom, text="", command=lambda: self.zoom.step(0), width=54, height=32,
+                                        font=font(13, "bold"), fg_color="transparent", hover_color=SURFACE,
+                                        text_color=TEXT)
+        self.zoom_label.pack(side="left", pady=4)
+        ctk.CTkButton(zoom, text="+", command=lambda: self.zoom.step(1), **small).pack(side="left", padx=(0, 6), pady=4)
+        self._on_zoom()
+        self.agent_btn = ctk.CTkButton(header, text="✦ 에이전트", command=self.toggle_agent, font=font(13, "bold"),
+                                       height=38, width=120, fg_color="transparent", border_width=1,
                                        text_color=TEXT, hover_color=SURFACE)
-        self.agent_btn.pack(side="right", padx=(12, 12))
+        self.agent_btn.pack(side="right")
         connection = ctk.CTkFrame(header, fg_color=BG, corner_radius=10)
-        connection.pack(side="right", pady=16)
-        self.robot_usb_status = ctk.CTkLabel(connection, text="USB: 확인 중", font=font(11), text_color=MUTED)
+        connection.pack(side="right", padx=(0, 12), pady=16)
+        self.robot_usb_status = ctk.CTkLabel(connection, text="USB: 확인 중", font=font(12), text_color=MUTED)
         self.robot_usb_status.pack(side="right", padx=(8, 12), pady=6)
-        self.robot_controller_status = ctk.CTkLabel(connection, text="제어기 상태: 미확인", font=font(11),
+        self.robot_controller_status = ctk.CTkLabel(connection, text="제어기 상태: 미확인", font=font(12),
                                                     text_color=MUTED)
         self.robot_controller_status.pack(side="left", padx=(12, 8), pady=6)
 
-        # --- 왼쪽 설정 패널
+        # --- 왼쪽 설정 패널: 위는 스크롤되는 설정, 아래 실행 카드는 항상 보임
         sidebar = ctk.CTkFrame(self.root, fg_color="transparent")
-        sidebar.grid(row=1, column=0, sticky="ns", padx=(18, 8), pady=(0, 18))
+        sidebar.grid(row=1, column=0, sticky="ns", padx=(18, 8), pady=(0, 12))
         sidebar.grid_rowconfigure(0, weight=1)
         sidebar.grid_columnconfigure(0, weight=1)
-        side = ctk.CTkScrollableFrame(sidebar, width=320, fg_color="transparent",
+        side = ctk.CTkScrollableFrame(sidebar, width=SIDEBAR_W, fg_color="transparent",
                                      scrollbar_button_color=BORDER)
         side.grid(row=0, column=0, sticky="nsew")
-        ctk.CTkLabel(side, text="작업 설정", font=font(17, "bold"), anchor="w").pack(
-            fill="x", padx=4, pady=(0, 8))
+        self.side = side
+        wrap = SIDEBAR_W - 36
 
-        c1 = Card(side, "01   이미지 가져오기")
+        c1 = Card(side, "01   사진과 추천 설정")
         c1.pack(fill="x", pady=(0, 12))
-        self.open_btn = ctk.CTkButton(c1, text="+  이미지 열기", command=self.open_image,
-                                      font=font(13, "bold"), height=40, fg_color=ACCENT)
+        self.open_btn = FilledButton(c1, text="+  이미지 열기", command=self.open_image,
+                                     font=font(15, "bold"), height=46)
         self.open_btn.pack(fill="x", padx=14)
-        self.path_label = ctk.CTkLabel(c1, text="선택된 파일 없음", font=font(11), text_color=MUTED,
-                                       wraplength=300, anchor="w", justify="left")
-        self.path_label.pack(fill="x", padx=14, pady=(4, 8))
-        ctk.CTkLabel(c1, text="이미지 종류  ·  추천 설정", font=font(11), text_color=MUTED,
-                     anchor="w").pack(fill="x", padx=14)
+        self.path_label = ctk.CTkLabel(c1, text="선택된 파일 없음", font=font(12), text_color=MUTED,
+                                       wraplength=wrap, anchor="w", justify="left")
+        self.path_label.pack(fill="x", padx=14, pady=(2, 6))
+        ctk.CTkLabel(c1, text="이미지 종류", font=font(13, "bold"), anchor="w").pack(fill="x", padx=14)
         self.type_seg = ctk.CTkSegmentedButton(c1, values=TYPE_LABELS, command=lambda _: self.apply_type_preset(),
-                                               font=font(12))
+                                               font=font(13), height=38)
         self.type_seg.set(presets.IMAGE_TYPES["illustration"]["label"])
         self.type_seg.pack(fill="x", padx=14, pady=(4, 2))
-        self.type_hint = ctk.CTkLabel(c1, text="", font=font(11), text_color=MUTED, wraplength=300,
+        self.type_hint = ctk.CTkLabel(c1, text="", font=font(12), text_color=MUTED, wraplength=wrap,
                                       anchor="w", justify="left")
-        self.type_hint.pack(fill="x", padx=14, pady=(2, 12))
-
-        c2 = Card(side, "02   선의 상세도")
-        c2.pack(fill="x", pady=(0, 12))
-        self.detail_seg = ctk.CTkSegmentedButton(c2, values=DETAIL_LABELS, command=lambda _: self.apply_detail_preset(),
-                                                 font=font(12))
+        self.type_hint.pack(fill="x", padx=14, pady=(2, 8))
+        ctk.CTkLabel(c1, text="선의 상세도", font=font(13, "bold"), anchor="w").pack(fill="x", padx=14)
+        self.detail_seg = ctk.CTkSegmentedButton(c1, values=DETAIL_LABELS, command=lambda _: self.apply_detail_preset(),
+                                                 font=font(13), height=38)
         self.detail_seg.set("높음")
-        self.detail_seg.pack(fill="x", padx=14, pady=(2, 12))
+        self.detail_seg.pack(fill="x", padx=14, pady=(4, 8))
+        self.auto_btn = ctk.CTkButton(c1, text=f"자동 세팅 (목표 {autotune.TARGET_MIN:g}분)", font=font(13),
+                                      height=36, command=self.run_auto_tune)
+        self.auto_btn.pack(fill="x", padx=14, pady=(0, 14))
 
         self.ctrl_card = Card(side)
         self.ctrl_card.pack(fill="x", pady=(0, 10))
-        self.ctrl_title = ctk.CTkLabel(self.ctrl_card, text="", font=font(13, "bold"), anchor="w")
-        self.ctrl_title.pack(fill="x", padx=16, pady=(14, 6))
+        self.ctrl_title = ctk.CTkLabel(self.ctrl_card, text="", font=font(14, "bold"), anchor="w")
+        self.ctrl_title.pack(fill="x", padx=16, pady=(14, 2))
+        self.ctrl_empty = ctk.CTkLabel(self.ctrl_card, text="이 단계에는 조절할 값이 없습니다. "
+                                                            "위쪽 단계 띠에서 다른 단계를 고르세요.",
+                                       font=font(12), text_color=MUTED, wraplength=wrap, anchor="w", justify="left")
         self.controls = None
         self._controls_cache = {}       # 단계별 조절 칸: 한 번 만들어 두고 보이기/숨기기만 함 (단계 전환이 빠르도록)
 
-        # Keep the primary action visible while stage parameters scroll independently.
+        # 실행 카드는 스크롤 밖에 두어 조절 칸이 길어도 늘 보이게
         c3 = Card(sidebar, "03   검증 및 드로잉")
         c3.grid(row=1, column=0, sticky="ew", padx=(6, 14), pady=(10, 0))
         actions = ctk.CTkFrame(c3, fg_color="transparent")
         actions.pack(fill="x", padx=14, pady=(0, 2))
-        self.run_btn = ctk.CTkButton(actions, text="다시 계산", command=lambda: self._schedule_recompute(0),
-                                     width=110, font=font(12), height=32, fg_color=SURFACE,
+        self.run_btn = ctk.CTkButton(actions, text="↻  다시 계산", command=lambda: self._schedule_recompute(0),
+                                     width=110, font=font(13), height=38, fg_color=SURFACE,
                                      hover_color=BORDER, text_color=TEXT)
         self.run_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
         self.sim_btn = ctk.CTkButton(actions, text="시뮬레이션 검증", command=self.simulate, width=150,
-                                     font=font(12), height=32, fg_color="transparent", border_width=1,
+                                     font=font(13, "bold"), height=38, fg_color="transparent", border_width=1,
                                      text_color=TEXT, hover_color=SURFACE)
         self.sim_btn.pack(side="left", fill="x", expand=True)
-        self.draw_btn = ctk.CTkButton(c3, text="로봇으로 그리기  →", command=self.open_draw_window,
-                                      font=font(13, "bold"), height=40, fg_color=ACCENT)
-        self.draw_btn.pack(fill="x", padx=14, pady=(6, 3))
-        row = ctk.CTkFrame(c3, fg_color="transparent")
-        row.pack(fill="x", padx=14, pady=(3, 6))
-        ctk.CTkButton(row, text="JSON 내보내기", command=self.export_strokes, font=font(12), height=30,
-                      fg_color="transparent", hover_color=SURFACE, border_width=1, text_color=TEXT
-                      ).pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self.draw_btn = FilledButton(c3, text="로봇으로 그리기", command=self.open_draw_window,
+                                     font=font(16, "bold"), height=50)
+        self.draw_btn.pack(fill="x", padx=14, pady=(8, 4))
         # RViz(3D 재생)는 고급 기능이라 접어 둠: 처음 쓰는 사람에게 주요 실행 버튼과 같은 층에 두지 않는다
+        self._adv_row = ctk.CTkFrame(c3, fg_color="transparent")
+        self._adv_row.pack(fill="x", padx=14, pady=(4, 4))
+        ctk.CTkButton(self._adv_row, text="JSON 내보내기", command=self.export_strokes, font=font(13), height=34,
+                      width=100, fg_color="transparent", hover_color=SURFACE, border_width=1, text_color=TEXT
+                      ).pack(side="left", fill="x", expand=True, padx=(0, 6))
         self._adv_open = False
-        self.adv_btn = ctk.CTkButton(c3, text="고급: RViz 3D ▸", command=self._toggle_advanced, font=font(11), height=26,
-                                     fg_color="transparent", text_color=MUTED, hover=False, anchor="w")
-        self.adv_btn.pack(fill="x", padx=14, pady=(0, 2))
+        self.adv_btn = ctk.CTkButton(self._adv_row, text="고급: RViz 3D ▸", command=self._toggle_advanced,
+                                     font=font(13), height=34, width=100, fg_color="transparent",
+                                     hover_color=SURFACE, border_width=1, text_color=MUTED)
+        self.adv_btn.pack(side="left", fill="x", expand=True)
         self.adv_frame = ctk.CTkFrame(c3, fg_color="transparent")
-        self.traj_btn = ctk.CTkButton(self.adv_frame, text="RViz 3D로 보기", command=self.view_rviz, font=font(12),
-                                      height=32, fg_color="transparent", border_width=1, text_color=TEXT,
+        self.traj_btn = ctk.CTkButton(self.adv_frame, text="RViz 3D로 보기", command=self.view_rviz, font=font(13),
+                                      height=34, fg_color="transparent", border_width=1, text_color=TEXT,
                                       state="disabled")
-        self.traj_btn.pack(fill="x", pady=(0, 3))
-        ctk.CTkButton(self.adv_frame, text="RViz 3D 환경 설치·확인…", command=self.open_rviz_setup, font=font(12),
-                      height=28, fg_color="transparent", border_width=1, text_color=TEXT).pack(fill="x", pady=(0, 3))
-        self.progress = ctk.CTkProgressBar(c3, mode="determinate", height=4)
-        self.progress.pack(fill="x", padx=14, pady=(6, 4))
-        self.progress.set(0)
-        self.status = ctk.CTkLabel(c3, text="이미지를 열어 주세요.", font=font(11), text_color=ACCENT,
-                                   wraplength=282, anchor="w", justify="left")
-        self.status.pack(fill="x", padx=14, pady=(0, 6))
+        self.traj_btn.pack(fill="x", pady=(0, 4))
+        ctk.CTkButton(self.adv_frame, text="RViz 3D 환경 설치·확인…", command=self.open_rviz_setup, font=font(13),
+                      height=34, fg_color="transparent", border_width=1, text_color=TEXT).pack(fill="x", pady=(0, 4))
         lim = limits.executor_region(self.cfg).x_max * 2
         plim = limits.pending_region(self.cfg).x_max * 2
-        ctk.CTkLabel(c3, text=f"종이 가이드  ·  파랑: 펜 범위 {lim:.0f}mm\n"
-                              f"주황: 공중 확인 범위 최대 {plim:.0f}mm",
-                     font=font(11), text_color=MUTED, wraplength=290, anchor="w", justify="left"
-                     ).pack(fill="x", padx=14, pady=(0, 12))
+        self._paper_note = f"파랑: 펜 범위 {lim:.0f}mm  ·  주황: 공중 확인 범위 최대 {plim:.0f}mm"
 
         # --- 오른쪽: 단계 띠 + 큰 보기 + 요약 카드
         right = ctk.CTkFrame(self.root, fg_color="transparent")
-        right.grid(row=1, column=1, sticky="nsew", padx=(8, 18), pady=(0, 18))
+        right.grid(row=1, column=1, sticky="nsew", padx=(8, 18), pady=(0, 12))
         right.grid_columnconfigure(0, weight=1)
         right.grid_rowconfigure(2, weight=1)
         workspace = ctk.CTkFrame(right, fg_color="transparent")
         workspace.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        ctk.CTkLabel(workspace, text="드로잉 워크스페이스", font=font(17, "bold")).pack(side="left")
-        ctk.CTkLabel(workspace, text="단계를 선택해 결과를 비교하고 조절하세요", font=font(11),
-                     text_color=MUTED).pack(side="right")
+        ctk.CTkLabel(workspace, text="드로잉 워크스페이스", font=font(18, "bold")).pack(side="left")
+        nav = dict(height=34, width=110, font=font(13), fg_color="transparent", border_width=1,
+                   text_color=TEXT, hover_color=SURFACE)
+        # 버튼 이름에 키(←/→)를 함께 적어 둠 (좁은 창에서 따로 쓴 안내가 잘리지 않게)
+        self.next_stage_btn = ctk.CTkButton(workspace, text="다음 단계  →", command=lambda: self._step_stage(1), **nav)
+        self.next_stage_btn.pack(side="right")
+        self.prev_stage_btn = ctk.CTkButton(workspace, text="←  이전 단계", command=lambda: self._step_stage(-1), **nav)
+        self.prev_stage_btn.pack(side="right", padx=6)
         self.strip = StageStrip(right, stages.ALL_STAGES, self.select_stage, font,
                                 titles={st.id: stages.stage_title(st.id) for st in stages.ALL_STAGES})
-        self.strip.grid(row=1, column=0, sticky="ew", pady=(0, 12))
-        self.view_card = Card(right)
-        self.view_card.grid(row=2, column=0, sticky="nsew")
+        self.strip.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        body = ctk.CTkFrame(right, fg_color="transparent")
+        body.grid(row=2, column=0, sticky="nsew")
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(0, weight=1)
+        self.view_card = Card(body)
+        self.view_card.grid(row=0, column=0, sticky="nsew")
         self.view = BigView(self.view_card, font, self._theme_colors)
         self.view.pack(fill="both", expand=True, padx=2, pady=2)
         self.view.empty_open_btn.configure(command=self.open_image)
         self.show_numbers = tk.BooleanVar(value=True)
         self.show_cands = tk.BooleanVar(value=False)
         for text, var in (("번호", self.show_numbers), ("버린 선", self.show_cands)):
-            ctk.CTkCheckBox(self.view.options_frame, text=text, variable=var, font=font(11), width=20,
+            ctk.CTkCheckBox(self.view.options_frame, text=text, variable=var, font=font(13), width=20,
                             command=self.view.redraw).pack(side="left", padx=4)
         self.view.on_view_change = self.view.redraw     # 확대·이동하면 보이는 획만 번호를 다시 붙임
         self.proposal_bar = ProposalBar(self.view_card, font, self._apply_proposals, self._discard_proposals)
 
-        stats = ctk.CTkFrame(right, fg_color="transparent")
-        stats.grid(row=3, column=0, sticky="ew", pady=(12, 0))
-        for i in range(4):
-            stats.grid_columnconfigure(i, weight=1, uniform="stat")
-        self.st_strokes = StatCard(stats, "획 / 명령")
-        self.st_size = StatCard(stats, "그림 크기")
-        self.st_time = StatCard(stats, "예상 시간")
-        self.st_sim = StatCard(stats, "로봇 시뮬레이션")
-        for i, w in enumerate((self.st_strokes, self.st_size, self.st_time, self.st_sim)):
-            w.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 5, 0 if i == 3 else 5))
+        # 요약 카드: 오른쪽이 넓으면 큰 보기 옆에 세로로, 좁으면 아래에 가로로 (_layout_stats)
+        self.stats = ctk.CTkFrame(body, fg_color="transparent")
+        self.st_strokes = StatCard(self.stats, "획 / 명령")
+        self.st_size = StatCard(self.stats, "그림 크기")
+        self.st_time = StatCard(self.stats, "예상 시간")
+        self.st_sim = StatCard(self.stats, "로봇 시뮬레이션")
         self.st_strokes.set("—", "이미지를 열면 자동으로 계산")
         self.st_size.set("—", "A4 종이 기준 · mm")
         self.st_time.set("—", "그리기와 이동 시간을 포함")
         self.st_sim.set("미검증", "드로잉 전 관절 한계 확인")
+        self._right, self._stats_side = right, None
+        self._layout_stats()
+        right.bind("<Configure>", self._layout_stats, add="+")
+
+        # --- 맨 아래 상태 줄: 어느 버튼으로 시작한 작업이든 진행 막대와 지금 하는 일을 같은 자리에
+        statusbar = ctk.CTkFrame(self.root, fg_color=CARD, corner_radius=0)
+        statusbar.grid(row=2, column=0, columnspan=3, sticky="ew")
+        self.progress = ctk.CTkProgressBar(statusbar, mode="determinate", width=200, height=8)
+        self.progress.pack(side="left", padx=(24, 16), pady=16)
+        self.progress.set(0)
+        self.status = ctk.CTkLabel(statusbar, text="이미지를 열어 주세요.", font=font(13), text_color=ACCENT,
+                                   wraplength=900, anchor="w", justify="left")
+        self.status.pack(side="left", fill="x", expand=True, padx=(0, 24), pady=6)
+        ui_scale.follow_width(self.status, statusbar, 280)
         self._build_controls()
         self.strip.select(self.stage_id)
+        self._sync_stage_nav()
+        # 화면 크기: Ctrl+= 크게, Ctrl+- 작게, Ctrl+0 처음 크기
+        for seq, step in (("<Control-equal>", 1), ("<Control-plus>", 1), ("<Control-KP_Add>", 1),
+                          ("<Control-minus>", -1), ("<Control-KP_Subtract>", -1), ("<Control-0>", 0)):
+            self.root.bind(seq, lambda _e, d=step: self.zoom.step(d))
+        # 단계 이동: ←/→ (글자를 입력하는 칸에서는 커서 이동이므로 건드리지 않음)
+        self.root.bind("<Left>", lambda e: self._key_stage(e, -1))
+        self.root.bind("<Right>", lambda e: self._key_stage(e, 1))
+
+    def _key_stage(self, event, step):
+        if isinstance(event.widget, (tk.Entry, tk.Text)):
+            return
+        self._step_stage(step)
+
+    def _step_stage(self, step):
+        ids = [st.id for st in stages.ALL_STAGES]
+        k = min(len(ids) - 1, max(0, ids.index(self.stage_id) + step))
+        if ids[k] != self.stage_id:
+            self.select_stage(ids[k])
+
+    def _sync_stage_nav(self):
+        ids = [st.id for st in stages.ALL_STAGES]
+        k = ids.index(self.stage_id)
+        self.prev_stage_btn.configure(state="normal" if k > 0 else "disabled")
+        self.next_stage_btn.configure(state="normal" if k < len(ids) - 1 else "disabled")
+
+    def _layout_stats(self, event=None):
+        """오른쪽이 넓으면(가로로 긴 화면) 요약 카드를 큰 보기 옆에 세로로 쌓아 큰 보기 높이를 지키고,
+        좁으면(에이전트 패널을 열었거나 세로로 긴 창) 아래에 가로로 늘어놓는다."""
+        width = (event.width if event is not None else self._right.winfo_width()) / self._right._get_widget_scaling()
+        side = width >= STATS_SIDE_MIN_W
+        if side == self._stats_side:
+            return
+        self._stats_side = side
+        cards = (self.st_strokes, self.st_size, self.st_time, self.st_sim)
+        self.stats.grid_forget()
+        for i, card in enumerate(cards):
+            card.grid_forget()
+            self.stats.grid_columnconfigure(i, weight=0, uniform="")
+            self.stats.grid_rowconfigure(i, weight=0, uniform="")
+        last = len(cards) - 1
+        if side:
+            # 폭을 고정해야 카드 설명이 그 폭에서 줄바꿈됨 (안 그러면 긴 설명 한 줄 길이만큼 열이 넓어짐)
+            self.stats.configure(width=STATS_SIDE_W)
+            self.stats.grid_propagate(False)
+            self.stats.grid_columnconfigure(0, weight=1)
+            self.stats.grid(row=0, column=1, sticky="ns", padx=(12, 0))
+            for i, card in enumerate(cards):
+                self.stats.grid_rowconfigure(i, weight=1)      # 남는 높이만 나눔: 설명이 긴 카드도 잘리지 않게
+                card.grid(row=i, column=0, sticky="nsew", pady=(0 if i == 0 else 4, 0 if i == last else 4))
+        else:
+            self.stats.grid_propagate(True)
+            self.stats.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+            for i, card in enumerate(cards):
+                self.stats.grid_columnconfigure(i, weight=1, uniform="stat")
+                card.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 5, 0 if i == last else 5))
 
     def _toggle_advanced(self):
         self._adv_open = not self._adv_open
         if self._adv_open:
-            self.adv_frame.pack(fill="x", padx=14, pady=(0, 3), after=self.adv_btn)
+            self.adv_frame.pack(fill="x", padx=14, pady=(0, 3), after=self._adv_row)
         else:
             self.adv_frame.pack_forget()
         self.adv_btn.configure(text="고급: RViz 3D " + ("▾" if self._adv_open else "▸"))
@@ -401,7 +524,11 @@ class SketchApp:
             self.controls.pack_forget()
         st = stages.STAGE_BY_ID[self.stage_id]
         specs = [self.session.param_specs()[p.key] for p in st.params]
-        self.ctrl_title.configure(text=f"조절  /  {st.label}" + ("" if specs else " · 설정 없음"))
+        self.ctrl_title.configure(text=f"02   단계 조절  ·  {st.label}")
+        if specs:
+            self.ctrl_empty.pack_forget()
+        else:
+            self.ctrl_empty.pack(fill="x", padx=16, pady=(2, 14))
         ctl = self._controls_cache.get(self.stage_id)
         if ctl is None:
             ctl = self._controls_cache[self.stage_id] = ParamControls(
@@ -409,8 +536,21 @@ class SketchApp:
         else:
             ctl.set_values(self.session.params)
         self.controls = ctl
-        ctl.pack(fill="x", pady=(0, 12))
-        ctl.set_enabled(not (self._agent_busy or self.drawing))
+        if specs:                   # 빈 조절 칸(설정 없는 단계)은 놓지 않음: 빈 프레임도 기본 높이를 차지함
+            ctl.pack(fill="x", pady=(0, 12))
+        ctl.set_enabled(not self._locked())
+
+    def _reveal_controls(self):
+        """단계를 고르면 왼쪽 조절 칸이 보이도록 설정 목록을 굴림 (작은 화면에서 조절 칸이 아래로 밀려 있어도)."""
+        canvas = self.side._parent_canvas
+        total = max(self.side.winfo_height(), 1)
+        top = self.ctrl_card.winfo_y() / total
+        bottom = (self.ctrl_card.winfo_y() + self.ctrl_card.winfo_height()) / total
+        first, last = canvas.yview()
+        if bottom > last:
+            canvas.yview_moveto(min(top, bottom - (last - first)))
+        elif top < first:
+            canvas.yview_moveto(top)
 
     def apply_type_preset(self):
         t = presets.IMAGE_TYPES[self._type_key()]
@@ -424,8 +564,12 @@ class SketchApp:
         self._sync_controls_from_session()
         self._schedule_recompute()
 
+    def _locked(self):
+        """세션을 다른 쪽(에이전트·로봇 그리기·자동 세팅)이 쓰는 중이면 True: 조절과 재계산을 받지 않음."""
+        return self._agent_busy or self.drawing or self._tuning
+
     def _on_param(self, key, value):
-        if self._agent_busy or self.drawing:
+        if self._locked():
             return
         self.session.update_params({key: value})
         self._schedule_recompute()
@@ -453,8 +597,11 @@ class SketchApp:
     def select_stage(self, stage_id):
         self.stage_id = stage_id
         self.strip.select(stage_id)
+        self._sync_stage_nav()
         self._build_controls()
         self._show_stage()
+        if stage_id != "source":          # 사진을 막 연 때(원본)는 01 카드를 그대로 둠
+            self.root.after_idle(self._reveal_controls)
 
     def _show_stage(self):
         s = self.session
@@ -462,6 +609,7 @@ class SketchApp:
         title = stages.stage_title(self.stage_id)
         change = s.stage_change(self.stage_id)
         self.view.set_info(st.desc + (f"\n{change}" if change else ""), self._compare_target())
+        self.view.set_note(self._paper_note if self.stage_id == "paper" else "")
         if s.result is None:
             if s.color is not None:
                 self.view.show(f"{title} (계산 전)", s.color)
@@ -473,10 +621,7 @@ class SketchApp:
         else:
             self.view.show(title, s.render(self.stage_id), overlay)
         # 번호·버린 선 체크박스는 편집 단계에서만 보임
-        if self.stage_id == "edit":
-            self.view.options_frame.pack(side="right", padx=8)
-        else:
-            self.view.options_frame.pack_forget()
+        self.view.show_options(self.stage_id == "edit")
 
     def _compare_target(self):
         """이전 단계 (제목, 그림 함수). 그림 크기가 같은 단계끼리만 (원본·종이는 비교 없음)."""
@@ -574,6 +719,56 @@ class SketchApp:
 
         threading.Thread(target=work, daemon=True).start()
 
+    def run_auto_tune(self):
+        """사진에 맞춰 목표 시간 안에서 인물이 가장 닮아 보이는 잔선 정리·명암 설정을 찾음 (작업 스레드)."""
+        if self.img_path is None or self.session.result is None:
+            messagebox.showinfo("알림", "먼저 사진을 열고 계산이 끝나기를 기다려 주세요.")
+            return
+        if self._locked() or self._workers:
+            messagebox.showinfo("알림", "계산·에이전트 작업·로봇 그리기가 끝난 뒤에 자동 세팅을 눌러 주세요.")
+            return
+        self._set_tuning(True)
+        self.progress.configure(mode="indeterminate")
+        self.progress.start()
+        self._workers += 1
+        self._set_status("자동 세팅: 후보를 돌려 보는 중 (끝날 때까지 설정이 잠깁니다)...")
+
+        def work():
+            msg = None
+            try:
+                rep = autotune.tune(self.session, progress=lambda i, text: self._set_status(f"자동 세팅: {text}"))
+                msg = autotune.summary(rep)
+            except Exception as e:  # SessionError 포함 (tune이 원래 설정으로 되돌려 둠)
+                self._ui(messagebox.showerror, "자동 세팅 실패", str(e))
+            finally:
+                def done():
+                    self._set_tuning(False)
+                    self._sync_controls_from_session()
+                    if msg is not None:
+                        self._show_result(self.session.result, msg)
+                    else:
+                        self._set_status("자동 세팅을 하지 못해 원래 설정으로 되돌렸습니다.")
+                        self._schedule_recompute(0)
+                    self._worker_done()
+                self._ui(done)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _set_tuning(self, on):
+        """자동 세팅 중에는 조절 칸·종류/상세도·사진 열기·그리기·시뮬레이션을 잠금 (후보를 돌리는 세션을 바꾸지 않게)."""
+        self._tuning = bool(on)
+        locked = self._locked()
+        state = "disabled" if locked else "normal"
+        for ctl in self._controls_cache.values():
+            ctl.set_enabled(not locked)
+        for w in (self.type_seg, self.detail_seg, self.auto_btn, self.open_btn, self.view.empty_open_btn, self.draw_btn):
+            w.configure(state=state)
+        self.run_btn.configure(state="disabled" if locked or self.busy else "normal")
+        self.sim_btn.configure(state="disabled" if locked or self.busy else "normal")
+        if not locked and self._recompute_pending:
+            self._recompute_pending = False
+            self._schedule_recompute(0)
+
     def _discard_proposals(self):
         self.session.discard_proposals()
         self.refresh_proposals()
@@ -600,7 +795,7 @@ class SketchApp:
     def agent_busy(self, busy):
         """에이전트가 작업 중이거나 로봇이 그리는 중이면 처리·조절·시뮬레이션을 잠금 (같은 세션을 동시에 바꾸지 않게)."""
         self._agent_busy = busy
-        locked = busy or self.drawing
+        locked = self._locked()
         if busy:      # 왜 잠겼는지 알려 줌 (끝나면 결과 표시가 상태 문구를 새로 씀)
             self._set_status("에이전트가 작업하는 동안 설정·시뮬레이션이 잠깁니다. 끝나면 자동으로 풀려요.")
         elif not self.drawing and self.result is not None:
@@ -635,7 +830,7 @@ class SketchApp:
             self.progress.stop()
             self.progress.configure(mode="determinate")
             self.progress.set(0)
-            state = "disabled" if self._agent_busy or self.drawing else "normal"
+            state = "disabled" if self._locked() else "normal"
             self.run_btn.configure(state=state)
             self.sim_btn.configure(state=state)
         self._ui(done)
@@ -651,8 +846,8 @@ class SketchApp:
         self._recompute_after = None
         if self.img_path is None:
             return
-        if self._agent_busy or self.drawing:
-            self._recompute_pending = True   # 에이전트·드로잉이 끝나면 다시 계산
+        if self._locked():
+            self._recompute_pending = True   # 에이전트·드로잉·자동 세팅이 끝나면 다시 계산
             return
         self.strip.set_stale(self.session.dirty_stages())
         if self._workers == 0:
@@ -697,7 +892,8 @@ class SketchApp:
         self.st_size.set(f"{pl['drawing_width_mm']:.0f}×{pl['drawing_height_mm']:.0f} mm", size_note, size_color)
         self.st_time.set(f"{t['total_s'] / 60:.1f}분",
                          f"그리기 {t['draw_s'] / 60:.1f} · 이동 {t['travel_s'] / 60:.1f} · "
-                         f"펜 올림/내림 {t['pen_lift_s'] / 60:.1f} · 지연 {t['latency_s'] / 60:.1f}(가정)")
+                         f"펜 올림/내림 {t['pen_lift_s'] / 60:.1f}({t['up_clearance_mm']:g}mm) · "
+                         f"지연 {t['latency_s'] / 60:.1f}(가정)")
         self.st_sim.set("—", "시뮬레이션 버튼으로 검사")
         edits = len(self.session.edit_log)
         notice, self.session.notice = self.session.notice, ""
@@ -897,6 +1093,9 @@ class SketchApp:
         if not self.result:
             messagebox.showwarning("알림", "먼저 이미지를 처리하세요.")
             return None
+        if self._tuning:
+            messagebox.showinfo("알림", "자동 세팅이 끝난 뒤에 그려 주세요.")
+            return None
         if self.draw_window is not None and self.draw_window.winfo_exists():
             self.draw_window.focus()
             return self.draw_window
@@ -914,7 +1113,6 @@ class SketchApp:
         self.path_label.configure(text="선택된 파일 없음")
         self.strip.clear()
         self.view.clear()
-        self.view.options_frame.pack_forget()
         self.proposal_bar.pack_forget()
         self.st_strokes.set("—", "")
         self.st_size.set("—", "")
@@ -923,6 +1121,7 @@ class SketchApp:
         self.traj_btn.configure(state="disabled")
         self.stage_id = "source"
         self.strip.select("source")
+        self._sync_stage_nav()
         self._build_controls()
         if self.agent_panel is not None and not self.agent_panel.busy:
             self.agent_panel.new_chat()           # 지난 그림 이야기는 지움
@@ -931,7 +1130,7 @@ class SketchApp:
     def set_drawing(self, on):
         """실행 중에는 조절 칸·편집·재계산·에이전트 편집 도구를 잠금 (그리는 획이 바뀌지 않게)."""
         self.drawing = bool(on)
-        self.session.drawing_lock = self.drawing
+        self.session.set_drawing_lock(self.drawing)
         self.agent_busy(self._agent_busy)
         self.draw_btn.configure(state="disabled" if self.drawing else "normal")
         self.open_btn.configure(state="disabled" if self.drawing else "normal")
@@ -955,7 +1154,8 @@ class SketchApp:
         if self.bridge is not None:
             self.bridge.stop()
         self._closing = True
-        for after_id in (self._ui_after, self._usb_after, self._icon_after, self._recompute_after):
+        self.zoom.cancel()
+        for after_id in (self._ui_after, self._usb_after, self._icon_after, self._recompute_after, self._max_after):
             if after_id is not None:
                 try:
                     self.root.after_cancel(after_id)

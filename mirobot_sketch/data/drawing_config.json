@@ -20,16 +20,23 @@
   "air_clearance_mm": 8.0,
   "retract_x_sign": -1,
   "down_extra_mm": 0.0,
-  "line_width_mm": 0.5
+  "line_width_mm": 0.5,
+  "start_backoff_mm": 0.0,
+  "end_backoff_mm": 0.0,
+  "j1_direction_offset_deg": 0.0
  },
  "_pen_width_note": "line_width_mm: 펜 선 굵기 추정값(GUI 종이 미리보기용). 실제 펜으로 그은 선을 재서 고칠 것.",
  "_pen_note": "하트 테스트 기록: 접촉 X=198.668, 접근 전 X=196.678 -> 벽에서 떨어지는 방향은 -X. down_extra_mm는 접촉 기준보다 더 누르는 양(+이면 벽 쪽). 1mm 이하로만 조정.",
+ "_pen_backoff_note": "start/end_backoff_mm: 획 첫 점(펜 내림)과 마지막 점(떼기 직전)만 종이에서 뒤로 물리는 양(0~1 mm). 세게 누르면 끝점에 세로 줄이 생겨, 그리기 창의 카메라 확인(끝점 세로 줄 자동 보정)이 0.2 mm씩 고쳐 저장함.",
+ "_pen_j1_note": "j1_direction_offset_deg: 같은 J1 목표에서 J1이 늘어나며 도착할 때와 줄어들며 도착할 때 실제 각의 차이(늘어나며 - 줄어들며, ±3° 안). 실행기가 목표점마다 도착 방향의 반대쪽으로 절반씩 돌려 보내고, 방향이 바뀌는 점에서는 같은 점으로 한 번 더 보내 유격을 메움. 0이면 끔.",
 
  "pen_tip_offset_mm": {"x": 100.0, "y": 0.0, "z": 0.0},
  "_pen_tip_note": "플랜지(TCP) -> 펜 끝, 로봇 좌표계(A,B,C=0 자세 기준). 사용자 어림값(펜이 벽 쪽 수평, 약 100mm). sim 시각화에만 사용하고 실행기 명령에는 쓰지 않음.",
 
- "plane_compensation": {"a_per_mm_y": 0.0, "b_per_mm_z": 0.0, "status": "pending_measurement"},
+ "plane_compensation": {"a_per_mm_y": 0.0, "b_per_mm_z": 0.0, "radial_retract_max_mm": 0.0, "radial_retract_radius_mm": 60.0, "status": "pending_measurement"},
  "_plane_note": "X_contact = center.x + a*dY + b*dZ + down_extra (dY,dZ = 종이 중심에서의 로봇 Y,Z 변위). 5점 접촉 측정 후 채울 것.",
+ "drawing_warp": null,
+ "_drawing_warp_note": "그림 좌표 미리 비틀기(선택): {\"x\": [c1..c5], \"y\": [c1..c5]}이면 계획 종이 좌표 (x, y)를 c1·x + c2·y + c3·x² + c4·xy + c5·y²로 바꿔 보낸다(종이 중심 고정). 팔이 위치에 따라 크기를 다르게 그릴 때, 설정 하나로 그은 세로선 무늬를 카메라로 재서 맞춘다(LOG/scripts/depth_ladder/fit_warp.py). null이면 끔.",
 
  "feeds_mm_per_min": {"draw": 300, "travel": 600, "approach": 200},
 
@@ -47,6 +54,9 @@
  "max_start_offset_mm": 5.0,
  "ack_timeout_s": 15.0,
  "idle_timeout_s": 180.0,
+
+ "controller_settings_expected": {"$3": 123, "$23": 60},
+ "_controller_settings_note": "방향 마스크. $3=123, $23=60이 아니면 팔이 반대로 움직이는데 보고 각도는 맞아 보인다. 펌웨어 기본 127/56은 거부하고 움직이지 않음.",
 
  "calibration": {"status": "pending_measurement", "half_size_mm": null, "max_residual_mm": null, "updated_local": null},
  "_calibration_note": "mirobot-calibrate 또는 앱의 '다시 보정'을 실행하면 채워짐. 보정 없이도 저장된 값(plane_compensation, limits)으로 바로 그릴 수 있음."

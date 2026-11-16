@@ -111,11 +111,14 @@ class ControllerStatusReporter:
         self.phase = "drawing"
         self.emit(state="그리는 중")
 
-    def finished(self, result, link_open):
+    def finished(self, result, link_open, returned_to_origin=None):
         if not self.attempted:
             return
         if result == "completed":
-            state = "Idle"
+            if returned_to_origin is False or (self.last_state not in (None, "Idle")):
+                state = self.last_state if self.last_state not in (None, "Idle") else "unknown"
+            else:
+                state = "Idle"
         elif not link_open:
             state = "연결 실패"
         elif self.phase == "connect":

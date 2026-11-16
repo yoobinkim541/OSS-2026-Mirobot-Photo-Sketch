@@ -17,10 +17,11 @@ import numpy as np
 from . import draw_executor as de
 from . import edits
 from . import paper_mapping as pm
-from . import faces, limits, paths, presets, stages
+from . import face_mesh, faces, limits, paths, presets, stages, texts
 from . import sketch_pipeline as sp
 
 FACE_CROP_SIDE = 500     # 얼굴 세밀 처리용 조각의 긴 변 (px)
+MIN_RANGE_SCALE = 0.3    # 종이 맞춤이 펜 범위를 벗어날 때 이보다 더 줄여야 하면 맞춤을 쓰지 않음
 
 
 class SessionError(Exception):
@@ -50,6 +51,14 @@ def _as_xy(v):
     return x, y
 
 
+def apply_paper_fit(pts, fit):
+    """종이 좌표(mm, 종이 중심 기준) → 로봇이 그릴 좌표: scale배, deg만큼 시계 반대로 돌린 뒤 (cx, cy)로 옮김."""
+    p = np.asarray(pts, np.float64)
+    th = np.radians(fit["deg"])
+    rot = np.array([[np.cos(th), -np.sin(th)], [np.sin(th), np.cos(th)]])
+    return (p * fit["scale"]) @ rot.T + [fit["cx"], fit["cy"]]
+
+
 class SketchSession:
     def __init__(self, cfg=None):
         self.cfg = cfg or de.load_config()
@@ -70,6 +79,12 @@ class SketchSession:
         self.history = []      # 되돌리기용 스냅숏 (번호표, 편집 기록, 다음 번호, 설명)
         self.edit_log = []     # 적용된 편집 설명 (재현·기록용)
         self.sim = None
+        # 종이 맞춤: 모서리 표시로 잰 실제 종이에 맞춰 로봇이 그릴 좌표를 옮기고 돌리고 키움 (None이면 원래 위치).
+        # strokes_mm(편집·에이전트·종이 미리보기)는 종이 좌표 그대로, 로봇 쪽(시뮬레이션·그리기·범위 검사)만 바뀜
+        self.paper_fit_request = None   # 표시에서 온 요청 {"cx", "cy", "deg", "scale"} (mm, 도)
+        self.paper_fit = None           # 실제로 쓰는 맞춤 (펜 범위에 맞춰 더 줄였으면 range_scale < 1)
+        self.paper_fit_error = ""       # 요청을 쓸 수 없는 이유 (종이가 펜 범위 밖 등)
+        self._robot_strokes = None      # robot_strokes_mm() 캐시 (획·맞춤이 바뀌면 비움)
         self.drawing_lock = False   # 로봇이 그리는 중이면 True (에이전트 도구가 설정·편집을 바꾸지 못하게)
         self.table = {}        # 번호 -> {"kind": stroke|candidate|gone, "poly": px 배열, "reason": 이유}
         self.next_id = 1
@@ -85,6 +100,18 @@ class SketchSession:
         self._fit_strokes = []   # 종이 배치(배율·중심)를 정하는 획 = 윤곽 + 명암 빗금: 편집해도 mm 좌표가 안 움직이게
 
     # ------------------------------------------------------------ 설정
+    def set_drawing_lock(self, on):
+        """그리는 중으로 켜면 진행 중인 계산을 버리고, 설정·편집 커밋을 막는다."""
+        with self.lock:
+            on = bool(on)
+            if on and not self.drawing_lock:
+                self.generation += 1
+            self.drawing_lock = on
+
+    def _refuse_if_drawing(self):
+        if self.drawing_lock:
+            raise SessionError("로봇이 그리는 중이라 설정·편집을 바꿀 수 없습니다. 끝난 뒤 다시 요청하세요.")
+
     def param_specs(self):
         """단계 정의의 조절 항목. box_mm 상한은 설정 파일의 실물 미확인 범위(±60mm -> 120)."""
         plim = limits.pending_region(self.cfg).x_max * 2
@@ -102,7 +129,8 @@ class SketchSession:
                 self.image_type = image_type
                 self.detail = t["detail"]
                 self.params.update(rembg=t["rembg"], median_ksize=t["median"],
-                                   lineart=bool(t.get("lineart", False)))
+                                   lineart=bool(t.get("lineart", False)), tone_levels=int(t.get("tone_levels", 0)),
+                                   hair_flow=bool(t.get("hair_flow", False)))
             if detail:
                 if detail not in presets.DETAIL_PRESETS:
                     raise SessionError(f"알 수 없는 상세도: {detail} (가능: low, medium, high)")
@@ -116,6 +144,7 @@ class SketchSession:
         specs = self.param_specs()
         applied = {}
         with self.lock:
+            self._refuse_if_drawing()
             for k, v in changes.items():
                 if k == "line_source":          # 예전 이름: canny -> 밝기(luma), dark -> 어두운 선
                     if v not in ("canny", "dark"):
@@ -237,7 +266,7 @@ class SketchSession:
         work_faces = [f.scaled(k, -x0 * k, -y0 * k) for f in found]
         work_faces = [f for f in work_faces
                       if 0 <= f.box[0] + f.box[2] / 2 < w and 0 <= f.box[1] + f.box[3] / 2 < h]
-        crops = []
+        crops, mesh_note = [], ""
         for f in work_faces:
             (cx, cy), (ax, ay) = faces.ellipse_of(f)
             ox0, oy0 = max(0, int((cx - ax) / k + x0)), max(0, int((cy - ay) / k + y0))
@@ -246,9 +275,22 @@ class SketchSession:
             sc = FACE_CROP_SIDE / max(piece.shape[:2])
             img = cv2.resize(piece, (round(piece.shape[1] * sc), round(piece.shape[0] * sc)),
                              interpolation=cv2.INTER_CUBIC if sc > 1 else cv2.INTER_AREA)
-            crops.append({"img": img, "scale": sc / k, "origin": np.array([(ox0 - x0) * k, (oy0 - y0) * k])})
+            mesh = None
+            if not mesh_note:                 # 얼굴 점 478개 (배경 제거 전 원본에서, 작업 좌표로)
+                try:
+                    pts = face_mesh.detect(plain["full"], f.scaled(1 / k, x0, y0))
+                    mesh = None if pts is None else (pts - (x0, y0)) * k
+                except face_mesh.MeshUnavailable as e:
+                    mesh_note = str(e)
+            crops.append({"img": img, "scale": sc / k, "origin": np.array([(ox0 - x0) * k, (oy0 - y0) * k]),
+                          "mesh": mesh})
+        try:
+            text_boxes, text_note = texts.detect(color), ""
+        except texts.TextUnavailable as e:
+            text_boxes, text_note = [], str(e)
         inputs = {"gray": gray, "color": color, "faces": work_faces, "face_crops": crops,
-                  "region": limits.pending_region(self.cfg),
+                  "region": limits.pending_region(self.cfg), "mesh_note": mesh_note,
+                  "text_boxes": text_boxes, "text_note": text_note,
                   "frame": {"kind": kind, "box_orig": box, "notice": note}}
         frame_cache[(key, kind, note)] = inputs
         return inputs, key
@@ -291,6 +333,7 @@ class SketchSession:
             with self.lock:
                 if self.generation != gen:
                     return None
+                self._refuse_if_drawing()
                 snap = self._snapshot()
                 try:
                     reframed = self.result is not None and ikey[2] != self._frame_box
@@ -320,6 +363,10 @@ class SketchSession:
                             self.notice += f" · {fr['notice']}"
                         if outs["edges"].get("lineart_missing"):
                             self.notice += f" · {outs['edges']['lineart_missing']}"
+                        if inputs.get("mesh_note") and outs["clutter"].get("mesh_wanted"):
+                            self.notice += f" · {inputs['mesh_note']}"
+                        if inputs.get("text_note") and outs["clutter"].get("text_wanted"):
+                            self.notice += f" · {inputs['text_note']}"
                         self._last_simplify = outs["simplify"]
                         self._fit_outline = [e["poly"] for e in self.table.values() if e["kind"] == "stroke"]
                     # 명암 빗금은 윤곽과 함께 배치를 정함 (빗금 설정만 바뀌어도 다시 맞춤)
@@ -343,14 +390,80 @@ class SketchSession:
         """획이 바뀔 때마다 시간·미리보기·범위 검사를 다시 계산."""
         r = self.result
         r["strokes_px"], r["strokes_mm"] = strokes_px, strokes_mm
-        lists = [[tuple(pt) for pt in s] for s in strokes_mm]
-        r["timing"] = de.estimate_time(lists, self.cfg)
         r["paper"] = pm.render_paper_preview(strokes_mm, self.cfg["pen"].get("line_width_mm", 0.5), 4.0,
                                              limit_mm=limits.executor_region(self.cfg),
                                              pending_limit_mm=limits.pending_region(self.cfg))
-        r["out_of_limits"] = len(de.check_limits(lists, self.cfg))
-        r["out_of_pending"] = len(de.check_limits(lists, self.cfg, pending=True))
+        self._update_paper_fit()
+
+    # ------------------------------------------------------------ 종이 맞춤 (모서리 표시)
+    def set_paper_fit(self, fit):
+        """fit: None(원래 위치) 또는 {"cx", "cy", "deg", "scale"}: 로봇이 그릴 좌표 = 종이 좌표를 scale배 하고 deg만큼
+        (시계 반대) 돌려 (cx, cy) mm로 옮김. 반환: 실제로 쓰는 맞춤(펜 범위에 맞춰 더 줄였으면 range_scale < 1) 또는 None."""
+        with self.lock:
+            self.paper_fit_request = None if fit is None else {k: float(fit[k]) for k in ("cx", "cy", "deg", "scale")}
+            if self.result is not None:
+                self._update_paper_fit()
+            else:
+                self.paper_fit, self.paper_fit_error = self.paper_fit_request, ""
+            return self.paper_fit
+
+    def _update_paper_fit(self):
+        """요청한 맞춤을 지금 획에 적용: 펜 범위를 벗어나면 종이 중심 기준으로 들어갈 만큼 줄이고, 그래도 안 되면 원래 위치."""
+        req, self.paper_fit_error = self.paper_fit_request, ""
+        fit = req
+        if req is not None:
+            region = limits.executor_region(self.cfg)
+            warp = de.drawing_warp(self.cfg)
+            pts = np.vstack([np.asarray(s, np.float64) for s in self.result["strokes_mm"]])
+
+            def inside(k):   # 실행기 범위 검사(check_limits)와 같게: 로봇에 실제로 보낼(미리 비튼) 좌표로 본다
+                q = apply_paper_fit(pts, {**req, "scale": req["scale"] * k})
+                return all(region.contains(*de.warp_xy(warp, x, y)) for x, y in q)
+            if not inside(1.0):
+                lo, hi = MIN_RANGE_SCALE, 1.0
+                if not inside(lo):
+                    fit = None
+                    self.paper_fit_error = ("표시로 잰 종이가 펜이 닿는 범위에서 너무 벗어나 원래 위치로 그립니다. "
+                                            "종이를 펜 쪽으로 옮기세요.")
+                else:
+                    for _ in range(20):
+                        mid = (lo + hi) / 2
+                        lo, hi = (mid, hi) if inside(mid) else (lo, mid)
+                    fit = {**req, "scale": req["scale"] * lo, "range_scale": lo}
+        self.paper_fit = fit
+        self._robot_strokes = None
+        lists = [[tuple(pt) for pt in s] for s in self._robot_strokes_locked()]
+        self.result["timing"] = de.estimate_time(lists, self._timing_cfg())   # 로봇이 실제로 그릴 좌표·펜 올림으로
+        self.result["out_of_limits"] = len(de.check_limits(lists, self.cfg))
+        self.result["out_of_pending"] = len(de.check_limits(lists, self.cfg, pending=True))
         self.sim = None
+
+    def _timing_cfg(self):
+        """시간 추정용 설정. 저장된 대기·접촉 자세(requested_start_pose)가 있으면 그리기 창이 그 자세로 그리며
+        draw_job과 같은 start_pose.drawing_config_from_recorded_contact로 설정을 바꾸므로(펜 올림 20 mm, 누름 깊이),
+        카드도 그 설정으로 계산한다. 접촉 샘플이 없어 만들 수 없으면 펜 올림·누름만 맞춘다."""
+        req = self.cfg.get("requested_start_pose")
+        if not req:
+            return self.cfg
+        from . import start_pose
+        try:
+            return start_pose.drawing_config_from_recorded_contact(self.cfg)
+        except (start_pose.StartPoseError, KeyError, TypeError, ValueError):
+            pen = {**self.cfg["pen"], "up_clearance_mm": start_pose.REQUESTED_UP_CLEARANCE_MM,
+                   "down_extra_mm": float(req.get("requested_pen_down_extra_mm", self.cfg["pen"].get("down_extra_mm", 0.0)))}
+            return {**self.cfg, "pen": pen}
+
+    def _robot_strokes_locked(self):
+        if self._robot_strokes is None:
+            src = self.result["strokes_mm"]
+            self._robot_strokes = src if self.paper_fit is None else [apply_paper_fit(s, self.paper_fit) for s in src]
+        return self._robot_strokes
+
+    def robot_strokes_mm(self):
+        """로봇이 실제로 그릴 획 (종이 맞춤 적용, 맞춤이 없으면 strokes_mm 그대로). 같은 획·맞춤이면 같은 목록을 돌려줌."""
+        with self.lock:
+            self._need_result()
+            return self._robot_strokes_locked()
 
     def _need_result(self):
         if not self.result:
@@ -398,8 +511,15 @@ class SketchSession:
         ordered = sp.order_strokes(strokes + hatch)
         if refit or self.result.get("placement") is None:
             box = self.params["box_mm"]
-            _, self.result["placement"] = pm.pixels_to_paper(self._fit_strokes or strokes, box_mm=(box, box),
-                                                             region=limits.pending_region(self.cfg))
+            warp = de.drawing_warp(self.cfg)                 # 실행기처럼 미리 비튼 좌표로 범위를 본다
+            _, self.result["placement"] = pm.pixels_to_paper(
+                self._fit_strokes or strokes, box_mm=(box, box), region=limits.pending_region(self.cfg),
+                warp=(lambda x, y: de.warp_xy(warp, x, y)) if warp is not None else None)
+        # 앞 획 끝 가까이에서 시작하는 획은 펜을 들지 않고 이어 그림 (종이 위 거리 기준). 얼굴 상자 안(눈썹~턱)은 잇지 않음:
+        # 얼굴 세밀 타원(상자 1.3×1.4배)까지 막으면 이마·옆머리 결까지 펜을 들어 긴 머리 사진이 2.8분 늘었음
+        found = (self.result["stages"].get("face") or {}).get("faces") or []
+        inner = [((f.box[0] + f.box[2] / 2, f.box[1] + f.box[3] / 2), (0.5 * f.box[2], 0.5 * f.box[3])) for f in found]
+        ordered = sp.chain_near(ordered, float(self.params["pen_join_mm"]) / self._xf()[0], apart=inner)
         strokes_mm = [self.px_to_mm(s) for s in ordered]
         allp = np.vstack(strokes_mm)
         size = allp.max(axis=0) - allp.min(axis=0)
@@ -536,6 +656,7 @@ class SketchSession:
     def propose_edits(self, ops, apply_now=False):
         """편집을 제안 목록에 추가. 하나라도 틀리면 아무것도 바뀌지 않음."""
         with self.lock:
+            self._refuse_if_drawing()
             self._need_result()
             if not isinstance(ops, list) or not ops:
                 raise SessionError("ops가 비어 있습니다")
@@ -634,6 +755,7 @@ class SketchSession:
 
     def apply_proposals(self, exclude=None, only=None):
         with self.lock:
+            self._refuse_if_drawing()
             if not self.proposals:
                 raise SessionError("적용할 제안이 없습니다")
             ids = set(self.proposals)
@@ -757,7 +879,7 @@ class SketchSession:
 
         with self.lock:
             self._need_result()
-            strokes = [[tuple(pt) for pt in s] for s in self.result["strokes_mm"]]
+            strokes = [[tuple(pt) for pt in s] for s in self._robot_strokes_locked()]
         rotation, q0 = ms.simulation_pose(self.cfg)
         res = ms.simulate(ms.plan_targets(strokes, self.cfg), progress=progress, r_goal=rotation, q0=q0)
         j = int(np.argmin(res["min_margin_deg"]))
@@ -776,10 +898,13 @@ class SketchSession:
             self._need_result()
             r = self.result
             gray, color, edges = r["base"], r["color"], r["edges"]
+            lineart = bool(r["stages"]["edges"].get("lineart_used"))
+            if lineart:                                       # 획을 만든 선화 지도와 비교하면 순환: 사진 윤곽과 비교
+                edges = tone.photo_edges(gray)
             strokes = [np.asarray(s, np.float64) for s in r["strokes_px"]]
             outline = [np.asarray(e["poly"], np.float64) for e in self.table.values() if e["kind"] == "stroke"]
             pen_px = self.params["pen_mm"] / self._xf()[0]           # 펜 굵기(mm)를 작업 이미지 px로
-        return tone.compare_report(gray, color, strokes, pen_px, edges, outline=outline)
+        return tone.compare_report(gray, color, strokes, pen_px, edges, outline=outline, lineart=lineart)
 
     # ------------------------------------------------------------ 로봇 그리기 안내
     ROBOT_STEPS = (
@@ -832,7 +957,8 @@ class SketchSession:
     # ------------------------------------------------------------ 상태·그림
     def state(self):
         with self.lock:
-            s = {"image": self.image_path, "image_type": self.image_type, "detail": self.detail,
+            s = {"image": paths.portable_path(self.image_path) if self.image_path else None,
+                 "image_type": self.image_type, "detail": self.detail,
                  "params": dict(self.params),
                  "executor_limit_mm": limits.executor_region(self.cfg).x_max * 2,
                  "executor_limit_outline_mm": [list(p) for p in limits.executor_region(self.cfg).outline()],
@@ -865,6 +991,14 @@ class SketchSession:
             s["simulation"] = self.sim["summary"] if self.sim else None
             return s
 
+    @staticmethod
+    def _tone_summary(o):
+        """명암 단계 한 줄: 빗금 N획 · 머리 결 M획 (없으면 꺼짐)."""
+        hair = int(o.get("hair_strokes", 0))
+        hatch = len(o["hatch_strokes"]) - hair
+        parts = ([f"빗금 {hatch}획"] if hatch else []) + ([f"머리 결 {hair}획"] if hair else [])
+        return " · ".join(parts) or "꺼짐"
+
     def stage_summaries(self):
         """단계마다 만든 결과 한 줄 (단계 띠·큰 보기 안내용). 결과가 없으면 빈 글자."""
         with self.lock:
@@ -891,9 +1025,10 @@ class SketchSession:
                 "merge": f"획 {len(o['merge']['strokes'])}",
                 "face": (f"얼굴 {o['face']['faces_used']} · 획 {len(o['face']['strokes'])}" if o["face"]["faces_used"]
                          else ("얼굴 없음" if not r["faces"] else "꺼짐")),
+                "clutter": (f"획 {len(o['clutter']['strokes'])} · 지움 {len(o['clutter']['discarded_clutter'])}"
+                            if o["clutter"]["discarded_clutter"] or o["clutter"].get("uses_deps") is not False else "꺼짐"),
                 "simplify": f"획 {len(o['simplify']['strokes'])} · 점 {pts(o['simplify']['strokes']):,}",
-                "tone": (o["tone"].get("tone_note") and "배경이 어두움: 배경 제거" or
-                         (f"빗금 {len(o['tone']['hatch_strokes'])}획" if o["tone"]["hatch_strokes"] else "꺼짐")),
+                "tone": (o["tone"].get("tone_note") and "배경이 어두움: 배경 제거" or self._tone_summary(o["tone"])),
                 "edit": f"획 {n_stroke} · 후보 {n_cand}" + (f" · 제안 {len(self.proposals)}" if self.proposals else ""),
                 "paper": f"{t['total_s'] / 60:.1f}분 · {pl['drawing_width_mm']:.0f}×{pl['drawing_height_mm']:.0f}mm",
             }

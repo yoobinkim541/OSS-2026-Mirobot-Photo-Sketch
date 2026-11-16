@@ -213,6 +213,27 @@ class SimulationCancelled(Exception):
     """progress 콜백이 던지면 시뮬레이션을 중간에 멈춘다 (더 이상 필요 없는 백그라운드 계산을 끝냄)."""
 
 
+def check_normal_segments(targets, samples, tolerance_mm=0.1):
+    """접근·이탈 명령과 IK 결과의 TCP가 X축 직선에서 벗어나는지 검사한다."""
+    normal = {i - 1: (xyz, label) for i, (xyz, label, _, _) in enumerate(targets)
+              if i and label.startswith('stroke ') and
+              label.endswith((' descend', ' pen-down', ' lift', ' pen-up'))}
+    failures = []
+    for cmd, (xyz, label) in normal.items():
+        if np.linalg.norm(np.asarray(targets[cmd][0])[1:] - np.asarray(xyz)[1:]) > tolerance_mm:
+            failures.append({'command': label, 'reason': '명령이 X축 직선이 아님'})
+    bad = set()
+    for q, requested, label, _, cmd in samples:
+        if cmd not in normal or cmd in bad:
+            continue
+        transform, _ = fk(q)
+        error = float(np.linalg.norm(transform[:3, 3] - requested))
+        if error > tolerance_mm:
+            failures.append({'command': label, 'reason': 'IK 경로 오차', 'error_mm': round(error, 4)})
+            bad.add(cmd)
+    return failures
+
+
 def simulate(targets, step_mm=1.0, progress=None, r_goal=HOME_ROT, q0=None):
     """직선 보간하며 IK. 반환 dict: samples(q, tcp, 설명, pen_down), 위반/실패 목록, 관절별 최소 여유.
     progress(끝낸 명령 수, 전체 명령 수)는 명령마다 불려 화면이 진행률을 보여 줄 수 있고,
@@ -258,6 +279,7 @@ def simulate(targets, step_mm=1.0, progress=None, r_goal=HOME_ROT, q0=None):
             })
     return {
         "samples": samples,
+        "normal_segment_failures": check_normal_segments(targets, samples),
         "cmd_feed": cmd_feed,
         "failures": failures,
         "violations": violations,
@@ -282,6 +304,8 @@ def trajectory_doc(result, cfg, source):
 
 
 def verdict(result):
+    if result.get("normal_segment_failures"):
+        return "FAIL: 접근·이탈 경로가 수직이 아님"
     if result["failures"]:
         return "FAIL: 도달 불가(IK 실패)"
     if result["violations"]:

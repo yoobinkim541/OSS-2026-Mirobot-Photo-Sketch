@@ -39,9 +39,11 @@ def strokes_bbox(strokes):
 
 
 def pixels_to_paper(strokes_px, box_mm=DEFAULT_BOX_MM, paper_mm=A4_LANDSCAPE_MM,
-                    margin_mm=DEFAULT_MARGIN_MM, region=None):
+                    margin_mm=DEFAULT_MARGIN_MM, region=None, warp=None):
     """픽셀 획들을 종이 중심 기준 mm 획들로 변환합니다.
 
+    region이 있으면 그 안에 들어가게 배치합니다. warp(x, y) -> (x, y)를 주면 로봇에 실제로 보낼(미리 비튼)
+    좌표가 region 안에 들어갈 때까지 줄입니다 (실행기 범위 검사 check_limits와 같은 기준).
     반환: (strokes_mm, placement) — placement에는 배율, 실제 그림 크기 등이 들어갑니다.
     """
     strokes_px = [np.asarray(s, dtype=np.float64) for s in strokes_px if len(s) >= 2]
@@ -66,6 +68,8 @@ def pixels_to_paper(strokes_px, box_mm=DEFAULT_BOX_MM, paper_mm=A4_LANDSCAPE_MM,
         if pos is None:                              # 영역에 안 들어감: 들어갈 만큼 줄임
             scale = region.max_scale(size[0], size[1])
             pos = region.fit(size[0] * scale, size[1] * scale) or (0.0, 0.0)
+        if warp is not None:
+            scale, pos = _shrink_for_warp(strokes_px, center, size, scale, pos, region, warp)
         ox, oy = pos
 
     strokes_mm = []
@@ -90,6 +94,40 @@ def pixels_to_paper(strokes_px, box_mm=DEFAULT_BOX_MM, paper_mm=A4_LANDSCAPE_MM,
         "alignment": "bounding_box_center_to_paper_center" if (ox, oy) == (0.0, 0.0) else "moved_down_into_reach",
     }
     return strokes_mm, placement
+
+
+def _shrink_for_warp(strokes_px, center, size, scale, pos, region, warp, min_ratio=0.3):
+    """비튼 좌표가 region을 벗어나면 배율을 이분 탐색으로 줄인다 (자리는 줄인 크기로 다시 맞춤).
+    검사는 볼록 껍질의 변을 종이 1 mm 간격으로 채운 점으로 한다: 비틀기는 2차식이라 꼭짓점 사이의 변이
+    가운데에서 바깥으로 휠 수 있다 (50 mm 직선에 약 0.4 mm). 모든 점은 실행 전 check_limits가 다시 검사한다."""
+    import cv2
+
+    pts = np.vstack(strokes_px).astype(np.float32)
+    corners = cv2.convexHull(pts).reshape(-1, 2).astype(np.float64)
+    step_px = 1.0 / max(scale, 1e-9)                 # 지금 배율에서 1 mm (줄이면 더 촘촘해짐)
+    edges = []
+    for a, b in zip(corners, np.roll(corners, -1, axis=0)):
+        n = max(1, int(np.ceil(np.linalg.norm(b - a) / step_px)))
+        edges.append(a + (b - a) * (np.arange(n)[:, None] / n))
+    hull = np.vstack(edges)
+
+    def placed(sc):
+        p = region.fit(size[0] * sc, size[1] * sc)
+        if p is None:
+            return None
+        xs = (hull[:, 0] - center[0]) * sc + p[0]
+        ys = -(hull[:, 1] - center[1]) * sc + p[1]
+        return p if all(region.contains(*warp(x, y)) for x, y in zip(xs, ys)) else None
+
+    if placed(scale) is not None:
+        return scale, pos
+    lo, hi = scale * min_ratio, scale
+    if placed(lo) is None:
+        return scale, pos                            # 줄여도 안 들어감: 실행 전 검사가 알려 줌
+    for _ in range(20):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if placed(mid) is not None else (lo, mid)
+    return lo, placed(lo)
 
 
 def check_within_paper(strokes_mm, paper_mm=A4_LANDSCAPE_MM, margin_mm=DEFAULT_MARGIN_MM):

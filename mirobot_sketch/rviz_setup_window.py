@@ -12,10 +12,10 @@ from tkinter import messagebox
 
 import customtkinter as ctk
 
-from . import paths, rviz_launch
+from . import paths, rviz_launch, ui_scale
 from . import rviz_setup as rs
 
-from .theme import ACCENT as ACT_C, BAD as BAD_C, MUTED as IDLE_C, OK as OK_C, SURFACE, TEXT
+from .theme import ACCENT as ACT_C, BAD as BAD_C, MUTED as IDLE_C, OK as OK_C, SURFACE, TEXT, FilledButton
 MARK = {"ok": ("✓", OK_C), "missing": ("✕", BAD_C), "blocked": ("○", IDLE_C)}
 
 
@@ -25,7 +25,7 @@ class RvizSetupWindow(ctk.CTkToplevel):
         self.app, self.font = app, font
         self.busy, self.cancel = False, False
         self.title("RViz 3D 환경")
-        self.geometry("620x360")
+        ui_scale.place_window(self, 660, 400)
         self.protocol("WM_DELETE_WINDOW", self.close)
 
         ctk.CTkLabel(self, text="RViz 3D 환경 (WSL2 + ROS 2 Humble + Mirobot 모델)", font=font(15, "bold"),
@@ -36,13 +36,13 @@ class RvizSetupWindow(ctk.CTkToplevel):
         for k, (sid, label) in enumerate((("wsl", "① WSL 기능"), ("env", "② RViz 환경"), ("verify", "③ 동작 확인"))):
             if k:
                 ctk.CTkLabel(bar, text="─", text_color=IDLE_C).pack(side="left", padx=4)
-            lb = ctk.CTkLabel(bar, text=f"○ {label}", font=font(13), text_color=IDLE_C)
+            lb = ctk.CTkLabel(bar, text=f"○ {label}", font=font(14), text_color=IDLE_C)
             lb.pack(side="left")
             self.steps[sid] = lb
-        self.todo = ctk.CTkLabel(self, text="상태를 확인하는 중...", font=font(13, "bold"), anchor="w",
+        self.todo = ctk.CTkLabel(self, text="상태를 확인하는 중...", font=font(14, "bold"), anchor="w",
                                  justify="left", wraplength=580)
         self.todo.pack(fill="x", padx=16, pady=(14, 4))
-        self.detail = ctk.CTkLabel(self, text="", font=font(12), anchor="w", justify="left", wraplength=580)
+        self.detail = ctk.CTkLabel(self, text="", font=font(13), anchor="w", justify="left", wraplength=580)
         self.detail.pack(fill="x", padx=16)
         self.bar = ctk.CTkProgressBar(self, height=8)
         self.bar.pack(fill="x", padx=16, pady=10)
@@ -50,17 +50,17 @@ class RvizSetupWindow(ctk.CTkToplevel):
 
         row = ctk.CTkFrame(self, fg_color="transparent")
         row.pack(fill="x", padx=16, pady=(4, 4))
-        self.install_btn = ctk.CTkButton(row, text="설치", command=self.install, font=font(13, "bold"), width=120)
+        self.install_btn = FilledButton(row, text="설치", command=self.install, font=font(14, "bold"), width=120)
         self.install_btn.pack(side="left")
-        self.wsl_btn = ctk.CTkButton(row, text="WSL 설치(관리자)", command=self.install_wsl, font=font(12), width=130)
-        self.manual_btn = ctk.CTkButton(row, text="직접 설치(예비)", command=self.manual, font=font(12), width=120,
+        self.wsl_btn = FilledButton(row, text="WSL 설치(관리자)", command=self.install_wsl, font=font(13), width=130)
+        self.manual_btn = ctk.CTkButton(row, text="직접 설치(예비)", command=self.manual, font=font(13), width=120,
                                         fg_color="transparent", border_width=1, text_color=TEXT, hover_color=SURFACE)
         self.manual_btn.pack(side="left", padx=6)
         row2 = ctk.CTkFrame(self, fg_color="transparent")
         row2.pack(fill="x", padx=16, pady=(4, 12))
         for text, cmd in (("다시 확인", self.refresh), ("제거", self.uninstall), ("로그 열기", self.open_log),
                           ("닫기", self.close)):
-            ctk.CTkButton(row2, text=text, command=cmd, font=font(12), width=90, fg_color="transparent",
+            ctk.CTkButton(row2, text=text, command=cmd, font=font(13), width=90, fg_color="transparent",
                           border_width=1, text_color=TEXT, hover_color=SURFACE).pack(side="left", padx=(0, 6))
         self.refresh()
 

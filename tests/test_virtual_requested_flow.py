@@ -56,7 +56,7 @@ class RequestedFlowTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
-    def run_job(self, cfg, virtual=True, air=False, recalibrate=False, outside=False):
+    def run_job(self, cfg, virtual=True, air=False, recalibrate=False, outside=False, on_send=None, on_pause=None):
         session = SketchSession(cfg)
         session.set_image(self.pic)
         session.update_params({"box_mm": 10, "epsilon_px": 4.0})
@@ -69,11 +69,21 @@ class RequestedFlowTest(unittest.TestCase):
                 ready.set()
             if kind == "finished":
                 finished.set()
+            if kind == "paused" and on_pause:   # 일시정지에서 사람이 고르는 것 (이어서·끝내기)
+                on_pause(job)
 
         def open_link(config, virtual, speed):
-            holder["link"] = VirtualMirobotLink(config, speed=5000, homing_s=0)
-            holder["link"].port = "COM9"
-            return holder["link"]
+            link = VirtualMirobotLink(config, speed=5000, homing_s=0)
+            link.port = "COM9"
+            if on_send:     # 보낸 명령마다 시험 쪽에서 [멈춤]을 누를 수 있게
+                original = link.send_and_ack
+
+                def send_and_ack(line, timeout, should_stop=None):
+                    original(line, timeout, should_stop)
+                    on_send(job, link, line)
+                link.send_and_ack = send_and_ack
+            holder["link"] = link
+            return link
         job = DrawJob(session, cfg, callback, progress_path=self.root / "progress.json")
         if outside:         # 사전 검사(넓은 범위)는 통과하지만 펜 접촉 범위(limits)는 벗어나는 그림
             cfg["limits"] = {"x_max_mm": 1.0, "y_min_mm": -1.0, "roof_mm": [[0, 1.0], [1.0, 1.0]]}
@@ -119,6 +129,63 @@ class RequestedFlowTest(unittest.TestCase):
         self.assertEqual(result["result"], "completed")
         self.assertFalse(any(CONTACT_LINE in line for line in link.sent))
         self.assertEqual(link.joints, HOME)
+
+    def _stop_while_pressed(self, press_again_on_return=False, presses=1, on_pause=lambda job: job.finish()):
+        """종이를 누른 채 그리는 명령에서 [멈춤]을 presses번, 일시정지가 되면 on_pause(job).
+        반환: (결과, 연결, 멈춘 명령 번호, 접촉 X)."""
+        contact_x = float(ms.fk(np.radians(CONTACT))[0][0, 3])
+        marks = {}
+
+        def on_send(job, link, line):
+            m = M20_X.match(line)
+            if "stop" not in marks and m and abs(float(m.group(1)) - (contact_x + PRESS_MM)) < 0.01:
+                marks["stop"] = len(link.sent) - 1
+                for _ in range(presses):
+                    job.stop()
+            elif press_again_on_return and "stop" in marks and "again" not in marks and line.startswith("M21"):
+                marks["again"] = len(link.sent) - 1
+                job.stop()
+
+        result, link, _, _ = self.run_job(requested_cfg(), on_send=on_send, on_pause=on_pause)
+        return result, link, marks["stop"], contact_x
+
+    def test_stop_lifts_the_pen_straight_off_and_finish_returns_to_home(self):
+        result, link, stop_at, contact_x = self._stop_while_pressed()
+        self.assertEqual((result["result"], result["returned_to_origin"]), ("stopped_by_user", True))
+        pressed, lift = link.sent[stop_at], link.sent[stop_at + 1]
+        self.assertAlmostEqual(float(M20_X.match(lift).group(1)), contact_x - 20.0, places=2)   # 펜업 높이까지 뗌
+        self.assertEqual(lift.split(" Y")[1].split(" A")[0], pressed.split(" Y")[1].split(" A")[0])  # 옆으로 가지 않음
+        self.assertIn("F200", lift)                                                         # 종이에서 천천히
+        after = link.sent[stop_at + 2:]
+        self.assertTrue(after and all(line.startswith("M21") for line in after))            # 끝내기 뒤로는 관절 이동만
+        self.assertIn("B-128", after[0])                                                    # 1번 대기 자세를 거쳐
+        self.assertEqual(link.joints, HOME)                                                 # 호밍 자세(관절 0)
+
+    def test_pressing_stop_twice_before_it_takes_effect_still_lifts_the_pen_and_returns(self):
+        # 멈춤은 보내던 명령의 ok 뒤에야 걸려, 반응이 없어 보여 한 번 더 누르는 경우: 펜을 누른 채 남기지 않는다
+        result, link, stop_at, contact_x = self._stop_while_pressed(presses=2)
+        self.assertEqual((result["result"], result["returned_to_origin"]), ("stopped_by_user", True))
+        self.assertAlmostEqual(float(M20_X.match(link.sent[stop_at + 1]).group(1)), contact_x - 20.0, places=2)
+        self.assertEqual(link.joints, HOME)
+
+    def test_stop_while_returning_after_finish_leaves_the_robot_where_it_is(self):
+        result, link, stop_at, contact_x = self._stop_while_pressed(press_again_on_return=True)
+        self.assertEqual((result["result"], result["returned_to_origin"]), ("stopped_by_user", False))
+        self.assertIn("그 자리에", result["return_error"])
+        self.assertEqual(len(link.sent), stop_at + 3)                # 펜 떼기, 첫 관절 이동 뒤로는 보내지 않음
+        self.assertNotEqual(link.joints, HOME)
+
+    def test_resume_puts_the_pen_back_where_it_stopped_and_completes(self):
+        result, link, stop_at, contact_x = self._stop_while_pressed(on_pause=lambda job: job.resume())
+        self.assertEqual((result["result"], result["returned_to_origin"], result["pauses"]), ("completed", True, 1))
+        pressed, lift, slow, touch = link.sent[stop_at:stop_at + 4]
+        yz = lambda line: line.split(" Y")[1].split(" A")[0]
+        self.assertAlmostEqual(float(M20_X.match(lift).group(1)), contact_x - 20.0, places=2)
+        self.assertEqual({yz(lift), yz(slow), yz(touch)}, {yz(pressed)})         # 옆으로 가지 않고 같은 점에서
+        self.assertLess(float(M20_X.match(slow).group(1)), contact_x)               # 종이 앞까지 빠르게
+        self.assertEqual(touch.split(" F")[0], pressed.split(" F")[0])            # 멈춘 접촉점에 다시 댐
+        self.assertIn("F200", touch)                                                # 닿는 구간은 천천히
+        self.assert_standby_contact_draw_return(link)
 
     def test_unverified_real_robot_stops_before_opening_the_port(self):
         result, _, opened, failed = self.run_job(requested_cfg(verified=False), virtual=False)

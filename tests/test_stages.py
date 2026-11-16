@@ -41,7 +41,7 @@ class StageTextTest(unittest.TestCase):
     def test_every_stage_has_number_and_description(self):
         for k, st in enumerate(stages.ALL_STAGES):
             self.assertTrue(st.desc, st.id)
-            self.assertEqual(stages.stage_title(st.id), f"{'①②③④⑤⑥⑦⑧⑨⑩⑪'[k]} {st.label}")
+            self.assertEqual(stages.stage_title(st.id), f"{'①②③④⑤⑥⑦⑧⑨⑩⑪⑫'[k]} {st.label}")
 
 
 class PipelineTest(unittest.TestCase):

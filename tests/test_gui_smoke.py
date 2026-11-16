@@ -24,7 +24,10 @@ def make_app():
         raise unittest.SkipTest(f"GUI 없음: {e}")
     from mirobot_sketch import gui
     root.withdraw()
-    return root, gui.SketchApp(root)
+    app = gui.SketchApp(root)
+    # 로컬 설정 파일에 실제 로봇에서 저장한 호밍 대기 자세가 있으면 가상 실행도 그 경로를 타므로 테스트에서는 뺌
+    app.cfg.pop("requested_start_pose", None)
+    return root, app
 
 
 def close_quietly(app):
@@ -89,6 +92,31 @@ class GuiResponsivenessTest(unittest.TestCase):
         finally:
             close_quietly(app)
             sys.setswitchinterval(before)
+
+
+class GuiAutoTuneTest(unittest.TestCase):
+    def test_auto_tune_locks_the_session_controls_until_it_finishes(self):
+        """자동 세팅이 후보를 돌리는 동안 조절·사진 열기·그리기가 잠겨야 함 (중간 후보로 재계산·그리기가 섞이지 않게)."""
+        root, app = make_app()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                p = Path(d) / "line.png"
+                cv2.imwrite(str(p), golden.synthetic_images()["line"])
+                app.load_image(p)
+                self.assertTrue(pump(root, app, lambda: app.result is not None and app._workers == 0))
+                app.run_auto_tune()       # 잠금은 바로 걸림 (풀기는 작업 스레드가 끝난 뒤 화면 스레드에서: 아직 이벤트를 돌리지 않음)
+                self.assertEqual(str(app.open_btn.cget("state")), "disabled")
+                self.assertEqual(str(app.draw_btn.cget("state")), "disabled")
+                before = app.session.params["epsilon_px"]
+                app._on_param("epsilon_px", before + 1.0)                      # 잠긴 동안의 조절은 무시
+                self.assertEqual(app.session.params["epsilon_px"], before)
+                with mock.patch("mirobot_sketch.gui.messagebox.showinfo"):
+                    self.assertIsNone(app.open_draw_window())
+                self.assertTrue(pump(root, app, lambda: not app._tuning and app._workers == 0, timeout=300))
+                self.assertEqual(str(app.open_btn.cget("state")), "normal")
+                self.assertTrue(app.status.cget("text").startswith("자동 세팅"))
+        finally:
+            close_quietly(app)
 
 
 class GuiNextDrawingTest(unittest.TestCase):
@@ -201,6 +229,35 @@ class GuiNextDrawingTest(unittest.TestCase):
                 warn.assert_called_once()
                 self.assertIsNone(w.job)                                       # 작업을 시작하지 않음
                 w.close()
+        finally:
+            close_quietly(app)
+
+    def test_zoom_window_opens_and_shares_the_overlay_switch(self):
+        import customtkinter as ctk
+
+        root, app = make_app()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                cv2.imwrite(str(Path(d) / "line.png"), golden.synthetic_images()["line"])
+                app.load_image(Path(d) / "line.png")
+                self.assertTrue(pump(root, app, lambda: app.result is not None and app._workers == 0))
+            w = app.open_draw_window(launch_rviz=lambda *a, **k: None)
+            w._open_zoom()
+            root.update()
+            z = w._zoom_win
+            self.assertTrue(z.winfo_exists())
+            switch = next(c for c in z.winfo_children()[0].winfo_children() if isinstance(c, ctk.CTkSwitch))
+            self.assertTrue(switch.get())
+            switch.toggle()                                    # 크게 보기에서 끄면 그리기 창도 꺼짐
+            self.assertFalse(w.overlay_on.get())
+            w.overlay_on.set(True)                             # 그리기 창에서 켜면 크게 보기도 켜짐
+            root.update()
+            self.assertTrue(switch.get())
+            w._open_zoom()                                     # 다시 누르면 새 창이 아니라 같은 창
+            self.assertIs(w._zoom_win, z)
+            z.close()
+            self.assertIsNone(w._zoom_win)
+            w.close()
         finally:
             close_quietly(app)
 
@@ -719,7 +776,7 @@ class GuiSmokeTest(unittest.TestCase):
                 class Stuck:                                          # 로봇 응답을 기다리느라 안 끝나는 작업
                     state = "drawing"
 
-                    def stop(self):
+                    def end(self):                                    # 창을 닫을 때 부르는 것
                         pass
 
                     def join(self, timeout=None):
@@ -761,6 +818,40 @@ class GuiSmokeTest(unittest.TestCase):
                 self.assertIs(app.view.image, shown)
         finally:
             app._on_close()
+
+
+class UiQueueAndDrawingLockTest(unittest.TestCase):
+    def test_one_failing_callback_does_not_stop_later_updates(self):
+        root, app = make_app()
+        try:
+            seen = []
+
+            def boom():
+                raise RuntimeError("boom")
+
+            app._ui(boom)
+            app._ui(lambda: seen.append("next"))
+            with self.assertLogs("mirobot_sketch.gui", level="ERROR"):
+                app._poll_ui_queue()
+            self.assertEqual(seen, ["next"])
+            self.assertIsNotNone(app._ui_after)
+        finally:
+            close_quietly(app)
+
+    def test_set_drawing_on_bumps_generation_once(self):
+        root, app = make_app()
+        try:
+            gen = app.session.generation
+            app.set_drawing(True)
+            self.assertTrue(app.session.drawing_lock)
+            self.assertEqual(app.session.generation, gen + 1)
+            app.set_drawing(True)
+            self.assertEqual(app.session.generation, gen + 1)
+            app.set_drawing(False)
+            self.assertFalse(app.session.drawing_lock)
+            self.assertEqual(app.session.generation, gen + 1)
+        finally:
+            close_quietly(app)
 
 
 if __name__ == "__main__":

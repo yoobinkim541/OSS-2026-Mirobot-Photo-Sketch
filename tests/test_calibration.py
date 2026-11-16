@@ -211,6 +211,20 @@ class CalibrationWorkflowTest(unittest.TestCase):
         self.assertEqual(result["result"], "cancelled")
         self.assertEqual(link.commands, [])
 
+    def test_c_on_an_unconfirmed_rectangle_reasks_the_same_corner(self):
+        link = FakeCalibrationLink((198.668, 0.0, 230.477))
+        answers = ["yes", "c", "", "", "", "", "q"]
+        lines = []
+        result = calibration.run_calibration(
+            link, copy.deepcopy(CFG), start_mm=30, max_mm=30,
+            input_fn=lambda _: answers.pop(0), output_fn=lines.append)
+        self.assertEqual(result["result"], "aborted")
+        self.assertEqual(result["tested_half_sizes_mm"], [])
+        self.assertEqual(result["reason"], "pen-up path safety not confirmed")
+        self.assertGreaterEqual(sum(1 for s in lines if "모서리 1/" in s), 2)
+        self.assertFalse(any("조작:" in s for s in lines))
+        self.assertTrue(any("아직 확인된" in s for s in lines))
+
     def test_complete_five_point_measurement_returns_plane_without_writing_config(self):
         cfg = copy.deepcopy(CFG)
         link = FakeCalibrationLink((198.668, 0.0, 230.477))

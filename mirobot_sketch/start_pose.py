@@ -30,6 +30,7 @@ from . import mirobot_sim as ms
 from . import pen_pose as pp
 
 MOUNTS = ("right_angle", "along_flange")
+REQUESTED_UP_CLEARANCE_MM = 20.0   # 저장된 대기·접촉 자세로 그릴 때: 획 사이에는 종이 면에서 20 mm 뒤로 뗀 뒤에 이동
 DEFAULTS = {
     "pen_mount": "right_angle",  # right_angle: 펜이 플랜지 축과 직각(호밍 자세에서 팔뚝·펜 모두 수평으로 벽을 향함,
                                  #   손목을 돌리지 않음). along_flange: 펜이 플랜지 축과 나란함(아래 순서로 손목을 돌림)
@@ -121,10 +122,34 @@ def plan_requested_start(cfg):
             "joints_deg": degrees, "min_joint_margin_deg": margin, "min_tip_clearance_mm": gap}
 
 
+
+def _require_pen_down_extra(cfg):
+    """종이를 뚫을 누름량은 움직이기 전에 거부한다."""
+    requested = cfg.get("requested_start_pose") or {}
+    if "requested_pen_down_extra_mm" not in requested:
+        return
+    try:
+        extra = float(requested["requested_pen_down_extra_mm"])
+    except (TypeError, ValueError):
+        raise StartPoseError("펜을 더 누르는 양이 올바른 수가 아닙니다.") from None
+    if not -10.0 <= extra <= 8.0:
+        raise StartPoseError(
+            f"펜을 더 누르는 양 {extra:g} mm는 -10.0~8.0 mm 밖입니다. 움직이지 않았습니다.")
+
+
+def _wait_joint_idle(link, cfg, should_stop):
+    from .draw_executor import StopRequested
+    try:
+        link.wait_idle(cfg["idle_timeout_s"], should_stop=should_stop)
+    except StopRequested:
+        raise StartPoseError("취소했습니다.") from None
+
+
 def execute_requested_start(link, cfg, should_stop=lambda: False):
     """호밍 상태에서 관절 이동 후 각 단계의 컨트롤러 보고값을 확인한다."""
     from .draw_executor import parse_status
 
+    _require_pen_down_extra(cfg)
     if not getattr(link, "virtual", False) and not (cfg.get("requested_start_pose") or {}).get("tool_offset_verified", False):
         raise StartPoseError("펜 홀더 오프셋이 실물 검증되지 않아 이동하지 않았습니다.")
     plan = plan_requested_start(cfg)
@@ -136,7 +161,7 @@ def execute_requested_start(link, cfg, should_stop=lambda: False):
         if should_stop():
             raise StartPoseError("취소했습니다.")
         link.send_and_ack(command, cfg["ack_timeout_s"])
-        link.wait_idle(cfg["idle_timeout_s"])
+        _wait_joint_idle(link, cfg, should_stop)
         status = parse_status(link.query_status()[2])
         j = status.get("joints_deg")
         if status["state"] != "Idle" or j is None or max(abs(a-b) for a, b in zip(j, expected)) > 1.0:
@@ -184,6 +209,7 @@ def execute_requested_contact(link, cfg, should_stop=lambda: False):
     """첫 자세에서 접촉 자세로 이동하고, 도착 상태를 확인한다."""
     from .draw_executor import parse_status
 
+    _require_pen_down_extra(cfg)
     if not getattr(link, "virtual", False) and not (cfg.get("requested_start_pose") or {}).get("tool_offset_verified", False):
         raise StartPoseError("펜 홀더 오프셋이 실물 검증되지 않아 이동하지 않았습니다.")
     plan = plan_requested_contact(cfg)
@@ -194,7 +220,7 @@ def execute_requested_contact(link, cfg, should_stop=lambda: False):
     if should_stop():
         raise StartPoseError("취소했습니다.")
     link.send_and_ack(plan["command"], cfg["ack_timeout_s"])
-    link.wait_idle(cfg["idle_timeout_s"])
+    _wait_joint_idle(link, cfg, should_stop)
     status = parse_status(link.query_status()[2])
     actual = status.get("joints_deg")
     if status["state"] != "Idle" or actual is None or max(abs(a-b) for a, b in zip(actual, plan["joints_deg"])) > 1.0:
@@ -204,6 +230,7 @@ def execute_requested_contact(link, cfg, should_stop=lambda: False):
 
 def drawing_config_from_contact(cfg, status):
     """실제로 확인한 접촉 자세를 이번 실행의 좌표·자세 기준으로 사용한다."""
+    _require_pen_down_extra(cfg)
     try:
         expected = np.asarray(cfg["requested_start_pose"]["contact_joints_deg"], dtype=float)
         joints = np.asarray(status["joints_deg"], dtype=float)
@@ -219,7 +246,7 @@ def drawing_config_from_contact(cfg, status):
     result["paper_center_tcp_mm"] = dict(zip(("x", "y", "z"), tcp.tolist()))
     result["orientation_deg"] = dict(zip(("a", "b", "c"), abc.tolist()))
     result["simulation_start_joints_deg"] = joints.tolist()
-    result["pen"]["up_clearance_mm"] = 20.0                # 획 사이에는 종이 면에서 20 mm 뒤로 뗀 뒤에 이동
+    result["pen"]["up_clearance_mm"] = REQUESTED_UP_CLEARANCE_MM
     # 사용자가 정한 대로 접촉점보다 조금 더 눌러 그린다 (없으면 기존 설정값)
     result["pen"]["down_extra_mm"] = float(cfg["requested_start_pose"].get(
         "requested_pen_down_extra_mm", result["pen"].get("down_extra_mm", 0.0)))
@@ -245,7 +272,7 @@ def _move_joints(link, cfg, target, should_stop, what):
     if should_stop():
         raise StartPoseError("취소했습니다.")
     link.send_and_ack(joint_line(target, settings(cfg)["joint_feed"]), cfg["ack_timeout_s"])
-    link.wait_idle(cfg["idle_timeout_s"])
+    _wait_joint_idle(link, cfg, should_stop)
     status = parse_status(link.query_status()[2])
     actual = status.get("joints_deg")
     if status["state"] != "Idle" or actual is None or max(abs(a - b) for a, b in zip(actual, target)) > 1.0:

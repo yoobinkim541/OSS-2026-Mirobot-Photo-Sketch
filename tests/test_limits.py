@@ -179,6 +179,27 @@ class ReachSimulationTest(unittest.TestCase):
         self.assertGreaterEqual(float(res["min_margin_deg"].min()), 5.0)
 
 
+class DegenerateRegionTest(unittest.TestCase):
+    def test_non_positive_sizes_do_not_look_centered_or_divide_by_zero(self):
+        r = limits.Region.from_cfg(ROOF)
+        self.assertIsNone(r.fit(float("nan"), 10))
+        self.assertIsNone(r.fit(-10, 20))
+        self.assertEqual(r.max_scale(0, 0), 0)
+        self.assertEqual(limits.effective_long_mm(r, 100, 0, 0), 0)
+
+    def test_empty_roof_is_rejected(self):
+        with self.assertRaises(ValueError) as cm:
+            limits.Region.from_cfg({"x_max_mm": 10, "y_min_mm": -10, "roof_mm": []})
+        self.assertIn("지붕", str(cm.exception))
+
+    def test_duplicate_x_keeps_the_lower_roof_so_top_and_ceiling_agree(self):
+        r = limits.Region(10, -10, [(0, 40), (0, 10), (10, 5)])
+        self.assertEqual(r.top(0), 10.0)
+        self.assertEqual(r._ceiling(0), 10.0)
+        self.assertFalse(r.contains(0, 30))
+        self.assertTrue(r.contains(0, 10))
+
+
 if __name__ == "__main__":
     unittest.main()
 
