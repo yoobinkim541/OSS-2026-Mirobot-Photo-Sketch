@@ -228,12 +228,21 @@ def _unpack_and_import(gz, name, run, progress, should_cancel):
         tar.unlink(missing_ok=True)
 
 
+def _wsl_text(raw):
+    raw = raw or b""
+    if b"\x00" in raw:
+        text = raw.decode("utf-16-le", errors="ignore")
+    else:
+        text = raw.decode(errors="ignore")
+    return text.replace("\x00", "").strip()
+
+
 def import_distro(tar_path, name=DISTRO, run=subprocess.run):
     _check_space(MIN_FREE_BYTES, "가져오기에")
     base = install_dir()
     r = _wsl(run, "--import", name, str(base / name), str(tar_path), "--version", "2", timeout=1800)
     if r.returncode != 0:
-        out = (r.stdout or b"").replace(b"\x00", b"").decode(errors="ignore").strip()
+        out = _wsl_text(r.stdout)
         raise SetupError("env", f"WSL 가져오기 실패: {out}", "`wsl --update` 후 다시 시도하세요.")
 
 

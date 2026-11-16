@@ -22,9 +22,13 @@ from .tools import TOOLS
 
 def build_server(client):
     async def list_tools(ctx, params):
+        try:   # 앱 세션의 실제 조절 범위가 담긴 목록. 브리지가 없으면 기본 목록
+            tools = await anyio.to_thread.run_sync(client.tools)
+        except OSError:
+            tools = TOOLS
         return types.ListToolsResult(tools=[
             types.Tool(name=t["name"], description=t["description"], input_schema=t["parameters"])
-            for t in TOOLS
+            for t in tools
         ])
 
     async def call_tool(ctx, params):

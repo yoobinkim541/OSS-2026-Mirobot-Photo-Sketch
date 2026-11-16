@@ -23,7 +23,7 @@ import threading
 from pathlib import Path
 
 from .. import paths
-from .tools import SYSTEM_PROMPT, TOOLS
+from .tools import SYSTEM_PROMPT, tools_for
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
 DEFAULT_OPENROUTER_MODEL = "anthropic/claude-opus-5"
@@ -91,7 +91,7 @@ class OpenRouterBackend:
         self._cancel.clear()
         self.messages.append({"role": "user", "content": user_text})
         tools = [{"type": "function", "function": {"name": t["name"], "description": t["description"],
-                                                   "parameters": t["parameters"]}} for t in TOOLS]
+                                                   "parameters": t["parameters"]}} for t in tools_for(self.toolbox.session)]
         cost = 0.0
         try:
             for _ in range(MAX_TOOL_ROUNDS):
@@ -354,7 +354,8 @@ def _codex_executable():
 
 
 def _toml_str(s):
-    return "'" + str(s).replace("'", "") + "'"   # TOML 리터럴 문자열 (역슬래시 그대로)
+    text = str(s).replace("\\", "\\\\").replace('"', '\\"')
+    return '"' + text + '"'
 
 
 class CodexBackend(_CliBackend):

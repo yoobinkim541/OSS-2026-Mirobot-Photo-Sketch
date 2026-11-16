@@ -11,6 +11,7 @@
 """
 
 import base64
+import copy
 import json
 
 import cv2
@@ -49,9 +50,16 @@ SYSTEM_PROMPT = """당신은 사진을 로봇 팔(WLKATA Mirobot)이 펜으로 �
 - dedupe 겹침 제거: dedupe_px / merge 이어 붙이기: merge_join_px
 - face 얼굴 세밀: face_detail(켬/끔), face_sensitivity(낮을수록 약한 선도), pen_mm(이보다 촘촘한 얼굴 선은 합침).
   실사 사진에서만 얼굴을 찾음 (애니·만화 그림체는 보통 못 찾음). view(face)의 초록 타원이 처리 영역
+- clutter 잔선 정리(실사 선화에서만): declutter(켬/끔, 피부 위 주름과 짧고 흐린 잔선을 지우고 눈·코·입·윤곽·머리·
+  글자·문양은 남김. 지운 선은 "버린 선"에 이유와 함께), clutter_mm(얼굴 밖 이보다 짧은 선을 잔선 후보로),
+  clutter_pct(흐린 선 기준 백분위, 높을수록 많이 지움), clutter_max(0=끔, 남길 선 개수 상한: 얼굴 밖 덜 중요한 선부터 뺌).
+  얼굴 둘레와 인물 외곽선은 강도와 상한에서 지킴. 시간을 맞추려면 이 단계만 다시 계산되어 빠름 (1초 안팎).
+  face_mesh(기본 켬): 정면 얼굴의 눈을 눈꺼풀·홍채·눈동자 점으로, 다문 입을 입술 사이 선으로 다시 그림 (얼굴 점 478개)
 - simplify 스무딩·단순화: smooth_sigma_px, epsilon_px, round_iters
-- tone 명암 빗금: tone_levels(0=끔, 1~3), tone_spacing_mm, tone_angle, tone_min_mm, tone_bias. 어두운 면을 평행 빗금
-  (더 어두우면 교차)으로 채워 사진 같은 명암을 냅니다. 켜면 획 수와 시간이 늘어나니 결과 요약의 예상 시간을 알려 주세요.
+- tone 명암 빗금·머리 결: hair_flow(머리카락 결 선, 실사 프리셋 켬), hair_spacing_mm(결 간격), tone_levels(0=끔, 1~3,
+  실사 프리셋도 꺼짐), tone_spacing_mm, tone_angle, tone_min_mm, tone_bias, tone_skip_face(기본 켬: 눈썹 아래 얼굴과 목의
+  피부에는 빗금 안 함). 스케치는 채색 전 첫 단계라 면을 빗금으로 메우지 않는 것이 기본입니다. 빗금은 어두운 면을 평행 빗금
+  (더 어두우면 같은 방향으로 더 촘촘히)으로 채워 명암을 내고, 켜면 획 수와 시간이 늘어나니 결과 요약의 예상 시간을 알려 주세요.
   배경이 어두운 사진은 먼저 rembg를 켜야 하고, 안 켜면 빗금이 화면을 덮어 만들지 않고 경고합니다(view tone에 표시).
 - paper 종이: box_mm(그림 긴 변 크기. 실행기 허용 범위를 넘으면 실제 드로잉 전 별도 확인 필요)
 - image_type(photo/illustration/manga)과 detail(low/medium/high)은 여러 값을 한꺼번에 채우는 프리셋
@@ -63,8 +71,8 @@ SYSTEM_PROMPT = """당신은 사진을 로봇 팔(WLKATA Mirobot)이 펜으로 �
   under/over_shaded_pct. 돌려주는 hints를 따라 설정을 바꾸고 다시 compare해서 좋아졌는지 확인하세요(2~3번). 나빠지면 되돌리고 말하세요.
 - 눈으로도 확인하세요: 얼굴(눈·코·입)이 살아 있는지, 배경 잡음이 튀지 않는지, 어두운 면과 밝은 면의 대비가 있는지,
   예상 시간이 사용자가 원하는 범위인지. 숫자만 믿지 말고 view로 최종 그림을 보세요.
-- 순서: 배경 제거(rembg) → 이미지 종류·상세도 프리셋 → 잔선·획 정리 → tone_levels 1~2로 명암 → 시간이 너무 늘면 줄임.
-  빗금은 시간이 늘어나는 대가가 있으니 사용자가 "닮게/예쁘게"를 원할 때, 혹은 시간 여유가 있을 때 제안하세요.
+- 순서: 배경 제거(rembg) → 이미지 종류·상세도 프리셋 → 잔선·획 정리 → (사용자가 명암을 원하면) tone_levels 1~2 → 시간이 너무 늘면 줄임.
+  빗금은 시간이 늘어나고 채색 전 스케치에는 보통 넣지 않으니, 사용자가 "명암/어둡게"를 원할 때만 제안하세요.
 
 로봇으로 그리기까지 (사용자가 "로봇으로 그려줘", "이제 어떻게 해?"라고 하면)
 - 편집을 마치면 simulate로 관절 한계를 확인하고, robot_guide로 이 그림이 펜으로 그릴 수 있는 범위인지·시뮬레이션이
@@ -85,14 +93,15 @@ def _stage_of(key):
     return next(st.id for st in stages.ALL_STAGES if any(p.key == key for p in st.params))
 
 
-def param_schema():
-    """단계 정의(ParamSpec)에서 set_params 입력 스키마를 만듦 (GUI 조절 칸과 같은 출처)."""
+def param_schema(specs=None):
+    """단계 정의(ParamSpec)에서 set_params 입력 스키마를 만듦. specs를 주면 그 범위(세션의 box_mm 상한)를 쓴다."""
+    specs = specs or stages.PARAM_SPECS
     props = {
         "image_type": {"type": "string", "enum": ["photo", "illustration", "manga"],
                        "description": "이미지 종류 프리셋 (먼저 적용된 뒤 나머지 값이 덮어씀)"},
         "detail": {"type": "string", "enum": ["low", "medium", "high"], "description": "상세도 프리셋"},
     }
-    for spec in stages.PARAM_SPECS.values():
+    for spec in specs.values():
         if spec.kind == "bool":
             sch = {"type": "boolean"}
         elif spec.kind == "choice":
@@ -102,6 +111,18 @@ def param_schema():
         sch["description"] = f"[{stages.STAGE_BY_ID[_stage_of(spec.key)].label}] {spec.label}. {spec.help}".strip()
         props[spec.key] = sch
     return props
+
+
+def tools_for(session=None):
+    """도구 목록. session이 있으면 그 세션의 실제 조절 범위로 set_params 스키마를 만든다."""
+    if session is None:
+        return TOOLS
+    tools = copy.deepcopy(TOOLS)
+    for t in tools:
+        if t["name"] == "set_params":
+            t["parameters"] = {"type": "object", "properties": param_schema(session.param_specs()),
+                               "additionalProperties": False}
+    return tools
 
 
 TOOLS = [
@@ -170,9 +191,26 @@ TOOLS = [
         ),
         "parameters": {"type": "object", "properties": {
             "ops": {"type": "array", "minItems": 1, "maxItems": 200,
-                    "items": {"type": "object", "properties": {"op": {"type": "string", "enum": [
-                        "delete", "restore", "delete_region", "move_point", "delete_points", "insert_point",
-                        "smooth", "split", "join", "add_stroke"]}}, "required": ["op"]}},
+                    "items": {"type": "object", "properties": {
+                        "op": {"type": "string", "enum": [
+                            "delete", "restore", "delete_region", "move_point", "delete_points", "insert_point",
+                            "smooth", "split", "join", "add_stroke"]},
+                        "ids": {"type": "array", "items": {"type": "integer"}},
+                        "region_mm": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
+                        "mode": {"type": "string", "enum": ["inside", "crossing", "outside"]},
+                        "min_fraction": {"type": "number"},
+                        "id": {"type": "integer"},
+                        "index": {"type": "integer"},
+                        "indices": {"type": "array", "items": {"type": "integer"}},
+                        "to_mm": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+                        "after_index": {"type": "integer"},
+                        "at_mm": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+                        "strength": {"type": "integer", "minimum": 1, "maximum": 5},
+                        "a": {"type": "integer"},
+                        "b": {"type": "integer"},
+                        "points_mm": {"type": "array", "items": {"type": "array", "items": {"type": "number"},
+                                                                 "minItems": 2, "maxItems": 2}},
+                    }, "required": ["op"]}},
             "apply_now": {"type": "boolean"}}, "required": ["ops"], "additionalProperties": False},
     },
     {
@@ -268,11 +306,20 @@ class AgentToolbox:
 
     def _set_params(self, image_type=None, detail=None, **changes):
         s = self.session
-        if image_type or detail:
-            s.apply_preset(image_type, detail)
-        applied = s.update_params(changes) if changes else {}
-        recomputed = s.dirty_stages()
-        s.run_current()
+        before_params, before_type, before_detail = dict(s.params), s.image_type, s.detail
+        try:
+            if image_type or detail:
+                s.apply_preset(image_type, detail)
+            applied = s.update_params(changes) if changes else {}
+            recomputed = s.dirty_stages()
+            s.run_current()
+        except Exception:
+            with s.lock:
+                s.params.clear()
+                s.params.update(before_params)
+                s.image_type, s.detail = before_type, before_detail
+                s.generation += 1
+            raise
         self.on_change("result")
         st = s.state()
         return [text_part({"applied": applied, "recomputed": recomputed,

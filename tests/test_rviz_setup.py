@@ -196,6 +196,20 @@ class InstallTest(unittest.TestCase):
             with p1, p2, self.assertRaises(rs.SetupError) as cm:
                 rs.import_distro(Path(d) / "x.tar", run=FakeWsl())
             self.assertIn("공간", cm.exception.message)
+    def test_import_failure_decodes_utf16_message(self):
+        msg = "매개 변수가 틀립니다\r\n오류: Wsl/E_INVALIDARG\r\n"
+        raw = msg.encode("utf-16-le")
+
+        def run(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, 1, raw, b"")
+
+        with tempfile.TemporaryDirectory() as d:
+            p1, p2 = self.patches(d)
+            with p1, p2, self.assertRaises(rs.SetupError) as cm:
+                rs.import_distro(Path(d) / "x.tar", run=run)
+        self.assertIn("매개 변수가 틀립니다", cm.exception.message)
+        self.assertIn("Wsl/E_INVALIDARG", cm.exception.message)
+
 
     def test_wsl_missing_stops_before_download(self):
         with self.assertRaises(rs.SetupError) as cm:

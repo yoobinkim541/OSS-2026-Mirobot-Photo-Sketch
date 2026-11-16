@@ -14,6 +14,8 @@ import re
 import shutil
 import sys
 from pathlib import Path
+from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 DATA_DIR = PACKAGE_DIR / "data"          # 패키지에 함께 들어가는 기본 설정·아이콘
@@ -78,34 +80,83 @@ def trajectories_dir():
     return root / "trajectories" if root else None
 
 
-# 절대 경로: 드라이브 문자(C:\ 또는 C:/) 또는 이름 뒤에 다시 /가 오는 POSIX 경로(/tmp/a, /home/x/y, /mnt/c/z ...)
-_ABS_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|/[A-Za-z0-9_.-]+/)")
+# 절대 경로: 드라이브, UNC(\\\\server\\share, //server/share), \\\\?\\ 확장, file://, POSIX /name/
+_DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
+_UNC = re.compile(r"^(?:\\\\|//)[^\\/]+[\\/]")
+_POSIX = re.compile(r"^/[A-Za-z0-9_.-]+/")
+_HOME = re.compile(r"^(?:[A-Za-z]:[\\/]Users[\\/][^\\/]+|/home/[^/]+|/Users/[^/]+)$", re.IGNORECASE)
+_EMBEDDED = re.compile(
+    r"file://[^\s\"'<>]+"
+    r"|\\\\(?:\?\\)?[^\s\"'<>]+"
+    r"|(?<![\w:/])[A-Za-z]:[\\/][^\s\"'<>]+"
+    r"|(?<![A-Za-z0-9_.:/])/[A-Za-z0-9_.-]+/[^\s\"'<>]*"
+)
+
+
+def _from_file_uri(text):
+    parsed = urlparse(text)
+    if parsed.scheme.lower() != "file":
+        return None
+    if parsed.netloc and parsed.netloc.lower() not in ("localhost", ""):
+        return "\\\\" + parsed.netloc + unquote(parsed.path).replace("/", "\\")
+    return url2pathname(unquote(parsed.path))
+
+
+def _strip_extended(text):
+    if text.startswith("\\\\?\\") or text.startswith("//?/"):
+        rest = text[4:]
+        if rest[:4].upper() in ("UNC\\", "UNC/"):
+            return ("\\" if rest[3] == "\\" else "/") * 2 + rest[4:]
+        return rest
+    return text
+
+
+def _unwrap_abs(text):
+    """절대 경로면 확장 접두어를 뺀 경로, 아니면 None."""
+    if text.lower().startswith("file:"):
+        text = _from_file_uri(text)
+        if not text:
+            return None
+    text = _strip_extended(text)
+    if _DRIVE.match(text) or _UNC.match(text) or _POSIX.match(text):
+        return text
+    return None
 
 
 def portable_path(value):
     """기록(LOG)에 남기는 경로에서 사용자 폴더 이름을 뺀다. 절대 경로가 아니면 그대로.
-    저장소 안이면 저장소 기준 상대 경로(슬래시), 밖이면 파일 이름만. (실행·보정 기록을 공개 저장소에 올려도
-    컴퓨터 사용자 이름이나 사진 폴더 이름이 남지 않게)"""
-    text = str(value)
-    if not _ABS_PATH.match(text):
+    저장소 안이면 저장소 기준 상대 경로(슬래시), 밖이면 파일 이름만. 홈 디렉터리 자체는 '~'.
+    (실행·보정 기록을 공개 저장소에 올려도 컴퓨터 사용자 이름이나 사진 폴더 이름이 남지 않게)"""
+    if not isinstance(value, str):
         return value
-    norm = text.replace("\\", "/")
+    unwrapped = _unwrap_abs(value)
+    if unwrapped is None:
+        return value
+    if _HOME.match(unwrapped.rstrip("\\/")):
+        return "~"
+    norm = unwrapped.replace("\\", "/")
     root = repo_root()
     if root is not None:
         prefix = str(root).replace("\\", "/").rstrip("/") + "/"
         if norm.lower().startswith(prefix.lower()):
             return norm[len(prefix):]
-    return norm.rsplit("/", 1)[-1]
+    return norm.rstrip("/").rsplit("/", 1)[-1]
+
+
+def _scrub_text(text):
+    if _unwrap_abs(text) is not None:
+        return portable_path(text)
+    return _EMBEDDED.sub(lambda m: portable_path(m.group(0)), text)
 
 
 def scrub_paths(obj):
-    """dict·list 안의 절대 경로 문자열을 모두 portable_path로 바꾼 사본."""
+    """dict·list 안의 절대 경로 문자열을 모두 portable_path로 바꾼 사본. 문장 안의 경로도 지운다."""
     if isinstance(obj, dict):
         return {k: scrub_paths(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
-        return [scrub_paths(v) for v in obj]
+        return [_scrub_text(v) if isinstance(v, str) else scrub_paths(v) for v in obj]
     if isinstance(obj, str):
-        return portable_path(obj)
+        return _scrub_text(obj)
     return obj
 
 

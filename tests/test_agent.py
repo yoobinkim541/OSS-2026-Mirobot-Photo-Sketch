@@ -905,5 +905,159 @@ class CliEventParsingTest(unittest.TestCase):
         self.assertEqual(seen["stdin"], "다음")   # 이어갈 때는 시스템 지시를 다시 붙이지 않음
 
 
+class DrawingLockTest(SessionTestBase):
+    """그리는 중 잠금은 진행 중인 계산의 커밋과, 선검사를 통과한 뒤의 변경도 막아야 한다."""
+
+    def test_lock_during_run_discards_result_and_refuses_param_updates(self):
+        s = self.new_session()
+        before = s.result
+        started = threading.Event()
+        release = threading.Event()
+        real = s.pipeline.run
+
+        def blocked(*a, **k):
+            started.set()
+            self.assertTrue(release.wait(5))
+            return real(*a, **k)
+
+        s.pipeline.run = blocked
+        s.update_params({"epsilon_px": round(s.params["epsilon_px"] + 0.4, 4)})
+        holder = {}
+
+        def worker():
+            try:
+                holder["result"] = s.run()
+            except SessionError as e:
+                holder["error"] = e
+
+        t = threading.Thread(target=worker)
+        t.start()
+        self.assertTrue(started.wait(5), "계산이 잠금을 기다리지 않음")
+        s.set_drawing_lock(True)
+        release.set()
+        t.join(10)
+        self.assertFalse(t.is_alive())
+        self.assertIs(s.result, before)
+        kept = s.params["box_mm"]
+        with self.assertRaises(SessionError):
+            s.update_params({"box_mm": 80})
+        self.assertEqual(s.params["box_mm"], kept)
+
+    def test_run_commit_refuses_while_drawing_even_if_generation_matches(self):
+        s = self.new_session()
+        before = s.result
+        s.drawing_lock = True
+        with self.assertRaises(SessionError):
+            s.run()
+        self.assertIs(s.result, before)
+
+    def test_edits_refused_while_drawing(self):
+        s = self.new_session()
+        sid = next(i for i, e in s.table.items() if e["kind"] == "stroke")
+        s.drawing_lock = True
+        with self.assertRaises(SessionError):
+            s.propose_edits([{"op": "delete", "ids": [sid]}])
+        self.assertEqual(s.proposals, {})
+        s.drawing_lock = False
+        s.propose_edits([{"op": "delete", "ids": [sid]}])
+        s.drawing_lock = True
+        with self.assertRaises(SessionError):
+            s.apply_proposals()
+        self.assertEqual(s.table[sid]["kind"], "stroke")
+
+    def test_state_hides_the_absolute_image_path(self):
+        s = self.new_session()
+        shown = s.state()["image"]
+        self.assertEqual(shown, Path(s.image_path).name)
+        self.assertNotEqual(shown, s.image_path)
+        self.assertNotIn("Users", shown)
+
+
+class BoolAndRollbackTest(unittest.TestCase):
+    def test_bool_accepts_only_real_words_and_rejects_nan(self):
+        rembg = stages.PARAM_SPECS["rembg"]
+        self.assertIs(rembg.clamp(False), False)
+        self.assertIs(rembg.clamp(True), True)
+        self.assertIs(rembg.clamp("false"), False)
+        self.assertIs(rembg.clamp("NO"), False)
+        self.assertIs(rembg.clamp("Yes"), True)
+        self.assertIs(rembg.clamp(0), False)
+        self.assertIs(rembg.clamp("1"), True)
+        with self.assertRaises(SessionError):
+            rembg.clamp("nope")
+        tone = stages.PARAM_SPECS["tone_bias"]
+        with self.assertRaises(SessionError) as cm:
+            tone.clamp(float("nan"))
+        self.assertRegex(str(cm.exception), "[가-힣]")
+        with self.assertRaises(SessionError):
+            tone.clamp(float("inf"))
+
+    def test_failed_set_params_restores_previous_values_and_does_not_notify(self):
+        s = SketchSession(golden.default_cfg())
+        before_params = dict(s.params)
+        before_type, before_detail = s.image_type, s.detail
+        notified = []
+        tb = AgentToolbox(s, on_change=notified.append)
+        parts, err = tb.call("set_params", {"image_type": "photo", "detail": "low", "box_mm": 40, "rembg": "false"})
+        self.assertTrue(err, parts)
+        self.assertEqual(s.params, before_params)
+        self.assertEqual((s.image_type, s.detail), (before_type, before_detail))
+        self.assertEqual(notified, [])
+
+
+class ToolSchemaTest(unittest.TestCase):
+    def test_set_params_schema_follows_the_session_region(self):
+        from mirobot_sketch.agent.tools import tools_for
+        cfg = golden.default_cfg()
+        cfg["limits_pending_verification"] = {"x_max_mm": 200, "y_min_mm": -80,
+                                              "roof_mm": [[0, 50], [200, 40]]}
+        s = SketchSession(cfg)
+        props = next(t for t in tools_for(s) if t["name"] == "set_params")["parameters"]["properties"]
+        self.assertEqual(props["box_mm"]["maximum"], s.param_specs()["box_mm"].hi)
+        self.assertEqual(props["box_mm"]["maximum"], 400)
+
+    def test_bridge_tools_carry_the_session_box_limit_to_claude_and_codex(self):
+        cfg = golden.default_cfg()
+        cfg["limits_pending_verification"] = {"x_max_mm": 200, "y_min_mm": -80,
+                                              "roof_mm": [[0, 50], [200, 40]]}
+        br = BridgeServer(AgentToolbox(SketchSession(cfg))).start()
+        try:
+            tools = BridgeClient(br.url, br.token).tools()             # MCP 서버가 이 목록을 그대로 내보냄
+        finally:
+            br.stop()
+        props = next(t for t in tools if t["name"] == "set_params")["parameters"]["properties"]
+        self.assertEqual(props["box_mm"]["maximum"], 400)
+
+    def test_propose_edits_schema_lists_op_fields(self):
+        item = next(t for t in TOOLS if t["name"] == "propose_edits")["parameters"]["properties"]["ops"]["items"]
+        for key in ("ids", "region_mm", "points_mm", "id", "to_mm", "mode"):
+            self.assertIn(key, item["properties"], key)
+
+    def test_openrouter_sends_the_session_box_limit(self):
+        cfg = golden.default_cfg()
+        cfg["limits_pending_verification"] = {"x_max_mm": 200, "y_min_mm": -80,
+                                              "roof_mm": [[0, 50], [200, 40]]}
+        s = SketchSession(cfg)
+        fake = FakeOpenRouter()
+        try:
+            with mock.patch.object(bk, "OPENROUTER_URL", fake.url):
+                bk.OpenRouterBackend(AgentToolbox(s), lambda: "sk-test", "test/model").send("안녕", lambda e: None)
+        finally:
+            fake.httpd.shutdown()
+            fake.httpd.server_close()
+        tools = fake.requests[0]["body"]["tools"]
+        props = next(t for t in tools if t["function"]["name"] == "set_params")["function"]["parameters"]["properties"]
+        self.assertEqual(props["box_mm"]["maximum"], 400)
+
+
+class TomlStringTest(unittest.TestCase):
+    def test_basic_string_keeps_apostrophe_and_backslash(self):
+        import tomllib
+        raw = r"C:\Users\O'Brien\AppData\python.exe"
+        self.assertEqual(tomllib.loads("cmd = " + bk._toml_str(raw))["cmd"], raw)
+        quoted = 'C:\\say "hi"\\tool.exe'
+        self.assertEqual(tomllib.loads("p = " + bk._toml_str(quoted))["p"], quoted)
+
+
 if __name__ == "__main__":
     unittest.main()

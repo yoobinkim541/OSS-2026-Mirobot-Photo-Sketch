@@ -63,7 +63,7 @@ class AgentPanel(ctk.CTkFrame):
                               ("＋ 새 대화", self.new_chat, "새 대화")):
             ctk.CTkButton(head, text=txt, command=cmd, width=34 if len(txt) < 3 else 80, height=28,
                           fg_color="transparent", hover_color=BUBBLE, text_color=TEXT,
-                          font=self.font(13)).pack(side="right", padx=2)
+                          font=self.font(14)).pack(side="right", padx=2)
 
         self.chat = ctk.CTkScrollableFrame(self, fg_color="transparent")
         self.chat.grid(row=1, column=0, sticky="nsew", padx=6, pady=4)
@@ -73,7 +73,7 @@ class AgentPanel(ctk.CTkFrame):
         comp = ctk.CTkFrame(self, fg_color=CARD, corner_radius=18, border_width=1, border_color=BORDER)
         comp.grid(row=2, column=0, sticky="ew", padx=12, pady=(4, 12))
         comp.grid_columnconfigure(0, weight=1)
-        self.input = ctk.CTkTextbox(comp, height=64, fg_color="transparent", font=self.font(13), wrap="word",
+        self.input = ctk.CTkTextbox(comp, height=64, fg_color="transparent", font=self.font(14), wrap="word",
                                     border_width=0, activate_scrollbars=False)
         self.input.grid(row=0, column=0, columnspan=4, sticky="ew", padx=10, pady=(8, 0))
         self._placeholder_on()
@@ -87,12 +87,12 @@ class AgentPanel(ctk.CTkFrame):
                                   hover_color=BUBBLE, text_color=TEXT, font=self.font(16), command=self._quick_menu)
         self.plus.pack(side="left")
         self.backend_menu = ctk.CTkOptionMenu(row, values=BACKENDS, command=self._on_backend, width=120, height=28,
-                                              font=self.font(12), dropdown_font=self.font(12),
+                                              font=self.font(13), dropdown_font=self.font(13),
                                               fg_color=BUBBLE, button_color=BUBBLE, button_hover_color=BORDER,
                                               text_color=TEXT)
         self.backend_menu.set(self.backend_name)
         self.backend_menu.pack(side="left", padx=(6, 0))
-        self.model_label = ctk.CTkLabel(row, text="", font=self.font(11), text_color=MUTED)
+        self.model_label = ctk.CTkLabel(row, text="", font=self.font(12), text_color=MUTED)
         self.model_label.pack(side="left", padx=6)
         self.send_btn = ctk.CTkButton(row, text="↑", width=34, height=34, corner_radius=17, fg_color=ACCENT,
                                       font=self.font(16, "bold"), command=self._send_or_stop)
@@ -112,9 +112,9 @@ class AgentPanel(ctk.CTkFrame):
         ctk.CTkLabel(box, text="무엇을 도와드릴까요?", font=self.font(16, "bold")).pack(pady=(10, 4))
         ctk.CTkLabel(box, text="대화로 처리 설정을 바꾸고 획을 정리하고, 로봇으로 그릴 준비가 됐는지 확인합니다.\n"
                                "예: “배경 잡음을 지워줘”, “10분 안에 끝나게 해줘”, “로봇으로 그려도 되는지 봐줘”",
-                     font=self.font(12), text_color=MUTED, justify="center", wraplength=300).pack()
+                     font=self.font(13), text_color=MUTED, justify="center", wraplength=300).pack()
         ctk.CTkLabel(box, text="로봇 연결·시작은 사용자가 '로봇으로 그리기' 창에서 직접 합니다.",
-                     font=self.font(11), text_color=MUTED, wraplength=300).pack(pady=(12, 0))
+                     font=self.font(12), text_color=MUTED, wraplength=300).pack(pady=(12, 0))
         self._empty = True
 
     def _row(self):
@@ -127,13 +127,13 @@ class AgentPanel(ctk.CTkFrame):
         r = self._row()
         wrap = ctk.CTkFrame(self.chat, fg_color="transparent")
         wrap.grid(row=r, column=0, sticky="e", padx=(60, 8), pady=6)
-        ctk.CTkLabel(wrap, text=text, font=self.font(13), fg_color=BUBBLE, corner_radius=14, text_color=TEXT,
+        ctk.CTkLabel(wrap, text=text, font=self.font(14), fg_color=BUBBLE, corner_radius=14, text_color=TEXT,
                      wraplength=280, justify="left", padx=12, pady=8).pack(anchor="e")
         self._scroll_end()
 
     def add_assistant(self, text):
         r = self._row()
-        ctk.CTkLabel(self.chat, text=text.strip(), font=self.font(13), text_color=TEXT, wraplength=310,
+        ctk.CTkLabel(self.chat, text=text.strip(), font=self.font(14), text_color=TEXT, wraplength=310,
                      justify="left", anchor="w").grid(row=r, column=0, sticky="w", padx=10, pady=6)
         self._scroll_end()
 
@@ -144,7 +144,7 @@ class AgentPanel(ctk.CTkFrame):
             brief = brief[:57] + "…"
         if name == "simulate":
             brief = (brief + "  " if brief else "") + "(그림에 따라 10~30초)"
-        chip = ctk.CTkLabel(self.chat, text=f"⚙ {name}  {brief}  …", font=self.font(11), text_color=MUTED,
+        chip = ctk.CTkLabel(self.chat, text=f"⚙ {name}  {brief}  …", font=self.font(12), text_color=MUTED,
                             fg_color=BUBBLE, corner_radius=10, padx=10, pady=3, anchor="w")
         chip.grid(row=r, column=0, sticky="w", padx=10, pady=2)
         self._current_tools.append((chip, name, brief))
@@ -164,10 +164,10 @@ class AgentPanel(ctk.CTkFrame):
         r = self._row()
         card = ctk.CTkFrame(self.chat, fg_color=ERR_BG, corner_radius=14)
         card.grid(row=r, column=0, sticky="ew", padx=8, pady=6)
-        ctk.CTkLabel(card, text="⚠  " + text, font=self.font(12), text_color=ERR_FG, wraplength=290,
+        ctk.CTkLabel(card, text="⚠  " + text, font=self.font(13), text_color=ERR_FG, wraplength=290,
                      justify="left", anchor="w").pack(fill="x", padx=12, pady=(10, 4 if action else 10))
         if action == "login":
-            ctk.CTkButton(card, text="로그인 창 열기", font=self.font(12, "bold"), height=30, corner_radius=15,
+            ctk.CTkButton(card, text="로그인 창 열기", font=self.font(13, "bold"), height=30, corner_radius=15,
                           fg_color=ACCENT, command=self.open_login).pack(anchor="w", padx=12, pady=(0, 10))
         self._scroll_end()
 
@@ -189,7 +189,7 @@ class AgentPanel(ctk.CTkFrame):
     def _show_thinking(self):
         """응답이 오기 전에 '생각하는 중… N초'를 보여 멈춘 것처럼 보이지 않게 함."""
         r = self._row()
-        self._thinking = ctk.CTkLabel(self.chat, text="생각하는 중… 0초", font=self.font(11), text_color=MUTED,
+        self._thinking = ctk.CTkLabel(self.chat, text="생각하는 중… 0초", font=self.font(12), text_color=MUTED,
                                       anchor="w")
         self._thinking.grid(row=r, column=0, sticky="w", padx=12, pady=(2, 6))
         self._thinking_since = time.monotonic()
@@ -225,7 +225,7 @@ class AgentPanel(ctk.CTkFrame):
 
     def add_info(self, text):
         r = self._row()
-        ctk.CTkLabel(self.chat, text=text, font=self.font(10), text_color=MUTED).grid(row=r, column=0, sticky="w",
+        ctk.CTkLabel(self.chat, text=text, font=self.font(12), text_color=MUTED).grid(row=r, column=0, sticky="w",
                                                                                        padx=12, pady=(0, 6))
         self._scroll_end()
 
@@ -378,18 +378,18 @@ class AgentPanel(ctk.CTkFrame):
         win.after(100, win.grab_set)
         pad = {"padx": 16, "anchor": "w"}
 
-        ctk.CTkLabel(win, text="OpenRouter", font=self.font(14, "bold")).pack(pady=(14, 2), **pad)
+        ctk.CTkLabel(win, text="OpenRouter", font=self.font(16, "bold")).pack(pady=(14, 2), **pad)
         ctk.CTkLabel(win, text="API 키 (Windows 자격 증명 관리자에 저장, 화면·파일에 남기지 않음)",
-                     font=self.font(11), text_color=MUTED).pack(**pad)
-        key_entry = ctk.CTkEntry(win, show="•", width=420, font=self.font(12),
+                     font=self.font(12), text_color=MUTED).pack(**pad)
+        key_entry = ctk.CTkEntry(win, show="•", width=420, font=self.font(13),
                                  placeholder_text="sk-or-… (비워 두면 기존 키 유지)")
         key_entry.pack(padx=16, pady=(2, 6))
         has_key = bool(bk.get_openrouter_key())
-        ctk.CTkLabel(win, text="저장된 키: " + ("있음" if has_key else "없음"), font=self.font(11),
+        ctk.CTkLabel(win, text="저장된 키: " + ("있음" if has_key else "없음"), font=self.font(12),
                      text_color=MUTED).pack(**pad)
-        ctk.CTkLabel(win, text="모델 (도구 호출 + 이미지 입력 지원 모델만 표시)", font=self.font(12)).pack(pady=(8, 0), **pad)
+        ctk.CTkLabel(win, text="모델 (도구 호출 + 이미지 입력 지원 모델만 표시)", font=self.font(13)).pack(pady=(8, 0), **pad)
         models = [self.settings.get("openrouter_model", bk.DEFAULT_OPENROUTER_MODEL)]
-        model_box = ctk.CTkComboBox(win, values=models, width=420, font=self.font(12))
+        model_box = ctk.CTkComboBox(win, values=models, width=420, font=self.font(13))
         model_box.set(models[0])
         model_box.pack(padx=16, pady=2)
 
@@ -402,11 +402,11 @@ class AgentPanel(ctk.CTkFrame):
                 self.app.ui(lambda: model_box.configure(values=models + [msg]))
         threading.Thread(target=load_models, daemon=True).start()
 
-        ctk.CTkLabel(win, text="로컬 CLI 모델 (비워 두면 CLI 기본값)", font=self.font(14, "bold")).pack(pady=(16, 2), **pad)
-        cl = ctk.CTkEntry(win, width=420, font=self.font(12), placeholder_text="Claude Code 예: opus, sonnet")
+        ctk.CTkLabel(win, text="로컬 CLI 모델 (비워 두면 CLI 기본값)", font=self.font(16, "bold")).pack(pady=(16, 2), **pad)
+        cl = ctk.CTkEntry(win, width=420, font=self.font(13), placeholder_text="Claude Code 예: opus, sonnet")
         cl.insert(0, self.settings.get("claude_model", ""))
         cl.pack(padx=16, pady=2)
-        cx = ctk.CTkEntry(win, width=420, font=self.font(12), placeholder_text="Codex 예: gpt-5.6-luna")
+        cx = ctk.CTkEntry(win, width=420, font=self.font(13), placeholder_text="Codex 예: gpt-5.6-luna")
         cx.insert(0, self.settings.get("codex_model", ""))
         cx.pack(padx=16, pady=2)
 
@@ -430,6 +430,6 @@ class AgentPanel(ctk.CTkFrame):
 
         row = ctk.CTkFrame(win, fg_color="transparent")
         row.pack(fill="x", padx=16, pady=16)
-        ctk.CTkButton(row, text="저장", command=save, fg_color=ACCENT, font=self.font(13)).pack(side="right")
+        ctk.CTkButton(row, text="저장", command=save, fg_color=ACCENT, font=self.font(14)).pack(side="right")
         ctk.CTkButton(row, text="키 삭제", command=delete_key, fg_color="transparent", border_width=1,
-                      text_color=TEXT, font=self.font(12)).pack(side="left")
+                      text_color=TEXT, font=self.font(13)).pack(side="left")
