@@ -83,8 +83,12 @@ def missing_rate(coverage, strokes):
 def next_backoff(current, ticks, coverage, baseline_missing=None, kinds=("start", "end")):
     """current: {"start": mm, "end": mm}. ticks: {획: (시작 mm|None, 끝 mm|None)} (지금 값으로 그린 획만).
     coverage: {획: 선이 보인 비율 또는 None}. baseline_missing: 바꾸기 전 값으로 그린 획의 안 보인 비율 (없으면 None).
-    kinds: 세로 줄로 더 물릴 쪽. 비스듬히 값(next_edge_rise·next_edge_land)이 끝점·시작점 줄을 맡을 때는 ()로 넘겨, 같은 줄로
-    두 값이 한꺼번에 움직이지 않게 한다. 반환 (새 값 dict, 이유 문자열) — 바꿀 것이 없으면 (current, "")."""
+    kinds: 세로 줄로 더 물릴 쪽. 비스듬히 값(next_edge_rise·next_edge_land)이 끝점·시작점 줄을 맡을 때는 ()로 넘긴다. 그러면 물림은
+    자동으로 움직이지 않는다: 같은 줄로 두 값이 한꺼번에 움직이지 않게 하고, "선이 안 보이면 덜 물림"도 쉰다. 2026-11-19 접촉 누름을
+    1 mm 줄인 뒤로는 선이 옅어 '안 보임'이 실제보다 많이 잡혀(사용자 확인: 빠진 선 없음), 교수님 사진(109획)에서 앞 40획의 54%로 시작점
+    물림이 0.4 → 0.2로 내려가 저장됐다. 반환 (새 값 dict, 이유 문자열) — 바꿀 것이 없으면 (current, "")."""
+    if not kinds:
+        return current, ""
     measured = [i for i in ticks if coverage.get(i) is not None]
     if len(measured) >= MIN_ENDPOINTS and (current["start"] > 0 or current["end"] > 0):
         missing = missing_rate(coverage, measured)

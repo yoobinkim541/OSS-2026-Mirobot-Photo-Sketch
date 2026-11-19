@@ -380,6 +380,14 @@ class PenCorrectionTest(unittest.TestCase):
         self.assertEqual(new, {"start": 0.2, "end": 0.2})
         self.assertIn("덜 물림", why)
 
+    def test_faint_lines_do_not_lower_the_backoff_while_slants_handle_the_ticks(self):
+        # 11-19 교수님 사진: 1 mm 덜 누른 옅은 선이 앞 40획의 54% '안 보임'으로 잡혀 시작점 물림이 0.4 → 0.2로 내려감
+        cur = {"start": 0.4, "end": 0.0}
+        ticks = {i: (0.0, 0.0) for i in range(40)}
+        cov = {i: (0.1 if i < 22 else 0.9) for i in range(40)}
+        self.assertEqual(self.pc.next_backoff(cur, ticks, cov, kinds=()), (cur, ""))
+        self.assertEqual(self.pc.next_backoff(cur, ticks, cov)[0], {"start": 0.2, "end": 0.0})   # 비스듬히를 안 쓰면 예전대로
+
     def test_missing_lines_undo_the_backoff_only_when_worse_than_before(self):
         ticks = {i: (3.0, 3.0) for i in range(20)}
         cov = {i: (0.1 if i < 8 else 0.9) for i in range(20)}             # 이번 구간 40% 안 보임
