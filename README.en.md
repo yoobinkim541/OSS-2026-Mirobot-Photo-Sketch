@@ -390,7 +390,7 @@ python -m unittest discover -s tests -v
 | `.github/workflows/` | CI (tests), Release (builds the .exe and image on tag push) |
 | `assets/` | App icon, README screenshots and the sample photo |
 | `trajectories/` | Shape templates and test paths |
-| `docs/` | Design doc ([ARCHITECTURE](docs/ARCHITECTURE.en.md)), OpenCV study notes |
+| `docs/` | Design doc ([ARCHITECTURE](docs/ARCHITECTURE.en.md)), development reports (`docs/reports/`), OpenCV study notes |
 | `LOG/` | Dated work logs and run records (Korean) |
 | `tests/` | Regression tests |
 

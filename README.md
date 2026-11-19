@@ -387,7 +387,7 @@ python -m unittest discover -s tests -v
 | `.github/workflows/` | CI(테스트), Release(태그 push 시 .exe·이미지 빌드) |
 | `assets/` | 앱 아이콘, README 스크린샷과 예시 사진 |
 | `trajectories/` | 도형 템플릿과 테스트 경로 |
-| `docs/` | 설계 문서([ARCHITECTURE](docs/ARCHITECTURE.md)), OpenCV 학습 자료 |
+| `docs/` | 설계 문서([ARCHITECTURE](docs/ARCHITECTURE.md)), 개발 보고서(`docs/reports/`), OpenCV 학습 자료 |
 | `LOG/` | 날짜별 작업 기록, 실행 기록 |
 | `tests/` | 회귀 테스트 |
 
