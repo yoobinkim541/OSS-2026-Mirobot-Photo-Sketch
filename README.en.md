@@ -29,6 +29,7 @@ photo ─▶ line-extraction pipeline ─▶ strokes (paper mm) ─▶ checks (a
 - [Agent panel](#agent-panel-editing-by-chat)
 - [3D simulation](#3d-simulation-check-without-a-robot)
 - [Tech stack and design docs](#tech-stack-and-design-docs)
+- [Development report](#development-report)
 - [Delivery (CI/CD)](#delivery-cicd)
 - [Upstream contributions](#upstream-contributions)
 - [Tests · folders · license](#tests)
@@ -325,6 +326,24 @@ With the RViz 3D environment installed, `Advanced` → [View in RViz 3D] in the 
 | Packaging and delivery | [PyInstaller](https://pyinstaller.org/), [Inno Setup](https://jrsoftware.org/isinfo.php), GitHub Actions |
 
 What was chosen for each stage and why, the OpenCV functions used, the Windows ↔ WSL2 bridge design and the packaging are in **[docs/ARCHITECTURE.en.md](docs/ARCHITECTURE.en.md)**.
+
+## Development report
+
+A paper-style report (in Korean) of the implementation and real-robot tests from September 24 to November 19, 2026, including what failed and what was misjudged and later corrected, with numbers and photos.
+
+| Version | Length | Files |
+|---|---|---|
+| Brief | 15 pages, 15 figures, 4 tables | [PDF](docs/reports/Mirobot_Sketch_report_brief.pdf) · [DOCX](docs/reports/Mirobot_Sketch_report_brief.docx) |
+| Full | 67 pages, 31 figures, 20 tables, with contents | [PDF](docs/reports/Mirobot_Sketch_report_full.pdf) · [DOCX](docs/reports/Mirobot_Sketch_report_full.docx) |
+
+Main results:
+
+- **Drawings 1.37 times too wide:** cross, free-air and one-joint-at-a-time tests showed that the J6 motor turns opposite to the firmware model. Fixing the controller settings (`$3`, `$23`) brought the horizontal spacing back from 123.2 mm to 89.0 mm for a planned 90 mm.
+- **Paper tilt and height-dependent scale:** a depth ladder fitted the paper plane (about 6 mm between lower left and upper right), and a quadratic pre-warp fitted to 20 measured points brought the row-spacing error from 9 mm to within 1.2 mm.
+- **Vertical marks at stroke ends:** four test sheets (slanted lift, touch-down from above, touch-down speed, press depth) showed that speed does not matter while press depth and lift direction do. Lifting at a slant and pressing 1 mm less clearly reduced the marks (start-point marks 23% → 12% by camera).
+- **Conditions for automatic correction:** decisions made from 10–24 endpoints flipped between drawings, so changes now need at least 30 endpoints, a sign test, and lock at the midpoint when they reverse.
+
+The report contains portrait photos and the drawings made from them, used to compare the real results.
 
 ## Delivery (CI/CD)
 
