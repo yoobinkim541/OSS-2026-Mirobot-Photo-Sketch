@@ -95,8 +95,8 @@
    }
   },
   "contact_pose_source": "user_reported_controller_status_2026-11-06",
-  "requested_pen_down_extra_mm": -0.4,
-  "requested_pen_down_extra_status": "2026-11-13 평면 다시 맞춤: 종이 중심의 처음 닿는 깊이 −2.90 mm에 여유 2.5 mm를 더해 −0.4. 평면 보정(plane_compensation)과 함께 써야 함. 이력: −5.5(11-12, 한 칸도 안 그려짐) → 0 → −1.1(11-13 첫 평면, 아래 왼쪽이 옅음) → −0.4.",
+  "requested_pen_down_extra_mm": -1.4,
+  "requested_pen_down_extra_status": "2026-11-19 깊이 시험(--knob depth, 0/−0.5/−1/−1.5 mm 덜 누름): 덜 누를수록 시작점 다리가 짧고(카메라·휴대폰), −1.0부터 짧아졌으며 −1.5까지 선은 모두 보였지만 −1.0·−1.5에서 가로선이 톱니처럼 떨림. 사용자 결정으로 1 mm 덜 눌러 −1.4. 같은 날 424획 그림(15:19)에서 사용자 확인: 세로 줄이 확실히 줄었고, 선은 옅어졌지만 빠진 곳은 없음(카메라 선 확인은 옅은 선을 '안 보임'으로 더 셈). 평면 보정(plane_compensation)과 함께 써야 함. 이력: −5.5(11-12, 한 칸도 안 그려짐) → 0 → −1.1(11-13 첫 평면, 아래 왼쪽이 옅음) → −0.4(11-13 평면 다시 맞춤: 종이 중심의 처음 닿는 깊이 −2.90 mm에 여유 2.5 mm) → −1.4.",
   "previous_contact_status_sample_2026-10-29": {
    "joints_deg": [
     0,
@@ -166,14 +166,20 @@
   "retract_x_sign": -1,
   "down_extra_mm": 0.0,
   "line_width_mm": 0.5,
-  "start_backoff_mm": 0.0,
+  "start_backoff_mm": 0.4,
   "end_backoff_mm": 0.0,
-  "j1_direction_offset_deg": 0.0
+  "j1_direction_offset_deg": 0.0,
+  "edge_rise_mm": 1.75,
+  "edge_rise_low_mm": 0.0,
+  "edge_land_mm": -0.75,
+  "edge_rise_depth_mm": 1.5
  },
  "_pen_clearance_note": "2026-09-29 up_clearance_mm 2.5 -> 10.0: 획 사이 펜올림이 너무 살짝이라 확실히 떼도록 늘림. slow_zone_mm(2.5)보다 높으면 종이에 닿기 직전 slow_zone_mm만 approach 속도로 내리고 그 위는 travel 속도로 이동·올림(획마다 명령 1개 추가). 실물 선질 확인 필요.",
  "_pen_width_note": "line_width_mm: 펜 선 굵기 추정값(GUI 종이 미리보기용). 실제 펜으로 그은 선을 재서 고칠 것.",
  "_pen_note": "하트 테스트 기록: 접촉 X=198.668, 접근 전 X=196.678 -> 벽에서 떨어지는 방향은 -X. down_extra_mm는 접촉 기준보다 더 누르는 양(+이면 벽 쪽, -이면 덜 누름). 저장된 대기·접촉 자세로 그릴 때는 requested_start_pose.requested_pen_down_extra_mm가 이 값을 덮어쓴다(값과 이력은 그쪽 status 참고, plane_compensation과 함께 씀).",
  "_pen_backoff_note": "start/end_backoff_mm: 획 첫 점(펜 내림)과 마지막 점(떼기 직전)만 종이에서 뒤로 물리는 양(0~1 mm). 세게 누르면 끝점에 세로 줄이 생겨, 그리기 창의 카메라 확인(끝점 세로 줄 자동 보정)이 0.2 mm씩 고쳐 저장함.",
+ "_pen_edge_rise_note": "edge_rise_mm / edge_land_mm / edge_rise_depth_mm: 종이에서 edge_rise_depth_mm 떨어진 중간점을 뗄 때는 종이 위로 edge_rise_mm(0~3 mm), 내릴 때는 edge_land_mm(+ 종이 아래, − 위, ±3 mm) 옮겨 비스듬히 떼고 댄다(둘 다 0이면 끔). 2026-11-16 시험 종이(4줄 × 12선, 휴대폰 사진, 이때는 내릴 때·뗄 때 같은 값): 끝점 줄은 0 mm 아래 약 2 mm, 1 mm 거의 없음, 2 mm 위 약 0.5 mm, 3 mm 위 약 1.5 mm라 뗄 때 1.5. 시작점 아래 줄은 0 mm에서 약 2.3 mm였고 아래에서 올라오며 대면 1 mm마다 약 1 mm씩 길어졌다. 2026-11-18 시험 종이(--knob land, 카메라 사진 6장 평균, 시험 종이로 등록을 다시 맞춘 뒤, 휴대폰 확인 전): 시작점 아래/위 줄 중앙값이 종이 왼쪽(x<0)에서 0/−1/−2/−3 mm일 때 4.2/0.1, 3.5/0.2, 1.3/0.6, 1.2/1.9 mm로 −3에서 위로 뒤집혀 내릴 때 −2. 오른쪽(x≥0)은 5.4, 3.9, 4.0, 3.0 mm로 덜 줄고 끝점 아래 줄도 약 3 mm(왼쪽 1~2 mm)라 위치에 따른 다른 원인이 있다(추정: 오른쪽을 더 세게 누름). 카메라로 잰 길이는 검증 안 된 값이라 경향만 믿는다.",
+ "_pen_edge_rise_low_note": "edge_rise_low_mm: 종이 아래쪽 끝점에서 뗄 때 더하는 양. 종이 y −20 mm부터 더하기 시작해 −60 mm 아래에서 다 더한다(합 최대 3 mm). 시험 종이에서 끝점 줄이 줄 높이(y +40 … −55)에 따라 뚜렷하게 다르지 않아 0. 선 확인 자동 보정이 아래쪽과 위쪽 끝점을 비교해 0.5 mm씩 고친다.",
  "_pen_j1_note": "j1_direction_offset_deg: 같은 J1 목표에서 J1이 늘어나며 도착할 때와 줄어들며 도착할 때 실제 각의 차이(늘어나며 - 줄어들며, ±3° 안). 실행기가 목표점마다 도착 방향의 반대쪽으로 절반씩 돌려 보내고, 방향이 바뀌는 점에서는 같은 점으로 한 번 더 보내 유격을 메움. 0이면 끔. 2026-11-12: 공중 관절 이동(대기 자세 사진)에서는 +0.66°. 펜을 댄 ㄴ자 시험(보정 0/-0.4/-0.8°, 각 3쌍)에서는 차이 평균이 -0.26/-5.73/+0.94 mm, 표준편차 1.4~3.2 mm로 획마다 흩어짐이 유격보다 커서 값을 정할 근거가 없음. 그래서 0.",
  "pen_tip_offset_mm": {
   "x": 100.0,
@@ -250,13 +256,16 @@
  },
  "_limits_pending_note": "넓은 범위(실물 미확인): 도달 지도(관절 여유 7° 이상, 2.5mm 격자)에서 가로 위치별 위쪽 한계에 2.5mm 여유를 두고, 종이 안전 여백 20mm 안(x ≤ 128.5, y ≥ -85)으로 자른 지붕 모양 영역. roof_mm = [|x|, 위쪽 y], 점 사이는 직선. 실행기가 꼭짓점만 검사하므로 지붕은 볼록(기울기가 점점 가파름)하게 잡아 두 꼭짓점 사이 선분도 영역 안에 있게 함. 좌우·아래로는 여유가 크고 위쪽은 B(J5) 한계. 가로 그림 약 250x127mm, 정사각형 약 140mm. 실물 확인 절차: F 시험 -> 영역 테두리 경로를 --air --pending-limits로 -> 펜 대고 --pending-limits로 -> 고르면 limits를 넓히고 status 갱신.",
  "timing": {
-  "assumed_command_latency_s": 0.1,
-  "status": "가정값. 명령마다 ok 응답을 기다리는 시간. LOG/runs의 실제 elapsed_s와 estimated_time을 비교해 보정할 것"
+  "assumed_command_latency_s": 0.0,
+  "status": "2026-11-17: 0.1 → 0. 그리기 명령은 ok만 받고 이어 보내 이동과 겹치므로 명령마다 지연을 더하면 너무 길게 셌다. 10-29 이후 실물 완료 기록 17개에서 실제/이동 이론값 0.77~0.92(실제/지연 포함 예상 0.66~0.82). 지연을 빼도 예상이 실제보다 8~30% 길다."
  },
  "max_start_offset_mm": 5.0,
  "ack_timeout_s": 15.0,
  "idle_timeout_s": 180.0,
- "controller_settings_expected": {"$3": 123, "$23": 60},
+ "controller_settings_expected": {
+  "$3": 123,
+  "$23": 60
+ },
  "_controller_settings_note": "방향 마스크. $3=123, $23=60이 아니면 팔이 반대로 움직이는데 보고 각도는 맞아 보인다. 펌웨어 기본 127/56은 거부하고 움직이지 않음.",
  "calibration": {
   "status": "needs_recalibration",

@@ -57,6 +57,15 @@ class PathTest(unittest.TestCase):
         result = ms.simulate(ms.plan_targets(strokes, CFG))
         self.assertEqual(ms.verdict(result), "PASS")
 
+    def test_slanted_touch_down_and_lift_pass_the_simulation(self):
+        import copy
+        cfg = copy.deepcopy(CFG)
+        cfg["pen"]["edge_rise_mm"], cfg["pen"]["edge_rise_depth_mm"] = 2.0, 1.5
+        _, strokes = ms.de.load_strokes(ROOT / "trajectories" / "orientation-test-F.json")
+        targets = ms.plan_targets(strokes, cfg)
+        self.assertTrue(any(label.endswith(" land") for _, label, _, _ in targets))
+        self.assertEqual(ms.verdict(ms.simulate(targets)), "PASS")
+
     def test_high_on_paper_hits_b_axis_limit(self):
         # 종이 중심에서 80mm 위: B(J5)가 30도 한계를 넘음 (실물 하트 시도의 Soft limit:B와 같은 축)
         strokes = [[(0.0, 60.0), (0.0, 80.0)]]

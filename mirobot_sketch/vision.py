@@ -157,6 +157,18 @@ def crop_registration(registration, frame_size, box):
                         (x1 - x0, y1 - y0))
 
 
+def corrected_registration(registration, frame_size, affine_mm):
+    """그린 선으로 잰 계획→실제 변환(affine_mm: 2×3, 종이 mm, 실제 = A·계획 + t)을 반영한 등록. 등록의 '종이 중심'은
+    호밍 직후 펜 끝(로봇 원점)이라고 보는데, 종이를 그 자리에 딱 맞춰 붙이지 않거나 카메라가 틀어지면 로봇이 그린 선이
+    등록과 어긋난다(2026-11-16: +7, −6 mm 이동; 11-18: +16, −12 mm 이동·1.06배·−2° 회전). 지금 등록의 원근은 그대로 두고
+    종이 mm에서의 아핀만 덧붙여, 계획 점 p를 지금 등록의 A·p + t 자리로 보낸다(선이 있는 가운데만으로 원근까지 맞추면
+    종이 귀퉁이로 갈수록 틀어지기 쉬움)."""
+    a = np.asarray(affine_mm, np.float64)
+    corners_mm = paper_corners_mm(registration.paper_mm) @ a[:, :2].T + a[:, 2]
+    corners = project(registration.matrix(frame_size), corners_mm)
+    return Registration.from_pixels(registration.camera, corners, frame_size, registration.paper_mm)
+
+
 def _load_all():
     try:
         data = json.loads((paths.user_dir() / SETTINGS_FILE).read_text(encoding="utf-8"))
@@ -180,6 +192,19 @@ def save(registration):
     data = _load_all()
     data[registration.camera] = registration.to_dict()
     (paths.user_dir() / SETTINGS_FILE).write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def backup(tag):
+    """지금 종이 위치 파일을 vision_registration_<시각>-backup_before_<tag>.json으로 복사(자동으로 덮어쓰기 전에, 되돌릴 수 있게).
+    파일이 없으면 None."""
+    import shutil
+    from datetime import datetime
+    src = paths.user_dir() / SETTINGS_FILE
+    if not src.exists():
+        return None
+    dst = src.with_name(f"{src.stem}_{datetime.now():%Y%m%d-%H%M%S}-backup_before_{tag}{src.suffix}")
+    shutil.copy2(src, dst)
+    return dst
 
 
 def forget(camera):
@@ -243,7 +268,7 @@ class Overlay:
 
 # 획마다 "종이에 선이 생겼나" 확인 (카메라 사진만 봄, 로봇은 움직이지 않음)
 LINE_PPM = 6.0             # 펴진 종이 해상도 (px/mm). 4K로 A4를 찍으면 약 7.5 px/mm
-LINE_MARGIN_MM = 12.0      # 그림 둘레로 더 펼 폭 (빈 종이에서 잡음 크기를 잼)
+LINE_MARGIN_MM = 24.0      # 그림 둘레로 더 펼 폭 (빈 종이에서 잡음 크기를 잼, 맞춤 이동 범위보다 크게)
 LINE_TOL_MM = 2.0          # 계획 경로에서 이만큼 안에 선이 있으면 그 점은 그려진 것으로 봄 (펜이 끌리며 생기는 어긋남 포함)
 LINE_SEEN = 0.5            # 경로의 이 비율 이상에서 선이 보이면 "보임"
 LINE_MIN_MM = 3.0          # 이보다 짧은 어두운 조각은 종이 얼룩으로 봄
@@ -253,7 +278,19 @@ TICK_CLEAR_MM = 1.2        # 계획한 경로(어느 획이든)에서 이만큼 
 TICK_REACH_MM = 6.0        # 끝점에서 위아래로 이만큼까지 봄
 TICK_GAP_MM = 0.5          # 줄이 이만큼 넘게 끊기면 거기서 끝
 TICK_MIN_MM = 1.8          # 끝점에서 세로로 이만큼 넘게 뻗은 선이 있으면 "세로 줄"
+TICK_VERTICAL_MIN = 0.7    # 위·아래를 가를 때: 끝 접선의 수직 방향이 종이 세로와 이만큼(코사인) 넘게 맞아야 함 (가로에 가까운 끝)
 TICK_COLOR = (0, 140, 255)          # 세로 줄이 생긴 끝점 표시 (주황)
+ALIGN_MAX_MM = 20.0        # 계획→실제 선 위치 맞춤으로 찾는 이동 범위 (LINE_MARGIN_MM보다 작게). 11-18: 카메라가 틀어져 +16, −12 mm
+ALIGN_ROT_DEG = 3.0        # 이동 다음에 찾는 회전 범위 (±, 0.5° 간격). 11-18: −2.0°
+ALIGN_SCALE = 0.08         # 이동 다음에 찾는 배율 범위 (1 ± 이만큼, 0.01 간격). 11-18: 1.058
+ALIGN_GAIN = 0.1           # 이만큼 넘게 선 겹침이 늘 때만 옮김
+ALIGN_AFFINE_GAIN = 0.03   # 회전·배율은 이동만 맞춘 것보다 겹침이 이만큼 넘게 늘 때만 씀 (획 ALIGN_SAVE_MIN_STROKES개 이상일 때만 찾음)
+ALIGN_MAX_POINTS = 20000   # 맞춤에 쓰는 경로 점 수 상한 (속도)
+ALIGN_SEARCH_POINTS = 5000  # 회전·배율을 훑을 때 쓰는 점 수 (속도, 마지막 점수는 전부로)
+ALIGN_MIN_SCORE = 0.3      # 맞춘 뒤에도 경로 점의 이 비율도 선과 안 겹치면 선 확인을 믿지 않음 (자동 보정 안 함)
+ALIGN_SAVE_SCORE = 0.6     # 끝난 뒤 이만큼 넘게 겹치게 맞았을 때만 그 변환으로 종이 위치(등록)를 자동으로 고침
+ALIGN_SAVE_MIN_STROKES = 30
+ALIGN_SAVE_MIN_MM = 0.5    # 그림 둘레에서 이보다 작게 움직이는 변환은 무시 (사진 잡음)
 
 
 class LineCheck:
@@ -273,11 +310,84 @@ class LineCheck:
         mm_to_flat = np.array([[LINE_PPM, 0, -x0 * LINE_PPM], [0, -LINE_PPM, y1 * LINE_PPM], [0, 0, 1]])
         self.frame_size = tuple(frame_size)
         self.warp = mm_to_flat @ np.linalg.inv(registration.matrix(self.frame_size))
-        self.paths = [self._densify(project(mm_to_flat, s)) for s in strokes]
+        self._mm_to_flat = mm_to_flat
+        self._paths0 = [self._densify(project(mm_to_flat, s)) for s in strokes]
+        self.paths = self._paths0
+        self.shift_mm = (0.0, 0.0)     # align()이 찾은 계획→실제 선 이동 (그림 가운데 기준, 종이 mm, x 오른쪽·y 위)
+        self.affine_mm = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])   # align()이 찾은 계획→실제 (종이 mm, 2×3)
+        self.rotation_deg, self.scale = 0.0, 1.0
         self._sum = None
         self.frames = 0
         self._maps = None
         self._near = None
+
+    def align(self, upto=None, max_mm=ALIGN_MAX_MM):
+        """획 0..upto-1(다 그린 획, 기본 전부)을 옮기고(±max_mm) 돌리고(±ALIGN_ROT_DEG) 키워(1±ALIGN_SCALE) 보며, 경로 점에서
+        선까지 거리 평균이 가장 작은 변환을 찾아 모든 획에 적용. 종이를 다시 붙였거나 카메라가 움직이면 등록과 실제 그림이
+        어긋난다(2026-11-16: +6.8, −5.8 mm; 11-18: +16, −12 mm·−2°·1.06배). 그대로 재면 거의 모든 획이 '안 보임'으로 나와
+        자동 보정이 거꾸로 움직이거나 아예 쉬었다. 이동을 먼저 찾고, 그 자리에서 회전·배율과 이동을 번갈아 다듬는다.
+        반환: 맞춘 뒤 비율(0~1). ALIGN_GAIN만큼 나아지지 않으면 옮기지 않는다 (선이 적을 때 잡음에 맞추지 않게)."""
+        dist, occ, _ = self._analyse()
+        h, w = dist.shape
+        pts = np.vstack(self._paths0[:upto] if upto else self._paths0).astype(np.float64)
+        if len(pts) > ALIGN_MAX_POINTS:
+            pts = pts[np.linspace(0, len(pts) - 1, ALIGN_MAX_POINTS).astype(int)]
+        few = pts[np.linspace(0, len(pts) - 1, min(len(pts), ALIGN_SEARCH_POINTS)).astype(int)]
+        center = pts.mean(axis=0)
+        ok = dist <= LINE_TOL_MM
+        near = np.minimum(dist, LINE_TOL_MM)
+
+        def moved(p, tx, ty, rot, scale):
+            c, s = np.cos(np.radians(rot)) * scale, np.sin(np.radians(rot)) * scale
+            d = p - center
+            return np.column_stack([center[0] + c * d[:, 0] - s * d[:, 1] + tx, center[1] + s * d[:, 0] + c * d[:, 1] + ty])
+
+        def measure(p, tx, ty, rot=0.0, scale=1.0):
+            """(비용, 선과 겹치는 비율). 비용 = 경로 점에서 선까지 거리(2mm에서 자름)의 평균 + 변환 크기 조금 (같으면 덜 움직임).
+            겹침 비율만 보면 긴 가로선은 옆으로 몇 mm 옮겨도 같아 위치가 정해지지 않는다."""
+            q = np.rint(moved(p, tx, ty, rot, scale)).astype(int)
+            x, y = q[:, 0], q[:, 1]
+            inside = (x >= 0) & (x < w) & (y >= 0) & (y < h)
+            x, y = x[inside], y[inside]
+            seen = ~occ[y, x]
+            if seen.sum() < 0.5 * len(p):
+                return np.inf, 0.0
+            penalty = np.hypot(tx, ty) / LINE_PPM + abs(rot) + abs(scale - 1) * 100
+            return float(near[y, x][seen].mean()) + 1e-3 * penalty, float(ok[y, x][seen].mean())
+
+        r, step = int(round(max_mm * LINE_PPM)), int(round(LINE_PPM))
+        base = measure(pts, 0, 0)[1]
+        _, tx, ty = min((measure(few, sx, sy), sx, sy) for sx in range(-r, r + 1, step) for sy in range(-r, r + 1, step))
+        (_, score), tx, ty = min((measure(pts, sx, sy), sx, sy)
+                                 for sx in range(tx - step, tx + step + 1) for sy in range(ty - step, ty + step + 1))
+        rot, scale = 0.0, 1.0
+        n_strokes = len(self._paths0[:upto] if upto else self._paths0)
+        if n_strokes >= ALIGN_SAVE_MIN_STROKES:   # 획이 적으면 회전·배율까지 맞추다 잡음에 맞춤 (그리는 중 앞부분)
+            rots = np.arange(-ALIGN_ROT_DEG, ALIGN_ROT_DEG + 1e-9, 0.5)
+            scales = np.arange(1 - ALIGN_SCALE, 1 + ALIGN_SCALE + 1e-9, 0.01)
+            a, s, ax, ay = 0.0, 1.0, tx, ty
+            for _ in range(2):             # 회전·배율 ↔ 이동을 번갈아 다듬음
+                _, a, s = min((measure(few, ax, ay, ra, rs), ra, rs) for ra in rots for rs in scales)
+                _, ax, ay = min((measure(few, sx, sy, a, s), sx, sy)
+                                for sx in range(ax - step, ax + step + 1) for sy in range(ay - step, ay + step + 1))
+            (_, fitted), ax, ay = min((measure(pts, sx, sy, a, s), sx, sy)
+                                      for sx in range(ax - 2, ax + 3) for sy in range(ay - 2, ay + 3))
+            if fitted > score + ALIGN_AFFINE_GAIN:    # 이동만 맞춘 것보다 확실히 나을 때만 회전·배율을 씀
+                score, tx, ty, rot, scale = fitted, ax, ay, float(a), float(s)
+        if score < base + ALIGN_GAIN:
+            return base
+        self.paths = [np.rint(moved(p.astype(np.float64), tx, ty, rot, scale)).astype(int) for p in self._paths0]
+        c, s = np.cos(np.radians(rot)) * scale, np.sin(np.radians(rot)) * scale
+        a_px = np.array([[c, -s, center[0] - c * center[0] + s * center[1] + tx],
+                         [s, c, center[1] - s * center[0] - c * center[1] + ty], [0, 0, 1]])
+        f = self._mm_to_flat
+        self.affine_mm = (np.linalg.inv(f) @ a_px @ f)[:2]
+        mid = project(np.linalg.inv(f), center[None])[0]
+        self.shift_mm = tuple(float(v) for v in (self.affine_mm[:, :2] @ mid + self.affine_mm[:, 2] - mid))
+        self.rotation_deg = float(np.degrees(np.arctan2(self.affine_mm[1, 0], self.affine_mm[0, 0])))
+        self.scale = float(np.sqrt(abs(np.linalg.det(self.affine_mm[:, :2]))))
+        self._near = None
+        return score
 
     @staticmethod
     def _densify(p, step=0.5 * LINE_PPM):
@@ -359,7 +469,9 @@ class LineCheck:
             self._near = cv2.distanceTransform(drawn, cv2.DIST_L2, 5) <= TICK_CLEAR_MM * LINE_PPM
         return self._near
 
-    def _tick_at(self, point, tangent):
+    def _tick_reach(self, point, tangent):
+        """끝점에서 접선에 수직인 두 방향(-n, +n)으로 계획에 없는 선이 이어진 길이(px)와 n. 끝점이 가려졌으면 None,
+        접선이 없으면 (0, 0, None)."""
         _, occ, lines = self._analyse()
         near = self._near_paths()
         h, w = lines.shape
@@ -369,12 +481,12 @@ class LineCheck:
         t = np.asarray(tangent, np.float64)
         nrm = float(np.linalg.norm(t))
         if nrm < 1e-6:
-            return 0.0
+            return 0, 0, None
         t = t / nrm
         n = np.array([-t[1], t[0]])          # 끝 접선에 수직인 방향만 세로 줄
         b = max(1, round(TICK_BAND_MM * LINE_PPM))
         reach, gap, clear = (round(v * LINE_PPM) for v in (TICK_REACH_MM, TICK_GAP_MM, TICK_CLEAR_MM))
-        best = 0
+        out = []
         for d in (-1, 1):
             last = 0
             for k in range(1, reach + 1):
@@ -393,15 +505,40 @@ class LineCheck:
                     last = k
                 elif k > max(last, clear) + gap:
                     break
-            best = max(best, last)
-        return best / LINE_PPM
+            out.append(last)
+        return out[0], out[1], n
+
+    def _tick_at(self, point, tangent):
+        r = self._tick_reach(point, tangent)
+        return None if r is None else max(r[0], r[1]) / LINE_PPM
+
+    @staticmethod
+    def _end_tangents(q):
+        if len(q) < 2:
+            return np.array([1.0, 0.0]), np.array([1.0, 0.0])
+        return q[1] - q[0], q[-1] - q[-2]
 
     def end_ticks(self, index):
         """획 index의 (시작점, 끝점)에서 접선에 수직으로 뻗은 줄 길이(mm, 없으면 0). 끝점이 가려졌으면 그 자리는 None."""
         q = self.paths[index]
-        t0 = q[1] - q[0] if len(q) > 1 else np.array([1.0, 0.0])
-        t1 = q[-1] - q[-2] if len(q) > 1 else np.array([1.0, 0.0])
+        t0, t1 = self._end_tangents(q)
         return self._tick_at(q[0], t0), self._tick_at(q[-1], t1)
+
+    def end_tick_dirs(self, index):
+        """획 index의 (시작점, 끝점)마다 종이 위·아래로 뻗은 줄 길이 (위 mm, 아래 mm).
+        가려졌거나, 끝 접선이 세로에 가까워 위·아래를 가를 수 없으면(수직 성분 TICK_VERTICAL_MIN 미만) None."""
+        q = self.paths[index]
+        out = []
+        for p, t in zip((q[0], q[-1]), self._end_tangents(q)):
+            r = self._tick_reach(p, t)
+            if r is None or r[2] is None or abs(r[2][1]) < TICK_VERTICAL_MIN:
+                out.append(None)
+                continue
+            minus, plus, n = r
+            # 펴진 사진은 y가 아래로: +n 쪽 y 성분이 음수면 +n이 종이 위
+            up, down = (plus, minus) if n[1] < 0 else (minus, plus)
+            out.append((up / LINE_PPM, down / LINE_PPM))
+        return tuple(out)
 
 
 def line_summary(coverage):

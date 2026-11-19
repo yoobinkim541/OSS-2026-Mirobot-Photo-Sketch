@@ -335,7 +335,7 @@ class DrawJobTest(unittest.TestCase):
                 if on_ack:
                     on_ack(i + 1, len(cmds))
                 if i + 1 == change_at:
-                    applied.append(job.set_pen_backoff({"start": 0.4, "end": 0.6}))
+                    applied.append(job.set_pen_correction({"start": 0.4, "end": 0.6}))
             return {"result": "completed", "commands_sent": len(cmds), "elapsed_s": 0.1, "before": before}
 
         with mock.patch.object(de, "open_link", return_value=PhysicalLinkStub()), \
@@ -357,7 +357,13 @@ class DrawJobTest(unittest.TestCase):
             self.assertAlmostEqual((x(sent[i][0]) - x(before[i][0])) * sign, 0.4, places=3)
         self.assertEqual(applied[0], int(before[downs[0]][1].split()[1]))
         self.assertEqual((cfg["pen"]["start_backoff_mm"], cfg["pen"]["end_backoff_mm"]), (0.4, 0.6))
-        self.assertIsNone(job.set_pen_backoff({"start": 0.0, "end": 0.0}))   # 끝난 뒤에는 바꾸지 않음
+        self.assertIsNone(job.set_pen_correction({"start": 0.0, "end": 0.0}))   # 끝난 뒤에는 바꾸지 않음
+        # 실행 기록에 획마다 쓴 값이 남아야 끝난 뒤 종이 사진을 구간별로 비교할 수 있다 (설정 사본은 끝난 값뿐)
+        import json
+        record = json.loads(Path(next(d for k, d in rec.events if k == "finished")["record_path"]).read_text(encoding="utf-8"))
+        changes = [(c["from_stroke"], c["start_backoff_mm"], c["end_backoff_mm"]) for c in record["pen_changes"]]
+        self.assertEqual(changes[1:], [(applied[0], 0.4, 0.6)])
+        self.assertEqual(changes[0][0], 0)
 
     def _start_pose_run(self, dx, air=True):
         """실물 연결(보정 안 함)에서 호밍 자세가 설정 파일의 종이 중심에서 X로 dx mm 벗어난 상황."""

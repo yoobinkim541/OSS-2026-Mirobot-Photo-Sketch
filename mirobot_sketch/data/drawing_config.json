@@ -23,11 +23,17 @@
   "line_width_mm": 0.5,
   "start_backoff_mm": 0.0,
   "end_backoff_mm": 0.0,
-  "j1_direction_offset_deg": 0.0
+  "j1_direction_offset_deg": 0.0,
+  "edge_rise_mm": 0.0,
+  "edge_rise_low_mm": 0.0,
+  "edge_land_mm": 0.0,
+  "edge_rise_depth_mm": 1.5
  },
  "_pen_width_note": "line_width_mm: 펜 선 굵기 추정값(GUI 종이 미리보기용). 실제 펜으로 그은 선을 재서 고칠 것.",
  "_pen_note": "하트 테스트 기록: 접촉 X=198.668, 접근 전 X=196.678 -> 벽에서 떨어지는 방향은 -X. down_extra_mm는 접촉 기준보다 더 누르는 양(+이면 벽 쪽). 1mm 이하로만 조정.",
  "_pen_backoff_note": "start/end_backoff_mm: 획 첫 점(펜 내림)과 마지막 점(떼기 직전)만 종이에서 뒤로 물리는 양(0~1 mm). 세게 누르면 끝점에 세로 줄이 생겨, 그리기 창의 카메라 확인(끝점 세로 줄 자동 보정)이 0.2 mm씩 고쳐 저장함.",
+ "_pen_edge_rise_note": "edge_rise_mm / edge_land_mm / edge_rise_depth_mm: 종이에서 edge_rise_depth_mm 떨어진 중간점을 뗄 때는 종이 위로 edge_rise_mm(0~3 mm), 내릴 때는 edge_land_mm(+ 종이 아래, − 위, ±3 mm) 옮겨 비스듬히 떼고 댄다(둘 다 0이면 끔). 끝점마다 아래로 끌린 세로 줄이 생길 때 edge_rise_mm를 쓴다. edge_land_mm는 +이면 시작점 아래 줄이 길어져 보통 0.",
+ "_pen_edge_rise_low_note": "edge_rise_low_mm: 종이 아래쪽 끝점에서 뗄 때 더하는 양. 종이 y −20 mm부터 더하기 시작해 −60 mm 아래에서 다 더한다(합 최대 3 mm). edge_rise_mm가 0이면 쓰지 않는다.",
  "_pen_j1_note": "j1_direction_offset_deg: 같은 J1 목표에서 J1이 늘어나며 도착할 때와 줄어들며 도착할 때 실제 각의 차이(늘어나며 - 줄어들며, ±3° 안). 실행기가 목표점마다 도착 방향의 반대쪽으로 절반씩 돌려 보내고, 방향이 바뀌는 점에서는 같은 점으로 한 번 더 보내 유격을 메움. 0이면 끔.",
 
  "pen_tip_offset_mm": {"x": 100.0, "y": 0.0, "z": 0.0},
@@ -48,8 +54,8 @@
   "status": "시뮬레이션 PASS(영역 테두리·내부, 최소 여유 5° 이상 — tests/test_limits.py), 실물 미확인"},
  "_limits_pending_note": "넓은 범위(실물 미확인): 도달 지도(관절 여유 7° 이상, 2.5mm 격자)에서 가로 위치별 위쪽 한계에 2.5mm 여유를 두고, 종이 안전 여백 20mm 안(x ≤ 128.5, y ≥ -85)으로 자른 지붕 모양 영역. roof_mm = [|x|, 위쪽 y], 점 사이는 직선. 실행기가 꼭짓점만 검사하므로 지붕은 볼록(기울기가 점점 가파름)하게 잡아 두 꼭짓점 사이 선분도 영역 안에 있게 함. 좌우·아래로는 여유가 크고 위쪽은 B(J5) 한계. 가로 그림 약 250x127mm, 정사각형 약 140mm. 실물 확인 절차: F 시험 -> 영역 테두리 경로를 --air --pending-limits로 -> 펜 대고 --pending-limits로 -> 고르면 limits를 넓히고 status 갱신.",
 
- "timing": {"assumed_command_latency_s": 0.1,
-  "status": "가정값. 명령마다 ok 응답을 기다리는 시간. LOG/runs의 실제 elapsed_s와 estimated_time을 비교해 보정할 것"},
+ "timing": {"assumed_command_latency_s": 0.0,
+  "status": "그리기 명령은 ok만 받고 이어 보내 이동과 겹치므로 명령마다 지연을 더하지 않는다(2026-11-17, 실물 완료 기록 17개: 실제/이동 이론값 0.77~0.92)."},
 
  "max_start_offset_mm": 5.0,
  "ack_timeout_s": 15.0,

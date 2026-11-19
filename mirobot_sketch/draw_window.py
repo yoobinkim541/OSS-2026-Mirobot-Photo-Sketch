@@ -10,6 +10,7 @@ from tkinter import messagebox, simpledialog
 
 import cv2
 import customtkinter as ctk
+import numpy as np
 from . import camera, camera_marks, camera_share, draw_executor as de, limits, pen_correction, ui_scale, vision
 from .draw_job import DrawJob
 
@@ -277,10 +278,14 @@ class DrawWindow(ctk.CTkToplevel):
         self._line_last = 0.0
         self._line_final_wanted = False   # 끝났을 때 확인 중이었으면 그 확인이 끝난 뒤 마지막 확인을 함
         self._tick_results = {}           # {획 번호: (시작점 세로 줄 mm|None, 끝점 mm|None)}
+        self._tick_dirs = {}              # {획 번호: (시작점 (위 mm, 아래 mm)|None, 끝점 ...)} 비스듬히 대고 떼기 보정용
         self._tick_marks = ()             # 세로 줄이 난 끝점 (겹쳐 그릴 표시)
         self._pen_from = 0                # 이 획부터 지금 끝점 물림 값으로 그림 (보정 판단은 이후 획만)
         self._pen_prev_from = None        # 바꾸기 전 값으로 그린 구간의 시작 (선이 안 보인 비율을 비교할 기준)
         self._pen_note = ""               # 마지막 보정 내용
+        self._pen_dirs = {}               # 이번 그림에서 값마다 마지막으로 바꾼 방향 (+1/−1)
+        self._pen_locked = set()          # 판단이 오가 가운데 값으로 고정한 키 (이번 그림에서 더 안 바꿈)
+        self._pen_start = None            # 이번 그림을 시작할 때 펜 값 (끝난 뒤 바뀐 값만 한 번 저장)
         self._zoom_win = None             # 크게 보기 창
         self._zoom_overlay = vision.Overlay()
         self._zoom_box_key = None
@@ -621,7 +626,7 @@ class DrawWindow(ctk.CTkToplevel):
         grab = self.camera.latest_full
 
         def work():
-            result = None
+            result, align, size = None, None, None
             try:
                 check = None
                 for _ in range(LINE_CHECK_FRAMES):      # 원본(4K 약 25 MB)은 한 장씩만 들고 바로 펴서 더함
@@ -635,71 +640,158 @@ class DrawWindow(ctk.CTkToplevel):
                     del f
                     time.sleep(0.15)
                 if check is not None and check.frames:
-                    result = {i: (check.measure(i), check.end_ticks(i)) for i in range(upto)}
+                    # 종이를 다시 붙였거나 카메라가 움직여 계획과 실제 선이 어긋나면(이동·회전·배율) 먼저 맞춘 뒤 잰다
+                    align = (check.align(upto), check.affine_mm, check.shift_mm, check.rotation_deg, check.scale)
+                    size = check.frame_size
+                    if align[0] >= vision.ALIGN_MIN_SCORE:
+                        result = {i: (check.measure(i), check.end_ticks(i), check.end_tick_dirs(i)) for i in range(upto)}
+                    else:
+                        result = align
             except Exception:          # 확인은 보조 기능: 실패해도 그리기에는 영향 없음
                 result = None
-            self.app.ui(self._show_line_check, result, final, strokes)
+            self.app.ui(self._show_line_check, result, final, strokes, align, reg, size)
 
         threading.Thread(target=work, name="line-check", daemon=True).start()
 
-    def _show_line_check(self, result, final, strokes):
+    def _show_line_check(self, result, final, strokes, align=None, reg=None, size=None):
         self._line_busy = False
         if not self.winfo_exists() or strokes is not self._run_strokes:
             return
         if result is None:
             self.line_status.configure(text="선 확인: 카메라 사진을 읽지 못했습니다", text_color=IDLE_C)
+        elif isinstance(result, tuple):      # 맞춰도 계획과 선이 거의 안 겹침: 판단하지 않음 (보정도 안 함)
+            self.line_status.configure(
+                text=f"선 확인: 계획과 종이의 선이 맞지 않습니다(겹침 {result[0]:.0%}). 종이 위치를 다시 맞춰 주세요. "
+                     "끝점 자동 보정은 하지 않습니다.", text_color=BAD_C)
         else:
             merged = dict(self._line_results)
             ticks = dict(self._tick_results)
+            dirs = dict(self._tick_dirs)
             # 이번에 팔에 가린 획은 앞서 보였을 때 잰 값을 그대로 둠 (끝나면 팔이 종이 가운데에 서 있어 가리기 쉬움)
-            for i, (cov, tick) in result.items():
+            for i, (cov, tick, tdir) in result.items():
                 if cov is not None or merged.get(i) is None:
                     merged[i] = cov
                 old = ticks.get(i, (None, None))
                 ticks[i] = tuple(new if new is not None else prev for new, prev in zip(tick, old))
+                old = dirs.get(i, (None, None))
+                dirs[i] = tuple(new if new is not None else prev for new, prev in zip(tdir, old))
             self._tick_results = ticks
+            self._tick_dirs = dirs
             self._set_line_results(merged)
             self._correct_pen(final)
             if final:
+                self._settle_pen()
                 seen, missing, hidden = vision.line_summary(merged)
                 note = f"카메라 선 확인: 획 {len(merged)}개 중 보임 {seen} · 안 보임 {missing} · 가려짐 {hidden}"
                 t = vision.tick_summary(ticks, merged)
                 note += (f"\n끝점 세로 줄: 시작 {t['start'][0]}/{t['start'][1]} · 끝 {t['end'][0]}/{t['end'][1]}"
                          + (f" · {self._pen_note}" if self._pen_note else ""))
                 self.detail.configure(text=f"{self.detail.cget('text')}\n{note}".strip())
+                self._auto_register(len(result), align, reg, size)
+        if final and not isinstance(result, dict):    # 마지막 확인을 못 했어도 바뀐 값은 정리
+            self._settle_pen()
         if self._line_final_wanted:           # 끝났을 때 그리는 중 확인이 돌고 있었음
             self._check_lines(final=True)
 
+    def _auto_register(self, n_strokes, align, reg, size):
+        """끝난 뒤 마지막 선 확인에서 계획과 실제 선이 확실히 맞았으면(겹침 ALIGN_SAVE_SCORE 이상, 획 ALIGN_SAVE_MIN_STROKES개 이상)
+        그때 찾은 변환(이동·회전·배율)으로 종이 위치(등록)를 고쳐 저장한다. 등록은 종이 중심을 호밍 직후 펜 끝으로 보는데,
+        종이를 그 자리에 딱 맞춰 붙이지 않거나 카메라가 틀어지면 겹쳐 보기·선 확인이 어긋난다(2026-11-16: +7, −6 mm;
+        11-18: +16, −12 mm·−2°·1.06배). 다음 그림부터 맞게 보인다."""
+        if (align is None or reg is None or size is None or reg is not self._registration
+                or self.job is None or self.job.summary.get("virtual")):
+            return
+        score, affine, (dx, dy), rot, scale = align
+        if score < vision.ALIGN_SAVE_SCORE or n_strokes < vision.ALIGN_SAVE_MIN_STROKES:
+            return
+        pts = np.vstack([np.asarray(s, float).reshape(-1, 2) for s in self._run_strokes[:n_strokes]])
+        box = np.array([[x, y] for x in (pts[:, 0].min(), pts[:, 0].max()) for y in (pts[:, 1].min(), pts[:, 1].max())])
+        if np.abs(box @ affine[:, :2].T + affine[:, 2] - box).max() < vision.ALIGN_SAVE_MIN_MM:
+            return
+        new = vision.corrected_registration(reg, size, affine)
+        try:
+            kept = vision.backup("autoregister")      # 잘못 맞춘 보정도 되돌릴 수 있게
+            vision.save(new)
+        except OSError as e:
+            self.vision_status.configure(text=f"종이 위치 자동 보정을 저장하지 못했습니다: {e}", text_color=BAD_C)
+            return
+        self._registration = new
+        self.vision_status.configure(
+            text=f"종이 위치 자동 보정: 그린 선에 맞춰 {'오른쪽' if dx >= 0 else '왼쪽'} {abs(dx):.1f} mm, "
+                 f"{'위' if dy >= 0 else '아래'} {abs(dy):.1f} mm, 회전 {rot:+.1f}°, 크기 ×{scale:.3f}로 고쳤습니다 "
+                 f"(겹침 {score:.0%}). 다음 그림부터 겹쳐 보기가 맞습니다."
+                 + (f" 예전 위치: {kept.name}" if kept else ""),
+            text_color=OK_C)
+
     def _pen_text(self):
         b = pen_correction.current_backoff(self.cfg)
-        return f"끝점 물림: 시작 {b['start']:g} mm · 끝 {b['end']:g} mm"
+        rise = pen_correction.current_rise(self.cfg)
+        low = pen_correction.current_rise_low(self.cfg)
+        land = pen_correction.current_land(self.cfg)
+        return (f"끝점 물림: 시작 {b['start']:g} mm · 끝 {b['end']:g} mm"
+                + (f" · 비스듬히 {rise:g} mm" if rise else "") + (f" (종이 아래쪽 +{low:g})" if rise and low else "")
+                + (f" · 댈 때 {abs(land):g} mm {'위' if land < 0 else '아래'}에서" if land else ""))
 
     def _correct_pen(self, final):
-        """지금 끝점 물림 값으로 그린 획만 보고 규칙(pen_correction)대로 한 단계 고침.
-        그리는 중이면 남은 획에 바로 적용, 끝난 뒤면 다음 그림에 쓰도록 설정 파일에만 저장."""
+        """지금 끝점 물림·비스듬히 대고 떼기 값으로 그린 획만 보고 규칙(pen_correction)대로 한 단계 고침.
+        그리는 중이면 남은 획에 바로 적용하고, 설정 파일 저장은 끝난 뒤 _settle_pen에서 한 번만 함."""
         if not self.pen_auto.get() or self.job is None or self.job.summary.get("virtual"):
             return
         ticks = {i: t for i, t in self._tick_results.items() if i >= self._pen_from}
+        dirs = {i: t for i, t in self._tick_dirs.items() if i >= self._pen_from}
         current = pen_correction.current_backoff(self.cfg)
         baseline = (None if self._pen_prev_from is None else
                     pen_correction.missing_rate(self._line_results, range(self._pen_prev_from, self._pen_from)))
-        new, why = pen_correction.next_backoff(current, ticks, self._line_results, baseline)
-        if new == current:
+        rise, low = pen_correction.current_rise(self.cfg), pen_correction.current_rise_low(self.cfg)
+        land = pen_correction.current_land(self.cfg)
+        # 뗄 때 비스듬히가 켜져 있으면 끝점 줄은 뗄 때 값(edge_rise), 시작점 줄은 내릴 때 값(edge_land)이 맡고, 물림은 세로 줄로
+        # 올리지 않음. 11-18 15:53 그림: 같은 끝점 줄로 끝점 물림(0.2 → 1.0)과 비스듬히가 함께 움직이다 엇갈림으로 멈췄다.
+        new, why = pen_correction.next_backoff(current, ticks, self._line_results, baseline,
+                                               kinds=() if rise > 0 else ("start", "end"))
+        strokes = self._run_strokes or []
+        new_rise, why_rise = pen_correction.next_edge_rise(rise, dirs, self._line_results, strokes)
+        new_low, why_low = pen_correction.next_edge_rise_low(low, rise, dirs, self._line_results, strokes)
+        new_land, why_land = pen_correction.next_edge_land(land, rise, dirs, self._line_results)
+        old = {**current, "rise": rise, "rise_low": low, "land": land}
+        values, locked, dirs, flipped = pen_correction.settle_changes(
+            self._pen_locked, self._pen_dirs, old, {**new, "rise": new_rise, "rise_low": new_low, "land": new_land})
+        if values == old:
             return
+        names = {"start": "시작점 물림", "end": "끝점 물림", "rise": "뗄 때 비스듬히", "rise_low": "아래쪽 추가", "land": "댈 때"}
+        why = " · ".join(w for w in (why, why_rise, why_low, why_land) if w)
+        if flipped:
+            why += " · 판단이 오가서 가운데 값으로 고정: " + ", ".join(f"{names[k]} {values[k]:g} mm" for k in flipped)
         if final:
             applied = len(self._run_strokes or ())
         else:
-            applied = self.job.set_pen_backoff(new)
+            applied = self.job.set_pen_correction(values)
             if applied is None:
                 return
-        self.cfg["pen"]["start_backoff_mm"], self.cfg["pen"]["end_backoff_mm"] = new["start"], new["end"]
-        try:
-            pen_correction.save_backoff(new)
-            saved = ""
-        except (OSError, ValueError, KeyError) as e:
-            saved = f" (설정 저장 실패: {e})"
+        self._pen_dirs, self._pen_locked = dirs, locked
+        self.cfg["pen"]["start_backoff_mm"], self.cfg["pen"]["end_backoff_mm"] = values["start"], values["end"]
+        self.cfg["pen"]["edge_rise_mm"], self.cfg["pen"]["edge_rise_low_mm"] = values["rise"], values["rise_low"]
+        self.cfg["pen"]["edge_land_mm"] = values["land"]
         self._pen_prev_from, self._pen_from = self._pen_from, applied
-        self._pen_note = why + ("" if final else f" (획 {applied + 1}부터)") + saved
+        self._pen_note = why + ("" if final else f" (획 {applied + 1}부터)")
+        self.pen_status.configure(text=f"{self._pen_text()}\n{self._pen_note}", text_color=ACT_C)
+
+    def _settle_pen(self):
+        """그림이 끝난 뒤 한 번: 자동 보정으로 바뀐 값을 설정 파일에 저장 (그리는 중에는 저장하지 않음)."""
+        start = self._pen_start
+        if start is None:
+            return
+        self._pen_start = None
+        now = {k: self.cfg["pen"].get(k, 0.0) for k in start}
+        if now == start:
+            return
+        try:
+            pen_correction.save_pen({"start": now["start_backoff_mm"], "end": now["end_backoff_mm"],
+                                     "rise": now["edge_rise_mm"], "rise_low": now["edge_rise_low_mm"],
+                                     "land": now["edge_land_mm"]})
+            note = "바뀐 값을 설정 파일에 저장함"
+        except (OSError, ValueError, KeyError) as e:
+            note = f"설정 저장 실패: {e}"
+        self._pen_note = f"{self._pen_note} · {note}".strip(" ·")
         self.pen_status.configure(text=f"{self._pen_text()}\n{self._pen_note}", text_color=ACT_C)
 
     def _set_line_results(self, results):
@@ -817,8 +909,10 @@ class DrawWindow(ctk.CTkToplevel):
         self._drawn = 0
         self._line_final_wanted = False
         self._tick_results = {}
+        self._tick_dirs = {}
         self._pen_from, self._pen_prev_from = 0, None
         self._pen_note = ""
+        self._pen_dirs, self._pen_locked = {}, set()
         self.pen_status.configure(text=self._pen_text(), text_color=IDLE_C)
         self._set_line_results({})
         for k, (sid, name, _who) in enumerate(de.DRAW_STEPS):
@@ -1031,7 +1125,12 @@ class DrawWindow(ctk.CTkToplevel):
             self._run_strokes = [list(s) for s in d["strokes"]]
             self._drawn = 0
             self._tick_results = {}
+            self._tick_dirs = {}
             self._pen_from, self._pen_prev_from = 0, None
+            self._pen_dirs, self._pen_locked = {}, set()
+            self._pen_start = {k: self.cfg["pen"].get(k, 0.0)
+                               for k in ("start_backoff_mm", "end_backoff_mm", "edge_rise_mm", "edge_rise_low_mm",
+                                         "edge_land_mm")}
             self._set_line_results({})
         elif kind == "progress":
             self.progress.set(d["acked"] / max(d["total"], 1))
@@ -1092,6 +1191,9 @@ class DrawWindow(ctk.CTkToplevel):
                 detail += "\n사진과 작업 내용을 비웠습니다. 종이를 바꾸고 새 사진을 열어 주세요."
             if detail:
                 self.detail.configure(text=detail.strip())
-            if self._run_strokes and r in ("completed", "stopped_by_user", "stopped_on_error", "interrupted_by_user"):
+            if (self._run_strokes and r in ("completed", "stopped_by_user", "stopped_on_error", "interrupted_by_user")
+                    and self._registration is not None and self.camera.index is not None):
                 self._line_final_wanted = True   # 마지막으로 다 그린 획 전부를 한 번 더 잼 (결과는 위 안내 끝에 붙음)
-                self._check_lines(final=True)
+                self._check_lines(final=True)    # 바뀐 펜 값은 그 확인이 끝난 뒤 _settle_pen에서 정리
+            else:
+                self._settle_pen()
