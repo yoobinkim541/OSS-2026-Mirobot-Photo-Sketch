@@ -331,7 +331,7 @@ class PlannerTest(unittest.TestCase):
             self.assertAlmostEqual(abs(np.degrees(np.arctan2(a[1], a[0]) - np.arctan2(b[1], b[0]))), 0.3, places=2)
 
     def test_j1_offset_plan_keeps_its_commands_when_end_backoff_changes(self):
-        # 그리는 중 끝점 물림을 바꿔 다시 계획할 때(draw_job.set_pen_backoff) 명령 수·순서가 같아야 바꿔 끼울 수 있다
+        # 그리는 중 끝점 물림을 바꿔 다시 계획할 때(draw_job.set_pen_correction) 명령 수·순서가 같아야 바꿔 끼울 수 있다
         cfg = self._high_pen_up_cfg(10.0)
         cfg["pen"]["j1_direction_offset_deg"] = 0.6
         strokes = [[(20.0, 10.0), (30.0, 10.0), (20.0, 12.0)], [(-30.0, -20.0), (-40.0, -20.0)]]
@@ -431,6 +431,112 @@ class TimingTest(unittest.TestCase):
         per_stroke = 2 * CFG["pen"]["up_clearance_mm"] / CFG["feeds_mm_per_min"]["approach"] * 60
         self.assertAlmostEqual(t10["pen_lift_s"] - t1["pen_lift_s"], 9 * per_stroke, places=0)
         self.assertGreater(t10["total_s"], t1["total_s"])
+
+
+class EdgeRiseTest(unittest.TestCase):
+    """비스듬히 대고 떼기: 끝점마다 아래로 끌린 세로 줄을 위쪽으로 상쇄."""
+    LINE = [[(0.0, 0.0), (10.0, 0.0)]]
+
+    @staticmethod
+    def cfg(two_stage):
+        cfg = copy.deepcopy(CFG)
+        cfg["pen"]["edge_rise_mm"], cfg["pen"]["edge_rise_depth_mm"] = 2.0, 1.5
+        if two_stage:
+            cfg["pen"]["up_clearance_mm"] = 10.0
+        return cfg
+
+    @staticmethod
+    def xyz(line):
+        return tuple(float(v) for v in re.search(r"X([-\d.]+) Y([-\d.]+) Z([-\d.]+)", line).groups())
+
+    def test_lands_from_below_and_lifts_upward_near_the_paper(self):
+        cfg = self.cfg(True)
+        cfg["pen"]["edge_land_mm"] = 1.0
+        planner = de.Planner(cfg)
+        cmds = planner.plan(self.LINE)
+        labels = [label for _, label in cmds]
+        self.assertEqual(labels[1:9], ["stroke 0 travel", "stroke 0 descend", "stroke 0 land", "stroke 0 pen-down",
+                                       "stroke 0 draw", "stroke 0 lift", "stroke 0 lift-out", "stroke 0 pen-up"])
+        land, lift = self.xyz(cmds[3][0]), self.xyz(cmds[6][0])
+        for (x, y, z), (px, py) in ((land, (0.0, -1.0)), (lift, (10.0, 2.0))):   # 내릴 때 1 mm 아래, 뗄 때 2 mm 위
+            ry, rz = planner.robot_yz(px, py)
+            self.assertAlmostEqual(y, ry, places=2)
+            self.assertAlmostEqual(z, rz, places=2)
+            off = planner.retract_sign * (x - planner.contact_x(ry, rz))
+            self.assertAlmostEqual(off, 1.5, places=2)                          # 종이에서 1.5mm 떨어진 점
+        self.assertEqual(self.xyz(cmds[4][0])[1:], tuple(round(v, 3) for v in planner.robot_yz(0.0, 0.0)))
+        straight = de.Planner(self.cfg(True))                                  # edge_land_mm 기본 0: 바로 앞에서 곧게 댐
+        land0 = self.xyz(straight.plan(self.LINE)[3][0])
+        self.assertEqual(land0[1:], tuple(round(v, 3) for v in straight.robot_yz(0.0, 0.0)))
+        above = self.cfg(True)
+        above["pen"]["edge_land_mm"] = -2.0                                    # −: 위에서 내려오며 댐
+        p = de.Planner(above)
+        land_above = self.xyz(p.plan(self.LINE)[3][0])
+        self.assertAlmostEqual(land_above[2], p.robot_yz(0.0, 2.0)[1], places=2)
+        only = self.cfg(True)
+        only["pen"]["edge_rise_mm"], only["pen"]["edge_land_mm"] = 0.0, -2.0  # 뗄 때 끄고 댈 때만 위에서
+        q = de.Planner(only)
+        cmds = q.plan(self.LINE)
+        land_only = self.xyz(next(g for g, l in cmds if l.endswith(" land")))
+        self.assertAlmostEqual(land_only[2], q.robot_yz(0.0, 2.0)[1], places=2)
+        self.assertEqual(de.estimate_time(self.LINE, only)["command_count"], len(cmds))
+
+    def test_virtual_run_completes_and_estimate_counts_every_command(self):
+        from mirobot_sketch.virtual_robot import VirtualMirobotLink
+        strokes = SQUARE + self.LINE
+        for two_stage in (False, True):
+            cfg = self.cfg(two_stage)
+            cmds = de.Planner(cfg).plan(strokes)
+            self.assertEqual(de.estimate_time(strokes, cfg)["command_count"], len(cmds))
+            link = VirtualMirobotLink(cfg, speed=1000, homing_s=0.0)
+            link.wait_for_homing(1, lambda *_: None)
+            r = de.execute(link, cmds, cfg, progress=lambda *_: None)
+            self.assertEqual(r["result"], "completed", (two_stage, r.get("error"), r.get("failed_command")))
+
+    def test_resume_after_the_last_draw_skips_the_lift_steps(self):
+        planner = de.Planner(self.cfg(True))
+        cmds = planner.plan(self.LINE)
+        last_draw = max(i for i, (_, label) in enumerate(cmds) if label.endswith(" draw"))
+        self.assertEqual(de.resume_commands(planner, cmds, last_draw + 1), ([], last_draw + 4))
+
+    def test_depth_must_clear_the_end_backoff(self):
+        cfg = self.cfg(True)
+        cfg["pen"]["start_backoff_mm"], cfg["pen"]["edge_rise_depth_mm"] = 0.6, 0.5
+        with self.assertRaises(ValueError):
+            de.Planner(cfg)
+
+    def test_changing_the_slant_keeps_the_commands_so_it_can_be_swapped_mid_run(self):
+        cfg, more = self.cfg(True), self.cfg(True)
+        more["pen"]["edge_rise_mm"] = 2.5
+        strokes = SQUARE + self.LINE
+        a, b = de.Planner(cfg).plan(strokes), de.Planner(more).plan(strokes)
+        self.assertEqual([l for _, l in a], [l for _, l in b])
+        self.assertNotEqual([g for g, _ in a], [g for g, _ in b])
+
+    def test_range_check_includes_the_shifted_points(self):
+        from mirobot_sketch.limits import Region
+        cfg = self.cfg(False)
+        top = Region.from_cfg(de.active_limits(cfg)).top(0.0)
+        near_top = [[(0.0, top - 3.0), (0.0, top - 0.5)]]               # 끝점 위 2mm는 범위 밖
+        self.assertTrue(de.check_limits(near_top, cfg))
+        cfg["pen"]["edge_rise_mm"] = 0.0
+        self.assertFalse(de.check_limits(near_top, cfg))
+
+    def test_lower_endpoints_get_the_extra_slant(self):
+        pen = {"edge_rise_mm": 2.0, "edge_rise_low_mm": 1.0}
+        self.assertEqual([de.edge_rise_at(pen, y) for y in (10.0, -20.0, -40.0, -60.0, -90.0)], [2.0, 2.0, 2.5, 3.0, 3.0])
+        self.assertEqual(de.edge_rise_at({"edge_rise_mm": 0.0, "edge_rise_low_mm": 1.0}, -80.0), 0.0)   # 꺼 두면 아래쪽도 0
+        cfg = self.cfg(True)
+        cfg["pen"]["edge_rise_low_mm"] = 1.0
+        planner = de.Planner(cfg)
+        low = [[(0.0, -60.0), (10.0, -60.0)]]
+        cmds = planner.plan(low)
+        lift = self.xyz(next(g for g, l in cmds if l.endswith(" lift")))
+        self.assertAlmostEqual(lift[2], planner.robot_yz(10.0, -57.0)[1], places=2)       # 2 + 1 mm 위로 빼고
+        land = self.xyz(next(g for g, l in cmds if l.endswith(" land")))
+        self.assertAlmostEqual(land[2], planner.robot_yz(0.0, -60.0)[1], places=2)        # 댈 때는 아래쪽 추가 없음
+        same = self.cfg(True)
+        self.assertEqual([l for _, l in cmds], [l for _, l in de.Planner(same).plan(low)])  # 명령 수는 같음
 
 
 class SafetyOptionTest(unittest.TestCase):

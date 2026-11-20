@@ -122,17 +122,46 @@ def warp_xy(warp, x, y):
 
 
 def check_limits(strokes, cfg, pending=False):
-    """범위 검사는 실제로 보낼 좌표(미리 비틀기 적용 후)로 하고, 벗어난 점은 계획 좌표로 알린다."""
+    """범위 검사는 실제로 보낼 좌표(미리 비틀기 적용 후)로 하고, 벗어난 점은 계획 좌표로 알린다.
+    비스듬히 대고 떼기(pen.edge_rise_mm·edge_land_mm)를 켜면 획 시작 아래·끝 위로 옮긴 점도 본다 (종이 가장자리에서 범위를 넘지 않게)."""
     from .limits import Region
     region = Region.from_cfg(active_limits(cfg, pending))
     warp = drawing_warp(cfg)
-    return [(i, x, y) for i, s in enumerate(strokes) for x, y in s if not region.contains(*warp_xy(warp, x, y))]
+    pen = cfg.get("pen", {})
+    land = float(pen.get("edge_land_mm", 0.0))
+
+    def points(s):
+        s = [tuple(p) for p in s]
+        if not s or not edge_slanted(pen):
+            return s
+        return s + [(s[0][0], s[0][1] - land), (s[-1][0], s[-1][1] + edge_rise_at(pen, s[-1][1]))]
+    return [(i, x, y) for i, s in enumerate(strokes) for x, y in points(s) if not region.contains(*warp_xy(warp, x, y))]
 
 
 END_BACKOFF_MAX_MM = 1.0   # 끝점을 뒤로 물리는 최대량 (이보다 크면 끝점에서 선이 끊김)
 J1_OFFSET_MAX_DEG = 3.0   # J1 방향 보정 상한 (측정값 약 0.66°: 이보다 크면 설정 실수로 봄)
+EDGE_RISE_MAX_MM = 3.0    # 비스듬히 대고 떼는 세로 이동 상한 (끝점 세로 줄 길이 중앙값 약 2.4 mm)
 J1_TURN_EPS_RAD = math.radians(0.01)   # 이보다 작은 J1 변화는 방향이 바뀐 것으로 보지 않음
 J1_APPROACH_MARGIN_RAD = math.radians(0.2)   # 획 시작 전 공중에서 미리 돌리는 양 = 보정값 + 이만큼
+# 종이 아래쪽일수록 아래로 끌린 세로 줄이 많았다(2026-11-16 두 그림: y −40 mm 아래 33%·25%, 그 위 3~16%).
+# pen.edge_rise_low_mm를 y가 이 높이보다 낮아질수록 더해, 이 폭만큼 내려가면 다 더한다.
+EDGE_RISE_LOW_FROM_MM = -20.0
+EDGE_RISE_LOW_SPAN_MM = 40.0
+
+
+def edge_slanted(pen):
+    """비스듬히 대고 떼기를 켰는지 (켜면 획마다 land·lift-out 명령이 생김)."""
+    return float(pen.get("edge_rise_mm", 0.0)) > 0 or float(pen.get("edge_land_mm", 0.0)) != 0
+
+
+def edge_rise_at(pen, py):
+    """종이 높이 py(mm)의 끝점에서 뗄 때 위로 비스듬히 빼는 양: edge_rise_mm + 아래쪽 추가(edge_rise_low_mm × 0~1),
+    최대 EDGE_RISE_MAX_MM. edge_rise_mm가 0이면 0."""
+    base = float(pen.get("edge_rise_mm", 0.0))
+    if base <= 0:
+        return 0.0
+    k = min(max((EDGE_RISE_LOW_FROM_MM - float(py)) / EDGE_RISE_LOW_SPAN_MM, 0.0), 1.0)
+    return min(EDGE_RISE_MAX_MM, base + float(pen.get("edge_rise_low_mm", 0.0)) * k)
 
 
 class Planner:
@@ -164,6 +193,27 @@ class Planner:
         for v in (self.start_backoff, self.end_backoff):
             if not (math.isfinite(v) and 0.0 <= v <= END_BACKOFF_MAX_MM):
                 raise ValueError(f"끝점 뒤로 물리는 양은 0~{END_BACKOFF_MAX_MM:g} mm여야 합니다 (지금 {v}).")
+        # 비스듬히 대고 떼기. 뗄 때(edge_rise_mm): 접촉점에서 edge_rise_depth_mm 떨어진 점을 종이 위로 옮겨 위쪽으로 비스듬히 뺀다.
+        # 끝점마다 아래로 끌린 줄(뗄 때 짐이 빠지며 펜 끝이 내려감)을 상쇄한다. 시험 종이(2026-11-16, 휴대폰 사진): 끝 줄이 0 mm에서
+        # 아래 약 2 mm, 1 mm에서 거의 없음, 2~3 mm에서 위로 0.5~1.5 mm.
+        # 내릴 때(edge_land_mm): 중간점을 종이 아래(+)·위(−)로 옮겨 비스듬히 댄다. 같은 시험에서 시작점 아래 줄이 0 mm에서
+        # 약 2.3 mm였고, 아래에서 올라오며 대면 1 mm마다 약 1 mm씩 길어졌다(펜이 예상보다 일찍 닿아 그 길을 그림). 닿아서 짐이
+        # 걸리면 펜 끝이 약 2.3 mm 올라가는 것으로 보고(추정), 위에서 내려오며 대면(−) 그만큼 상쇄될지 시험한다. 기본 0.
+        self.edge_rise = float(pen.get("edge_rise_mm", 0.0))
+        self.edge_low = float(pen.get("edge_rise_low_mm", 0.0))
+        self.edge_land = float(pen.get("edge_land_mm", 0.0))
+        self.edge_depth = float(pen.get("edge_rise_depth_mm", 1.5))
+        for v in (self.edge_rise, self.edge_low):
+            if not (math.isfinite(v) and 0.0 <= v <= EDGE_RISE_MAX_MM):
+                raise ValueError(f"비스듬히 떼는 세로 이동은 0~{EDGE_RISE_MAX_MM:g} mm여야 합니다 (지금 {v}).")
+        if not (math.isfinite(self.edge_land) and abs(self.edge_land) <= EDGE_RISE_MAX_MM):
+            raise ValueError(f"비스듬히 대는 세로 이동은 ±{EDGE_RISE_MAX_MM:g} mm 안이어야 합니다 (지금 {self.edge_land}).")
+        room = self.slow_zone if self.two_stage else clearance
+        if edge_slanted(pen) and not (math.isfinite(self.edge_depth)
+                                      and max(self.start_backoff, self.end_backoff) < self.edge_depth < room):
+            raise ValueError(f"비스듬히 대고 떼는 깊이는 끝점 물림({max(self.start_backoff, self.end_backoff):g} mm)보다 크고 "
+                             f"{room:g} mm보다 작아야 합니다 (지금 {self.edge_depth}).")
+        self.pen = pen
         pc = cfg["plane_compensation"]
         self.pa, self.pb = pc["a_per_mm_y"], pc["b_per_mm_z"]
         self.radial_max = float(pc.get("radial_retract_max_mm", 0.0))
@@ -275,6 +325,11 @@ class Planner:
             return pose
         return self._off_paper(pose, pose[0] + self.retract_sign * mm)
 
+    def _edge(self, px, py):
+        """비스듬히 대고 떼기의 중간점: (px, py) 접촉점에서 종이 반대쪽으로 edge_rise_depth_mm."""
+        contact = self.pose(px, py, True)
+        return self._off_paper(contact, contact[0] + self.retract_sign * self.edge_depth)
+
     def plan(self, strokes):
         """[(gcode, 설명)] 리스트. 획이 끝나면 그 자리에서 펜업하고, 그 X를 유지한 채 다음 위치로 간 뒤에만 내린다.
         시작은 종이 중심 펜다운(사람이 맞춘 시작 자세)이고, J1 방향 보정 상태는 매번 처음부터 다시 센다."""
@@ -283,18 +338,22 @@ class Planner:
         home = self.pose(0, 0, False)
         items = [(home, f["approach"], "center pen-up")]
         held_x = home[0]
+        slanted = not self.air and edge_slanted(self.pen)   # 켜면 획마다 land·lift-out 명령이 생김 (높이에 따라 양만 다름)
         for i, s in enumerate(strokes):
             x0, y0 = s[0]
-            up = self.pose(x0, y0, False)
+            ya = y0 - (self.edge_land if slanted else 0.0)    # 내릴 때 +면 아래에서 올라오며, −면 위에서 내려오며 댐 (기본 0: 곧게)
+            up = self.pose(x0, ya, False)
             travel_x = self._farther_x(held_x, up[0])
-            travel = self._off_paper(self.pose(x0, y0, True), travel_x)
+            travel = self._off_paper(self.pose(x0, ya, True), travel_x)
             first = self._first_j1_dir(s)
             if first:   # 첫 그리기 방향으로 공중에서 미리 J1을 움직여, 종이 위 첫 이동에서 유격을 메우지 않게
                 lead = -first * (abs(self.j1_offset) + J1_APPROACH_MARGIN_RAD)
                 items.append((self._rotated(travel, lead), f["travel"], f"stroke {i} j1-approach travel"))
             items.append((travel, f["travel"], f"stroke {i} travel"))
             if self.two_stage:   # 높이 띄운 곳에서 빠르게 내려오다 접촉 직전부터 천천히
-                items.append((self.pose_slow_zone(x0, y0), f["travel"], f"stroke {i} descend"))
+                items.append((self.pose_slow_zone(x0, ya), f["travel"], f"stroke {i} descend"))
+            if slanted:
+                items.append((self._edge(x0, ya), f["approach"], f"stroke {i} land"))
             items.append((self._backed(self.pose(x0, y0, True), self.start_backoff), f["approach"], f"stroke {i} pen-down"))
             last = len(s) - 1
             for j, (x, y) in enumerate(s[1:], 1):
@@ -303,10 +362,15 @@ class Planner:
                     pose = self._backed(pose, self.end_backoff)
                 items.append((pose, f["draw"], f"stroke {i} draw"))
             x1, y1 = s[-1]
-            # 그 자리(같은 Y·Z)에서만 뒤로 뺀다. 옆으로 가는 명령은 이 다음이다.
-            if self.two_stage:
+            yb = y1 + (edge_rise_at(self.pen, y1) if slanted else 0.0)   # 뗄 때는 위로 비스듬히 빼고
+            # 그 자리에서 뒤로 뺀다(켜져 있으면 종이 위쪽으로 조금 비스듬히). 옆으로 가는 명령은 이 다음이다.
+            if slanted:
+                items.append((self._edge(x1, yb), f["approach"], f"stroke {i} lift"))
+                if self.two_stage:
+                    items.append((self.pose_slow_zone(x1, yb), f["approach"], f"stroke {i} lift-out"))
+            elif self.two_stage:
                 items.append((self.pose_slow_zone(x1, y1), f["approach"], f"stroke {i} lift"))
-            end_up = self.pose(x1, y1, False)
+            end_up = self.pose(x1, yb, False)
             items.append((end_up, f["travel"] if self.two_stage else f["approach"], f"stroke {i} pen-up"))
             held_x = end_up[0]
         back = self.pose(0, 0, False)
@@ -357,6 +421,12 @@ def estimate_time(strokes, cfg, air=False):
     else:
         pen_lift_s = lift * (2 * n + 1) / f["approach"] * 60.0
     command_count = 2 + sum(len(s) + 2 for s in strokes) + (n if two_stage else 0) + (n if slow_lift else 0)
+    if not air and edge_slanted(cfg["pen"]):   # 비스듬히 대고 떼기: 획마다 중간점 2개, 그 두 구간은 곧게 가는 대신 비스듬히(느린 속도)
+        pen = cfg["pen"]
+        depth = float(pen.get("edge_rise_depth_mm", 1.5))
+        command_count += 2 * n
+        slant = math.hypot(depth, float(pen.get("edge_rise_mm", 0.0))) + math.hypot(depth, float(pen.get("edge_land_mm", 0.0)))
+        pen_lift_s += n * (slant - 2 * depth) / f["approach"] * 60.0
     if float(cfg["pen"].get("j1_direction_offset_deg", 0.0)):   # J1 방향 보정은 획마다 접근점·유격 메우기를 더함
         command_count = len(Planner(cfg, air=air).plan(strokes))
     latency = cfg.get("timing", {}).get("assumed_command_latency_s", 0.0)
@@ -691,14 +761,15 @@ def check_start(tcp, cfg, retracted=False):
 
 
 def write_run_record(meta, result, cfg):
-    """⑥ runs/run-<시각>.json. meta: strokes_json, stroke_count, command_count, air_mode, pending_limits,
-    estimated_time, source, virtual, virtual_speed 등."""
+    """⑥ runs/run-<끝난 시각>.json. meta: strokes_json, stroke_count, command_count, air_mode, pending_limits,
+    estimated_time, source, virtual, virtual_speed 등. meta에 started_local(시작 시각)이 없으면 끝난 시각을 넣는다.
+    config_snapshot은 끝났을 때 설정이다(그리는 중 바뀐 펜 값은 meta의 pen_changes)."""
     run_dir = paths.runs_dir()
     run_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     # 공개 저장소에 올려도 사용자 폴더 이름이 남지 않게 경로를 정리해서 기록
-    run = paths.scrub_paths({"started_local": stamp, **meta, "config_snapshot": cfg, **result,
-                             "visual_verification": "pending"})
+    run = paths.scrub_paths({"started_local": stamp, "finished_local": stamp, **meta, "config_snapshot": cfg,
+                             **result, "visual_verification": "pending"})
     path = run_dir / f"run-{stamp}.json"
     with open(path, "w", encoding="utf-8") as f:
         json.dump(run, f, ensure_ascii=False, indent=1)
@@ -724,7 +795,7 @@ def resume_commands(planner, cmds, start):
         stroke = prev.split(" ")[1]
         i = start
         while (i < len(cmds) and cmds[i][1].startswith(f"stroke {stroke} ")
-               and (cmds[i][1].endswith(" lift") or cmds[i][1].endswith(" pen-up"))):
+               and cmds[i][1].endswith((" lift", " lift-out", " pen-up"))):
             i += 1
         if i > start:
             return [], i
@@ -736,7 +807,7 @@ def resume_commands(planner, cmds, start):
         out.append((planner.gcode((x, y, z), f["approach"]), f"stroke {stroke} resume pen-down"))
         return out, start
     line, label = cmds[start]
-    if planner.two_stage and label.startswith("stroke ") and label.endswith(" pen-down"):
+    if planner.two_stage and label.startswith("stroke ") and label.endswith((" pen-down", " land")):
         _, y, z = (float(v) for v in _XYZ.search(line).groups())
         return [(planner.gcode((planner.contact_x(y, z) + planner.slow_dx, y, z), f["travel"]),
                  f"stroke {label.split(' ')[1]} resume descend")], start
@@ -780,7 +851,7 @@ def execute(link, cmds, cfg, progress=print, on_ack=None, should_stop=None, star
             # 수직 후퇴 이전에 마지막 그리기 위치에 실제로 도착해야 한다.
             if (contact_line and hasattr(link, "wait_until_pose") and label.startswith("stroke ")
                     and (label.endswith(" lift") or (label.endswith(" pen-up") and
-                         (i == start or not cmds[i-1][1].endswith(" lift"))))):
+                         (i == start or not cmds[i-1][1].endswith((" lift", " lift-out")))))):
                 context.update(command="stroke endpoint", target=contact_line)
                 endpoint = tuple(float(v) for v in re.search(r"X([-\d.]+) Y([-\d.]+) Z([-\d.]+)", contact_line).groups())
                 link.wait_until_pose(endpoint, cfg["idle_timeout_s"], should_stop=stop)

@@ -214,12 +214,18 @@ class SimulationCancelled(Exception):
 
 
 def check_normal_segments(targets, samples, tolerance_mm=0.1):
-    """접근·이탈 명령과 IK 결과의 TCP가 X축 직선에서 벗어나는지 검사한다."""
+    """접근·이탈 명령과 IK 결과의 TCP가 X축 직선에서 벗어나는지 검사한다.
+    비스듬히 떼고 대기(pen.edge_rise_mm·edge_land_mm, 획에 'land' 명령이 있음)를 쓴 획의 pen-down·lift는 비스듬할 수 있으므로
+    X축 직선인지는 보지 않고, IK가 그 직선 경로를 그대로 따라가는지만 본다 (기울기는 실행기가 3 mm 안으로 제한)."""
     normal = {i - 1: (xyz, label) for i, (xyz, label, _, _) in enumerate(targets)
               if i and label.startswith('stroke ') and
               label.endswith((' descend', ' pen-down', ' lift', ' pen-up'))}
+    slanted_strokes = {label.split(' ')[1] for _, label, _, _ in targets
+                       if label.startswith('stroke ') and label.endswith(' land')}
     failures = []
     for cmd, (xyz, label) in normal.items():
+        if label.split(' ')[1] in slanted_strokes and label.endswith((' pen-down', ' lift')):
+            continue
         if np.linalg.norm(np.asarray(targets[cmd][0])[1:] - np.asarray(xyz)[1:]) > tolerance_mm:
             failures.append({'command': label, 'reason': '명령이 X축 직선이 아님'})
     bad = set()

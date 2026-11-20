@@ -4,6 +4,8 @@ __pycache__/
 venv/
 # 생성물
 out/
+# 작업용 내보내기·분석(인물 사진·노션 본문 포함, 로컬 보관)
+_workspace/
 *.gcode
 opencv_lesson1_output/
 *_strokes_preview.png

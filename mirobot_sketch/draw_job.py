@@ -29,6 +29,7 @@ from . import paths
 
 CANCELLED = "취소했습니다."
 CALIBRATION_RECT_MM = (-60.0, -65.0, 60.0, 55.0)
+PROGRESS_SETTLE_S = 60.0   # 이만큼 그린 뒤부터 남은 시간을 실제 속도로 고쳐 셈 (처음 몇 명령은 빨라 남은 시간을 반으로 셌음)
 
 
 def _floor_tenth(v):
@@ -164,15 +165,22 @@ class DrawJob:
         if setup is not None:
             setup.accept()
 
-    def set_pen_backoff(self, values):
-        """⑤ 그리는 중: 아직 보내지 않은 명령의 끝점 물림(pen.start/end_backoff_mm)을 values로 바꿈.
-        값이 바뀌는 것은 접촉 자세의 X(종이에서 0~1 mm 뒤)뿐이라 명령 수·순서는 그대로입니다.
+    def set_pen_correction(self, values):
+        """⑤ 그리는 중: 아직 보내지 않은 명령의 끝점 물림(pen.start/end_backoff_mm)과, values에 "rise"가 있으면
+        비스듬히 대고 떼기(pen.edge_rise_mm, 켜져 있을 때만 바뀜)를 바꿈. 바뀌는 것은 접촉 자세의 X(종이에서 0~1 mm 뒤)와
+        종이에서 떨어진 중간점의 위·아래뿐이라 명령 수·순서는 그대로입니다.
         반환: 시작점부터 새 값으로 그리는 첫 획 번호. 그리는 중이 아니거나 공중 모드면 None."""
         live = self._live
         if live is None or live["air"] or self.state != "drawing":
             return None
         cfg = copy.deepcopy(self.cfg)
         cfg["pen"]["start_backoff_mm"], cfg["pen"]["end_backoff_mm"] = values["start"], values["end"]
+        if "rise" in values:
+            cfg["pen"]["edge_rise_mm"] = values["rise"]
+        if "rise_low" in values:
+            cfg["pen"]["edge_rise_low_mm"] = values["rise_low"]
+        if "land" in values:
+            cfg["pen"]["edge_land_mm"] = values["land"]
         new = de.Planner(cfg).plan(live["strokes"])
         cmds = live["cmds"]
         if len(new) != len(cmds):
@@ -181,11 +189,13 @@ class DrawJob:
         for i in range(first, len(cmds)):
             if new[i] != cmds[i]:
                 cmds[i] = new[i]           # 목록 항목 교체는 원자적: 실행기는 보낼 때 그 자리 항목을 읽음
-        self.cfg["pen"]["start_backoff_mm"], self.cfg["pen"]["end_backoff_mm"] = values["start"], values["end"]
-        for i in range(first, len(cmds)):
-            if cmds[i][1].endswith(" pen-down"):
-                return int(cmds[i][1].split(" ")[1])
-        return len(live["strokes"])
+        self.cfg["pen"].update(cfg["pen"])
+        applied = next((int(cmds[i][1].split(" ")[1]) for i in range(first, len(cmds))
+                        if cmds[i][1].endswith(" pen-down")), len(live["strokes"]))
+        live["pen_changes"].append({"from_stroke": applied,
+                                    "elapsed_s": round(time.monotonic() - live["started"], 1),
+                                    **{k: cfg["pen"].get(k, 0.0) for k in live["pen_keys"]}})
+        return applied
 
     def join(self, timeout=None):
         if self._thread:
@@ -461,12 +471,18 @@ class DrawJob:
                 self._live["acked"] = acked
                 writer.write(state="running", acked=acked)
                 el = time.monotonic() - started
-                ratio = el / max(est * acked / n, 1e-6) if acked else 1.0   # 실제/예상 속도 비로 보정
+                # 처음 PROGRESS_SETTLE_S 동안은 미리 잰 값. 첫 명령 직후 0.3초 남짓으로 비를 재면 크게 틀림(22:41: 34분 표시, 실제 74분)
+                ratio = el / max(est * acked / n, 1e-6) if acked and el >= PROGRESS_SETTLE_S else 1.0
+                remaining = est * (1 - acked / n) * ratio
                 self.events("progress", acked=acked, total=n, stroke=sum(1 for i in starts if i < acked),
                             strokes=len(strokes), drawn=bisect.bisect_left(last_cmds, acked),
-                            elapsed_s=el, remaining_s=est * (1 - acked / n) * ratio)
+                            elapsed_s=el, remaining_s=remaining)
 
-            self._live = {"cmds": pre["cmds"], "strokes": strokes, "air": ch["air"], "acked": 0}
+            pen_keys = ("start_backoff_mm", "end_backoff_mm", "edge_rise_mm", "edge_rise_low_mm", "edge_land_mm")
+            self._live = {"cmds": pre["cmds"], "strokes": strokes, "air": ch["air"], "acked": 0, "started": started,
+                          "pen_keys": pen_keys,
+                          "pen_changes": [{"from_stroke": 0, "elapsed_s": 0.0,
+                                           **{k: self.cfg["pen"].get(k, 0.0) for k in pen_keys}}]}
             result, decision = self._draw_with_pauses(pre["cmds"], pre["planner"], on_ack)
             if result["result"] == "completed" and self._return_origin and (not ch["air"] or self.cfg.get("requested_start_pose")):
                 ok, why = self._return_to_origin(pre["planner"])
@@ -501,7 +517,8 @@ class DrawJob:
                 "source": {"image": snap["path"], "params": snap["params"]},
                 "virtual": self._virtual, "virtual_speed": self._speed if self._virtual else None,
                 "port": self.summary["port"], "controller_settings": self.summary.get("controller_settings"),
-                "run_id": run_id, "trajectory": str(traj)}, result, self.cfg)
+                "run_id": run_id, "started_local": run_id, "trajectory": str(traj),
+                "pen_changes": self._live["pen_changes"]}, result, self.cfg)
         except de.DrawError as e:
             self._step(e.step, "failed", e.message, e.hint)
             result = {"result": "cancelled" if e.message == CANCELLED else "not_started", "error": e.message}

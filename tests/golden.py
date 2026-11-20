@@ -36,17 +36,16 @@ SAMPLE_TYPES = {"illust1_color.jpg": "illustration", "illust2_color.jpg": "illus
 
 
 def synthetic_images():
-    """선화(사각형·원·잡음 점)와 면으로 된 도형(명암·글씨)."""
-    line = np.full((400, 400), 255, np.uint8)
-    cv2.rectangle(line, (80, 80), (320, 320), 0, 3)
-    cv2.circle(line, (200, 200), 60, 0, 3)
-    for x in range(20, 60, 12):
-        cv2.line(line, (x, 20), (x + 6, 30), 0, 2)
-    shade = np.full((300, 420), 230, np.uint8)
-    cv2.circle(shade, (140, 150), 90, 90, -1)
-    cv2.rectangle(shade, (230, 60), (380, 240), 160, -1)
-    cv2.putText(shade, "Hi", (250, 170), cv2.FONT_HERSHEY_SIMPLEX, 2.5, 40, 6)
-    return {"line": sp.resize_max_side(line), "shade": sp.resize_max_side(shade)}
+    """선화(사각형·원·잡음 점)와 면으로 된 도형(명암·글씨).
+
+    그림은 tests/data/synthetic_*.png로 고정해 둔다. cv2로 그때그때 그리면 OpenCV 버전에 따라 픽셀이 바뀌어
+    (5.1에서 putText 글씨 모양이 달라짐) 파이프라인이 그대로여도 기준값이 어긋난다.
+    """
+    out = {}
+    for name in ("line", "shade"):
+        data = np.fromfile(str(ROOT / "tests" / "data" / f"synthetic_{name}.png"), dtype=np.uint8)
+        out[name] = sp.resize_max_side(cv2.imdecode(data, cv2.IMREAD_GRAYSCALE))
+    return out
 
 
 def cases_for(image_type):
