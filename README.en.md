@@ -28,6 +28,7 @@ photo ─▶ line-extraction pipeline ─▶ strokes (paper mm) ─▶ checks (a
 - [Usage](#usage)
 - [Agent panel](#agent-panel-editing-by-chat)
 - [3D simulation](#3d-simulation-check-without-a-robot)
+- [Real drawings: fewer vertical marks at stroke ends](#real-drawings-fewer-vertical-marks-at-stroke-ends)
 - [Tech stack and design docs](#tech-stack-and-design-docs)
 - [Development report](#development-report)
 - [Delivery (CI/CD)](#delivery-cicd)
@@ -312,6 +313,43 @@ mirobot-sim --reach-map out/reach_map.png
 ```
 
 With the RViz 3D environment installed, `Advanced` → [View in RViz 3D] in the GUI plays the trajectory on the robot-arm model, and while drawing it follows the command replies. Install it by following the [procedure above](#rviz-3d-environment-optional-wsl2--ros-2-humble--mirobot-model).
+
+## Real drawings: fewer vertical marks at stroke ends
+
+Every time the pen touched down or lifted, it left a 2–3 mm vertical mark at the stroke end. At first these marks made the whole drawing look like a comb. Below are phone photos of paper the robot drew on. All four had uneven lighting flattened and contrast raised by the same rule.
+
+<table>
+<tr>
+<td><img src="assets/real-drawings/2026-11-16-before.jpg" alt="11-16 real drawing: dense vertical marks under the hair, clothes and eyes" width="400"></td>
+<td><img src="assets/real-drawings/2026-11-18-1553.jpg" alt="11-18 15:53 real drawing: more slanted lift, many marks remain" width="400"></td>
+</tr>
+<tr>
+<td align="center">① 11-16 22:41 · 489 strokes</td>
+<td align="center">② 11-18 15:53 · 488 strokes (same source as ①)</td>
+</tr>
+<tr>
+<td><img src="assets/real-drawings/2026-11-18-2044.jpg" alt="11-18 20:44 real drawing: only end-point marks slightly fewer" width="400"></td>
+<td><img src="assets/real-drawings/2026-11-24-after.jpg" alt="11-24 real drawing: after pressing 1 mm less, vertical marks are barely visible" width="400"></td>
+</tr>
+<tr>
+<td align="center">③ 11-18 20:44 · 424 strokes (same source as ①)</td>
+<td align="center">④ 11-24 20:44 · 372 strokes (different source)</td>
+</tr>
+</table>
+
+| Drawing | Slanted lift (`edge_rise_mm`) | Touch-down (`edge_land_mm`) | Press (`down_extra_mm`) | Result |
+|---|---|---|---|---|
+| ① 11-16 22:41 | 1.0 | 0 | −0.4 | The whole drawing was covered in marks hanging downward. The eyes looked like combs: a horizontal line with vertical lines under it. |
+| ② 11-18 15:53 | 1.5 | −1.0 (adjusted while drawing) | −0.4 | Marks over 1.8 mm at 25% of start points and 24% of end points (camera, out of 485 strokes with a visible line). |
+| ③ 11-18 20:44 | 1.75 | −0.75 | −0.4 | Only end-point marks dropped, to 18%; start points stayed at 24% (out of 398 visible strokes). The photo looks much like ②. |
+| 11-19 15:14 (same source and strokes as ③) | 1.75 | −0.75 | **−1.4** | Compared with ③, start-point marks fell from 96 to 52 (23% → 12%) and end-point marks from 71 to 44 (17% → 10%), out of 424 planned strokes. The user also confirmed it on the paper. |
+| ④ 11-24 20:44 | 1.75 | −1.25 | −1.4 | Hanging marks in the hair, face and clothes are barely visible. The source photo differs, so no numbers are compared. |
+
+- **What did not help:** lifting at a slant and touching down from above left the start-point marks unchanged (② → ③). Test sheets also showed that touch-down speed (50–400 mm/min) has no effect on mark length.
+- **What helped:** pressing the whole line 1 mm less (`down_extra_mm` −0.4 → −1.4). The likely cause is that the pen tip is pushed up as pressure builds and drops back as it lifts, leaving the mark (inference).
+- **Cost:** lighter pressure means fainter lines. Strokes the camera counted as missing rose from 23 to 44, so missing lines are still being watched.
+
+Measurement details are in [LOG/2026-11-16](LOG/2026-11-16-end-ticks-edge-rise.md), [11-18](LOG/2026-11-18-land-from-above.md) and [11-19](LOG/2026-11-19-depth-ladder.md) (Korean).
 
 ## Tech stack and design docs
 
