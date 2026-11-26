@@ -237,9 +237,13 @@ RViz 3D 환경이 있으면 GUI의 `고급` → [RViz 3D로 보기]로 로봇팔
 
 ### 획 끝 비교
 
-펜이 종이에 닿고 떨어질 때 획 끝마다 2~3 mm짜리 세로 자국이 남았습니다. 처음에는 이 자국 때문에 그림 전체가 빗살처럼 보였습니다. 아래는 로봇이 그린 종이를 휴대폰으로 찍은 사진입니다. 네 장 모두 조명 얼룩을 고르게 펴고 같은 기준으로 대비를 높였습니다.
+펜이 종이에 닿고 떨어질 때 획 끝마다 2~3 mm짜리 세로 자국이 남았습니다. 처음에는 이 자국 때문에 그림 전체가 빗살처럼 보였습니다. 아래는 로봇이 그린 종이를 휴대폰으로 찍은 사진입니다. 네 장 모두 조명 얼룩을 고르게 펴고 같은 기준으로 대비를 높였습니다. 원본과 얼마나 닮았는지 볼 수 있게 원본을 작은 썸네일로 함께 실었습니다([출처](#실물-그림-원본-출처)).
 
 <table>
+<tr>
+<td align="center"><img src="assets/real-drawings/sources/stage-original.jpg" alt="①~③에 쓴 원본: 무대에서 노래하는 인물 사진" width="120"><br>①~③ 원본</td>
+<td align="center"><img src="assets/real-drawings/sources/portrait-original.jpg" alt="④에 쓴 원본: 장미를 든 인물 사진" width="120"><br>④ 원본</td>
+</tr>
 <tr>
 <td><img src="assets/real-drawings/2026-11-16-before.jpg" alt="11-16 실물 그림: 머리·옷·눈 아래로 세로 자국이 빽빽함" width="400"></td>
 <td><img src="assets/real-drawings/2026-11-18-1553.jpg" alt="11-18 15:53 실물 그림: 비스듬히 떼기를 늘렸지만 세로 자국이 많이 남음" width="400"></td>
@@ -272,11 +276,35 @@ RViz 3D 환경이 있으면 GUI의 `고급` → [RViz 3D로 보기]로 로봇팔
 
 자세한 측정은 [LOG/2026-11-16](LOG/2026-11-16-end-ticks-edge-rise.md), [11-18](LOG/2026-11-18-land-from-above.md), [11-19](LOG/2026-11-19-depth-ladder.md)에 있습니다.
 
+### 교수님 초상 실물 그림
+
+<table>
+<tr>
+<td align="center"><img src="assets/real-drawings/sources/professor-original.jpg" alt="교수님 초상 원본" width="200"><br>원본(본인 동의)</td>
+<td align="center"><img src="assets/real-drawings/2026-11-19-professor.jpg" alt="교수님 초상 실물 그림: 안경, 입, 옷깃 윤곽을 옅은 샤프 선으로 그림" width="400"><br>11-19 16:38 · 109획 · 14.5분 (1 mm 덜 누른 설정)</td>
+</tr>
+</table>
+
+1 mm 덜 누른 설정으로 그린 그림입니다. 앱의 선 확인은 109획 중 24획을 '안 보임'으로 셌지만, 종이에는 빠진 선이 없었습니다.
+
 ### 애니메이션 장면 실물 그림
 
-<img src="assets/real-drawings/anime-result.jpg" width="560" alt="연필로 종이에 그린 애니메이션 장면의 실물 스케치">
+<table>
+<tr>
+<td align="center"><img src="assets/real-drawings/sources/anime-original.jpg" alt="애니메이션 장면 원본" width="200"><br>원본</td>
+<td align="center"><img src="assets/real-drawings/anime-result.jpg" alt="연필로 종이에 그린 애니메이션 장면의 실물 스케치" width="400"><br>실물 그림</td>
+</tr>
+</table>
 
 9-30 실행으로 보입니다(추정, 205획). 같은 장면을 그린 두 기록을 선 모양으로 비교했습니다. [9-30 실행](LOG/runs/run-20260930-211640.json) · [11-03 실행](LOG/runs/run-20261103-194436.json)
+
+#### 실물 그림 원본 출처
+
+원본 썸네일은 로봇 그림이 원본과 얼마나 닮았는지 비교하려고 작게(긴 변 200 px) 인용했습니다. 저작권은 각 권리자에게 있으며, 권리자가 요청하면 내립니다.
+
+- ①~③·④: 가수 아이유 사진. 인터넷에 공개된 사진이며 원 촬영자는 확인하지 못했습니다.
+- 교수님 초상: 본인 동의를 받아 실었습니다.
+- 애니메이션: 『SPY×FAMILY』 장면(© 遠藤達哉/集英社・SPY×FAMILY製作委員会).
 
 ## 한계와 다음 단계
 
