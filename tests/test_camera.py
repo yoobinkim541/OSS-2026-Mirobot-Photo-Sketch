@@ -285,3 +285,14 @@ class CameraChoiceTest(unittest.TestCase):
 class PreviewPolicyTest(unittest.TestCase):
     def test_unittest_does_not_auto_open_camera(self):
         self.assertFalse(camera.preview_allowed())
+
+    def test_app_that_merely_imports_unittest_opens_camera(self):
+        """앱에서 matplotlib → pyparsing.testing이 unittest를 불러와도 테스트 실행은 아님."""
+        import os
+        import subprocess
+        env = {k: v for k, v in os.environ.items() if k != "MIROBOT_CAMERA"}
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
+        out = subprocess.run(
+            [sys.executable, "-c", "import unittest; from mirobot_sketch import camera; print(camera.preview_allowed())"],
+            capture_output=True, text=True, env=env, timeout=120, check=True).stdout.strip()
+        self.assertEqual(out, "True")

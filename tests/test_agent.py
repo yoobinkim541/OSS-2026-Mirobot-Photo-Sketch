@@ -904,6 +904,23 @@ class CliEventParsingTest(unittest.TestCase):
         self.assertEqual(seen["cmd"][1:4], ["exec", "resume", "th-9"])
         self.assertEqual(seen["stdin"], "다음")   # 이어갈 때는 시스템 지시를 다시 붙이지 않음
 
+    def test_codex_auto_approves_mirobot_mcp_tools(self):
+        """approval_policy="never"만으로는 codex가 MCP 도구 호출을 승인 없이 거절함 (codex-cli 0.172)."""
+        import tomllib
+        _, _, run = self.run_backend(bk.CodexBackend, [{"type": "turn.completed"}])
+        cfg = {}
+        for flag, override in zip(run.cmd, run.cmd[1:]):
+            if flag != "-c":
+                continue
+            node = cfg
+            key, value = override.split("=", 1)
+            *parents, leaf = key.split(".")
+            for part in parents:
+                node = node.setdefault(part, {})
+            node[leaf] = tomllib.loads(f"v = {value}")["v"]
+        self.assertEqual(cfg["approval_policy"], "never")
+        self.assertEqual(cfg["mcp_servers"]["mirobot"]["default_tools_approval_mode"], "approve")
+
 
 class DrawingLockTest(SessionTestBase):
     """그리는 중 잠금은 진행 중인 계산의 커밋과, 선검사를 통과한 뒤의 변경도 막아야 한다."""

@@ -375,6 +375,8 @@ class CodexBackend(_CliBackend):
         return ["-c", f"mcp_servers.mirobot.command={_toml_str(cmd)}",
                 "-c", "mcp_servers.mirobot.args=[" + ", ".join(_toml_str(a) for a in args) + "]",
                 "-c", "mcp_servers.mirobot.env={" + env + "}",
+                # approval_policy="never"만 두면 codex가 MCP 도구 호출을 승인 요청 없이 거절함
+                "-c", 'mcp_servers.mirobot.default_tools_approval_mode="approve"',
                 "-c", 'sandbox_mode="read-only"',
                 "-c", 'approval_policy="never"']
 
