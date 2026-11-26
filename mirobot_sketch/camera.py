@@ -40,12 +40,25 @@ class CameraInfo:
         return f"{self.name} ({self.index})"
 
 
+def _running_tests():
+    """테스트 실행기 안인지. unittest가 불러와졌다는 것만으로는 아님(앱도 matplotlib → pyparsing.testing으로 불러옴)."""
+    if "_pytest" in sys.modules:
+        return True
+    main = sys.modules.get("__main__")
+    spec = getattr(main, "__spec__", None)
+    if spec is not None and spec.name.split(".")[0] == "unittest":    # python -m unittest
+        return True
+    case = sys.modules.get("unittest.case")                             # python tests/test_x.py
+    return case is not None and main is not None and any(
+        isinstance(v, type) and issubclass(v, case.TestCase) for v in vars(main).values())
+
+
 def preview_allowed():
     """테스트·CI는 카메라를 열지 않습니다. MIROBOT_CAMERA=1이면 강제로 엽니다."""
     flag = os.environ.get("MIROBOT_CAMERA", "").strip()
     if flag == "1":
         return True
-    if flag == "0" or "unittest" in __import__("sys").modules:
+    if flag == "0" or _running_tests():
         return False
     return True
 
