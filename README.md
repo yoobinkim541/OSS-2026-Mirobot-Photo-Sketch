@@ -237,11 +237,11 @@ RViz 3D 환경이 있으면 GUI의 `고급` → [RViz 3D로 보기]로 로봇팔
 
 ### 획 끝 비교
 
-펜이 종이에 닿고 떨어질 때 획 끝마다 2~3 mm짜리 세로 자국이 남았습니다. 처음에는 이 자국 때문에 그림 전체가 빗살처럼 보였습니다. 아래는 로봇이 그린 종이를 휴대폰으로 찍은 사진입니다. 네 장 모두 조명 얼룩을 고르게 펴고 같은 기준으로 대비를 높였습니다. 원본과 얼마나 닮았는지 볼 수 있게 원본을 작은 썸네일로 함께 실었습니다([출처](#실물-그림-원본-출처)).
+펜이 종이에 닿고 떨어질 때 획 끝마다 2~3 mm짜리 세로 자국이 남았습니다. 처음에는 이 자국 때문에 그림 전체가 빗살처럼 보였습니다. 아래는 로봇이 그린 종이를 휴대폰으로 찍은 사진입니다. 다섯 장 모두 조명 얼룩을 고르게 펴고 같은 기준으로 대비를 높였습니다. 원본과 얼마나 닮았는지 볼 수 있게 원본을 작은 썸네일로 함께 실었습니다([출처](#실물-그림-원본-출처)).
 
 <table>
 <tr>
-<td align="center"><img src="assets/real-drawings/sources/stage-original.jpg" alt="①~③에 쓴 원본: 무대에서 노래하는 인물 사진" width="120"><br>①~③ 원본</td>
+<td align="center"><img src="assets/real-drawings/sources/stage-original.jpg" alt="①~③과 11-19에 쓴 원본: 무대에서 노래하는 인물 사진" width="120"><br>①~③·11-19 원본</td>
 <td align="center"><img src="assets/real-drawings/sources/portrait-original.jpg" alt="④에 쓴 원본: 장미를 든 인물 사진" width="120"><br>④ 원본</td>
 </tr>
 <tr>
@@ -254,11 +254,19 @@ RViz 3D 환경이 있으면 GUI의 `고급` → [RViz 3D로 보기]로 로봇팔
 </tr>
 <tr>
 <td><img src="assets/real-drawings/2026-11-18-2044.jpg" alt="11-18 20:44 실물 그림: 끝점 자국만 조금 줄어듦" width="400"></td>
-<td><img src="assets/real-drawings/2026-11-24-after.jpg" alt="11-24 실물 그림: 1 mm 덜 누른 뒤 세로 자국이 거의 보이지 않음" width="400"></td>
+<td><img src="assets/real-drawings/2026-11-19-lighter.jpg" alt="11-19 실물 그림: ③과 같은 획을 1 mm 덜 눌러 그리자 세로 자국이 크게 줄고 선이 옅어짐" width="400"></td>
 </tr>
 <tr>
 <td align="center">③ 11-18 20:44 · 424획 (①과 같은 원본)</td>
+<td align="center">11-19 15:14 · 424획 (③과 같은 원본·획, 1 mm 덜 누름)</td>
+</tr>
+<tr>
+<td><img src="assets/real-drawings/2026-11-24-after.jpg" alt="11-24 실물 그림: 1 mm 덜 누른 뒤 세로 자국이 거의 보이지 않음" width="400"></td>
+<td></td>
+</tr>
+<tr>
 <td align="center">④ 11-24 20:44 · 372획 (다른 원본)</td>
+<td></td>
 </tr>
 </table>
 
@@ -302,8 +310,9 @@ RViz 3D 환경이 있으면 GUI의 `고급` → [RViz 3D로 보기]로 로봇팔
 
 원본 썸네일은 로봇 그림이 원본과 얼마나 닮았는지 비교하려고 작게(긴 변 200 px) 인용했습니다. 저작권은 각 권리자에게 있으며, 권리자가 요청하면 내립니다.
 
-- ①~③: 인터넷에 공개된 무대 사진(원 촬영자 미확인).
+- ①~③·11-19: 인터넷에 공개된 무대 사진(원 촬영자 미확인).
 - ④: 인터넷에 공개된 가수 아이유 사진(원 촬영자 미확인).
+- 교수님 초상: 로봇신문, ["'젊은 로봇 공학자' (27) ETRI 최성록 박사"](http://www.irobotnews.com/news/articleView.html?idxno=17997)(2019-08-18) 기사 사진.
 - 애니메이션: 『SPY×FAMILY』 장면(© 遠藤達哉/集英社・SPY×FAMILY製作委員会).
 
 ## 한계와 다음 단계

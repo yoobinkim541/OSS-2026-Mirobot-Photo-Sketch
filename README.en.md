@@ -239,11 +239,11 @@ Hardware diagram. The green-handled screwdriver acts as a weight to reduce penci
 
 ### Stroke-end comparison
 
-Every time the pen touched down or lifted, it left a 2–3 mm vertical mark at the stroke end. At first these marks made the whole drawing look like a comb. Below are phone photos of paper the robot drew on. All four had uneven lighting flattened and contrast raised by the same rule. Small thumbnails of the source photos are included so you can judge the likeness ([sources](#sources-of-the-real-drawing-originals)).
+Every time the pen touched down or lifted, it left a 2–3 mm vertical mark at the stroke end. At first these marks made the whole drawing look like a comb. Below are phone photos of paper the robot drew on. All five had uneven lighting flattened and contrast raised by the same rule. Small thumbnails of the source photos are included so you can judge the likeness ([sources](#sources-of-the-real-drawing-originals)).
 
 <table>
 <tr>
-<td align="center"><img src="assets/real-drawings/sources/stage-original.jpg" alt="Source for ①–③: a person singing on stage" width="120"><br>Source for ①–③</td>
+<td align="center"><img src="assets/real-drawings/sources/stage-original.jpg" alt="Source for ①–③ and 11-19: a person singing on stage" width="120"><br>Source for ①–③ and 11-19</td>
 <td align="center"><img src="assets/real-drawings/sources/portrait-original.jpg" alt="Source for ④: a person holding a rose" width="120"><br>Source for ④</td>
 </tr>
 <tr>
@@ -256,11 +256,19 @@ Every time the pen touched down or lifted, it left a 2–3 mm vertical mark at t
 </tr>
 <tr>
 <td><img src="assets/real-drawings/2026-11-18-2044.jpg" alt="11-18 20:44 real drawing: only end-point marks slightly fewer" width="400"></td>
-<td><img src="assets/real-drawings/2026-11-24-after.jpg" alt="11-24 real drawing: after pressing 1 mm less, vertical marks are barely visible" width="400"></td>
+<td><img src="assets/real-drawings/2026-11-19-lighter.jpg" alt="11-19 real drawing: the strokes of ③ pressed 1 mm less, far fewer vertical marks and lighter lines" width="400"></td>
 </tr>
 <tr>
 <td align="center">③ 11-18 20:44 · 424 strokes (same source as ①)</td>
+<td align="center">11-19 15:14 · 424 strokes (same source and strokes as ③, pressed 1 mm less)</td>
+</tr>
+<tr>
+<td><img src="assets/real-drawings/2026-11-24-after.jpg" alt="11-24 real drawing: after pressing 1 mm less, vertical marks are barely visible" width="400"></td>
+<td></td>
+</tr>
+<tr>
 <td align="center">④ 11-24 20:44 · 372 strokes (different source)</td>
+<td></td>
 </tr>
 </table>
 
@@ -304,8 +312,9 @@ Likely the September 30 run (inferred, 205 strokes), based on the line shapes fr
 
 The source thumbnails are quoted at a small size (200 px on the long side) only to compare the robot drawings with their originals. Copyright stays with each rights holder, and any of them will be removed on request.
 
-- ①–③: a stage photo published online (photographer unknown).
+- ①–③ and 11-19: a stage photo published online (photographer unknown).
 - ④: a photo of the singer IU published online (photographer unknown).
+- Portrait of the professor: photo from the Robot Newspaper article ["'젊은 로봇 공학자' (27) ETRI 최성록 박사"](http://www.irobotnews.com/news/articleView.html?idxno=17997) (2019-08-18).
 - Anime: a scene from *SPY×FAMILY* (© Tatsuya Endo/Shueisha, SPY×FAMILY Project).
 
 ## Limits and next steps
