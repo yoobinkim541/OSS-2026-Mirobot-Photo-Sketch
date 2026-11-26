@@ -312,7 +312,7 @@ Likely the September 30 run (inferred, 205 strokes), based on the line shapes fr
 
 The source thumbnails are quoted at a small size (200 px on the long side) only to compare the robot drawings with their originals. Copyright stays with each rights holder, and any of them will be removed on request.
 
-- ①–③ and 11-19: a stage photo published online (photographer unknown).
+- ①–③ and 11-19: a stage photo of the singer IU published online (photographer unknown).
 - ④: a photo of the singer IU published online (photographer unknown).
 - Portrait of the professor: photo from the Robot Newspaper article ["'젊은 로봇 공학자' (27) ETRI 최성록 박사"](http://www.irobotnews.com/news/articleView.html?idxno=17997) (2019-08-18).
 - Anime: a scene from *SPY×FAMILY* (© Tatsuya Endo/Shueisha, SPY×FAMILY Project).
