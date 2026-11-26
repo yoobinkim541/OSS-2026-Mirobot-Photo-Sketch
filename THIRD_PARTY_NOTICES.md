@@ -74,3 +74,10 @@ SOFTWARE.
 - **출처:** Wikimedia Commons, "Tagosaku to Mokube no Tokyo Kenbutsu.jpg", 기타자와 라쿠텐(北澤楽天, 1876–1955) 『田吾作と杢兵衛の東京見物』(1902), https://commons.wikimedia.org/wiki/File:Tagosaku_to_Mokube_no_Tokyo_Kenbutsu.jpg
 - **라이선스:** 퍼블릭 도메인 (Wikimedia Commons 표기 "Public domain", 일본에서 2005년 저작권 만료)
 - **용도:** README의 흑백 만화 처리 과정 그림과 데모 영상의 예시 입력입니다. 앱이나 패키지에는 포함되지 않습니다.
+
+## 실물 그림 원본 썸네일 (README 실물 그림 비교)
+
+- **파일:** `assets/real-drawings/sources/` (긴 변 200px로 줄인 썸네일 4장)
+- **출처:** `stage-original.jpg`는 인터넷에 공개된 무대 사진(원 촬영자 미확인), `portrait-original.jpg`는 인터넷에 공개된 가수 아이유 사진(원 촬영자 미확인), `anime-original.jpg`는 『SPY×FAMILY』 애니메이션 장면(© 遠藤達哉/集英社・SPY×FAMILY製作委員会), `professor-original.jpg`는 본인 동의를 받은 교수님 초상입니다.
+- **라이선스:** 저작권은 각 권리자에게 있습니다. 이 저장소의 MIT 라이선스는 이 파일들에 적용되지 않으며, 권리자가 요청하면 내립니다.
+- **용도:** README에서 로봇이 그린 실물 그림과 원본을 나란히 비교하는 데만 씁니다. 앱이나 패키지에는 포함되지 않습니다.

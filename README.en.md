@@ -239,9 +239,13 @@ Hardware diagram. The green-handled screwdriver acts as a weight to reduce penci
 
 ### Stroke-end comparison
 
-Every time the pen touched down or lifted, it left a 2–3 mm vertical mark at the stroke end. At first these marks made the whole drawing look like a comb. Below are phone photos of paper the robot drew on. All four had uneven lighting flattened and contrast raised by the same rule.
+Every time the pen touched down or lifted, it left a 2–3 mm vertical mark at the stroke end. At first these marks made the whole drawing look like a comb. Below are phone photos of paper the robot drew on. All four had uneven lighting flattened and contrast raised by the same rule. Small thumbnails of the source photos are included so you can judge the likeness ([sources](#sources-of-the-real-drawing-originals)).
 
 <table>
+<tr>
+<td align="center"><img src="assets/real-drawings/sources/stage-original.jpg" alt="Source for ①–③: a person singing on stage" width="120"><br>Source for ①–③</td>
+<td align="center"><img src="assets/real-drawings/sources/portrait-original.jpg" alt="Source for ④: a person holding a rose" width="120"><br>Source for ④</td>
+</tr>
 <tr>
 <td><img src="assets/real-drawings/2026-11-16-before.jpg" alt="11-16 real drawing: dense vertical marks under the hair, clothes and eyes" width="400"></td>
 <td><img src="assets/real-drawings/2026-11-18-1553.jpg" alt="11-18 15:53 real drawing: more slanted lift, many marks remain" width="400"></td>
@@ -274,11 +278,36 @@ Every time the pen touched down or lifted, it left a 2–3 mm vertical mark at t
 
 Measurement details are in [LOG/2026-11-16](LOG/2026-11-16-end-ticks-edge-rise.md), [11-18](LOG/2026-11-18-land-from-above.md) and [11-19](LOG/2026-11-19-depth-ladder.md) (Korean).
 
+### Portrait of the professor
+
+<table>
+<tr>
+<td align="center"><img src="assets/real-drawings/sources/professor-original.jpg" alt="Source portrait of the professor" width="200"><br>Source (with consent)</td>
+<td align="center"><img src="assets/real-drawings/2026-11-19-professor.jpg" alt="Real drawing of the professor: glasses, mouth and collar drawn in light pencil lines" width="400"><br>11-19 16:38 · 109 strokes · 14.5 min (pressing 1 mm less)</td>
+</tr>
+</table>
+
+Drawn with the 1 mm lighter press. The app's line check counted 24 of 109 strokes as missing, but none were missing on the paper.
+
 ### Physical drawing of an anime scene
 
-<img src="assets/real-drawings/anime-result.jpg" width="560" alt="Pencil sketch of an anime scene drawn on paper by the robot">
+<table>
+<tr>
+<td align="center"><img src="assets/real-drawings/sources/anime-original.jpg" alt="Source anime scene" width="200"><br>Source</td>
+<td align="center"><img src="assets/real-drawings/anime-result.jpg" alt="Pencil sketch of an anime scene drawn on paper by the robot" width="400"><br>Real drawing</td>
+</tr>
+</table>
 
 Likely the September 30 run (inferred, 205 strokes), based on the line shapes from two runs of the same scene. [September 30 run](LOG/runs/run-20260930-211640.json) · [November 3 run](LOG/runs/run-20261103-194436.json)
+
+#### Sources of the real-drawing originals
+
+The source thumbnails are quoted at a small size (200 px on the long side) only to compare the robot drawings with their originals. Copyright stays with each rights holder, and any of them will be removed on request.
+
+- ①–③: a stage photo published online (photographer unknown).
+- ④: a photo of the singer IU published online (photographer unknown).
+- Portrait of the professor: included with the professor's consent.
+- Anime: a scene from *SPY×FAMILY* (© Tatsuya Endo/Shueisha, SPY×FAMILY Project).
 
 ## Limits and next steps
 
