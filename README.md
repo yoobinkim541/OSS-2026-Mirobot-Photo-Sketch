@@ -18,6 +18,22 @@
 
 > 앱의 화면 문구는 현재 **한국어만** 지원합니다. 설계와 기술 선택은 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)에 정리했습니다.
 
+## 영상
+
+### 실물 시연 (2:08)
+
+WLKATA Mirobot이 0.5 mm 샤프로 스케치를 그리는 실제 촬영(1.5배속)과, 획 끝 세로 자국을 줄여 온 실물 사진입니다.
+
+https://github.com/user-attachments/assets/5a8c62d1-4544-4af9-aa52-beab30442bdd
+
+### 앱 데모 (3:08)
+
+실제 앱 화면입니다. 사진 열기 → 11단계 → 실사 사진·컬러 일러스트·흑백 만화 비교 → 값 조절 → 명암 빗금 → 종이 배치 → 관절 시뮬레이션 → 로봇 없는 가상 그리기 순서입니다.
+
+https://github.com/user-attachments/assets/866b3fe0-2277-41de-85b4-e9fe8e66a746
+
+원본 파일은 [Releases의 media-v1](https://github.com/yoobinkim541/OSS-2026-Mirobot-Photo-Sketch/releases/tag/media-v1)에서 받을 수 있습니다. 내레이션은 로컬 Qwen3-TTS로 만들었습니다.
+
 ## 왜 만들었나
 
 그림이나 사진을 보고 따라 그릴 때는 보통 세 단계를 거칩니다.
@@ -36,6 +52,7 @@
 
 ## 목차
 
+- [영상](#영상)
 - [왜 만들었나](#왜-만들었나)
 - [주요 기능](#주요-기능)
 - [설치](#설치)

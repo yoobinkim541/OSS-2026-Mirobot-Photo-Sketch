@@ -20,6 +20,22 @@ photo ─▶ line-extraction pipeline ─▶ strokes (paper mm) ─▶ checks (a
 
 > **The app's on-screen text is currently Korean only**, so the screenshots show a Korean UI. Design and technology choices are described in [docs/ARCHITECTURE.en.md](docs/ARCHITECTURE.en.md). Some deeper notes (work logs in `LOG/`, OpenCV study notes) are in Korean.
 
+## Videos
+
+### Robot drawing (2:08)
+
+Real footage (1.5× speed) of the WLKATA Mirobot drawing a sketch with a 0.5 mm mechanical pencil, followed by the real drawings that show how the vertical marks at stroke ends were reduced. Narration and captions are in Korean.
+
+https://github.com/user-attachments/assets/5a8c62d1-4544-4af9-aa52-beab30442bdd
+
+### App demo (3:08)
+
+A recording of the real app: open a photo → the 11 stages → photo, color illustration and black-and-white comic compared → change values → tone hatching → paper layout → joint simulation → virtual drawing without a robot.
+
+https://github.com/user-attachments/assets/866b3fe0-2277-41de-85b4-e9fe8e66a746
+
+The original files are in [Releases: media-v1](https://github.com/yoobinkim541/OSS-2026-Mirobot-Photo-Sketch/releases/tag/media-v1). The narration was generated locally with Qwen3-TTS.
+
 ## Why
 
 Copying a picture or a photo usually takes three steps.
@@ -38,6 +54,7 @@ People who are not used to drawing get stuck at the first step. Placing the eyes
 
 ## Contents
 
+- [Videos](#videos)
 - [Why](#why)
 - [Features](#features)
 - [Installation](#installation)
