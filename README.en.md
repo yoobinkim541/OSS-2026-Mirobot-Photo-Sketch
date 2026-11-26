@@ -8,7 +8,7 @@
 [![Release](https://img.shields.io/github/v/release/yoobinkim541/OSS-2026-Mirobot-Photo-Sketch)](https://github.com/yoobinkim541/OSS-2026-Mirobot-Photo-Sketch/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-An open-source project that turns a photo into line paths with OpenCV and has a [WLKATA Mirobot](https://www.wlkata.com/) robot arm draw them with a pen on an A4 sheet fixed to a wall. You do not need a robot to try the line extraction, the 3D simulation and the virtual simulation.
+An open-source project in which a robot arm draws **the sketch, the first and hardest step of copying a picture**. Give it a photo or a drawing and it turns it into line paths with OpenCV, then a [WLKATA Mirobot](https://www.wlkata.com/) robot arm draws them lightly with a 0.5 mm mechanical pencil on an A4 sheet fixed to a wall. You do not need a robot to try the line extraction, the 3D simulation and the virtual simulation.
 
 <p align="center"><img src="assets/screenshots/ui-paper.png" width="820" alt="Mirobot Sketch: line paths extracted from a photo, laid out on an A4 sheet"></p>
 
@@ -20,14 +20,32 @@ photo ─▶ line-extraction pipeline ─▶ strokes (paper mm) ─▶ checks (a
 
 > **The app's on-screen text is currently Korean only**, so the screenshots show a Korean UI. Design and technology choices are described in [docs/ARCHITECTURE.en.md](docs/ARCHITECTURE.en.md). Some deeper notes (work logs in `LOG/`, OpenCV study notes) are in Korean.
 
+## Why
+
+Copying a picture or a photo usually takes three steps.
+
+| Step | What it is | In this project |
+|---|---|---|
+| 1. Sketch | lay down the shapes and proportions as an underdrawing | **drawn by the robot arm** |
+| 2. Line art | draw clean lines over the underdrawing | a person |
+| 3. Coloring | fill the shapes with color | a person |
+
+People who are not used to drawing get stuck at the first step. Placing the eyes, nose and mouth, getting the proportions of the face and body and the tilt of the head right is hard without practice, and every mistake means erasing and starting over, so it also takes the most time. Line art and coloring, by contrast, only need an underdrawing to follow. So this project takes on the first step only.
+
+- **A sketch from one image:** photos, color illustrations and black-and-white comics each go through their own process to become line paths ([Image types](#image-types-process-and-results)), and the robot arm draws them on A4 paper.
+- **Drawn lightly:** a sketch is an underdrawing, so its lines are not pressed hard. The aim is that after you ink clean lines over it and color it, the underdrawing does not show through. Pressing the pen 1 mm less to reduce the vertical marks at stroke ends points the same way ([Real drawings](#real-drawings-fewer-vertical-marks-at-stroke-ends)).
+- **An underdrawing you shape:** you check each stage, change values, and remove or restore strokes by chat until the underdrawing is what you want, then draw. Before the robot moves, a person checks the paper and its surroundings.
+
 ## Contents
 
+- [Why](#why)
 - [Features](#features)
 - [Installation](#installation)
 - [Why Ubuntu 22.04 + ROS 2 Humble](#why-ubuntu-2204--ros-2-humble)
 - [Usage](#usage)
 - [Agent panel](#agent-panel-editing-by-chat)
 - [3D simulation](#3d-simulation-check-without-a-robot)
+- [Image types: process and results](#image-types-process-and-results)
 - [Real drawings: fewer vertical marks at stroke ends](#real-drawings-fewer-vertical-marks-at-stroke-ends)
 - [Tech stack and design docs](#tech-stack-and-design-docs)
 - [Development report](#development-report)
@@ -62,7 +80,7 @@ photo ─▶ line-extraction pipeline ─▶ strokes (paper mm) ─▶ checks (a
 </tr>
 </table>
 
-The sample photo is a public-domain NASA photo ([credit](THIRD_PARTY_NOTICES.md)).
+The sample images are a public-domain NASA photo, a Wikipe-tan illustration (CC BY-SA 3.0) and a 1902 comic (public domain) ([credits](THIRD_PARTY_NOTICES.md)).
 
 ## Installation
 
@@ -314,6 +332,37 @@ mirobot-sim --reach-map out/reach_map.png
 
 With the RViz 3D environment installed, `Advanced` → [View in RViz 3D] in the GUI plays the trajectory on the robot-arm model, and while drawing it follows the command replies. Install it by following the [procedure above](#rviz-3d-environment-optional-wsl2--ros-2-humble--mirobot-model).
 
+## Image types: process and results
+
+Choosing the image type under "01 사진과 추천 설정" (`--type` on the command line) changes the stage settings. A photo has no drawn lines, so lines are made from it; an illustration or a comic already has lines, so they are followed. The figures below run three sample images with each type's recommended settings unchanged. Only the stages that change most for that type are shown, and the numbers under them are the summaries from the app's stage strip. The drawing size is 100 mm on the long side (regenerate with `assets/make_pipeline_figures.py`).
+
+| | Photo (`photo`) | Color illustration (`illustration`) | Black-and-white comic (`manga`) |
+|---|---|---|---|
+| Background | removed with rembg | kept | kept |
+| Preprocessing | 5 px blur | 5 px blur | 11 px median to remove screentone, then 5 px blur |
+| Making lines | a line-drawing model turns the photo into line art, and its lines are followed | brightness edges (Canny) | brightness edges (Canny) |
+| Face | the face is traced again at full resolution, and face landmarks redraw the eyes, brows and mouth | the face detector (YuNet) is trained on real faces and found none in this sample | same |
+| Other | clutter cleanup (193 removed), hair-flow lines (8 strokes) | clutter cleanup only runs with the line-drawing model, so it is off | same |
+| Result | 189 strokes · 56×100 mm · est. 27.7 min | 159 strokes · 100×93 mm · est. 25.2 min | 344 strokes · 100×99 mm · est. 51.2 min |
+
+### Photo
+
+<img src="assets/pipeline/photo.jpg" alt="Photo process: original, lines from the line-drawing model, face detail, clutter cleanup, smoothing and simplification, paper layout">
+
+Tracing a photo's brightness edges directly turns skin texture and shadows into lines. So after the background is removed, a line-drawing model (Informative Drawings) turns the photo into line art and its lines are followed (③). When a face is found, the face is traced again at full resolution, and for a frontal face 478 landmarks redraw the eyes, brows and closed mouth (⑦). Clutter cleanup (⑧) removes wrinkles and short faint lines on skin while keeping the eyes, nose, mouth and outline. Here it removed 193, leaving 243 strokes; joining nearby strokes gives 189.
+
+### Color illustration
+
+<img src="assets/pipeline/illustration.jpg" alt="Color illustration process: original, grayscale preprocessing, edge detection, skeleton strokes, smoothing and simplification, paper layout">
+
+An illustration already has clear outlines, so without background removal or the line-drawing model it is converted to grayscale and lightly blurred (②), then brightness edges are found (③). The edges are thinned to a one-pixel skeleton and turned into strokes (④, 610 strokes); merging double lines closer than the pen width, joining broken lines and smoothing leaves 180, and joining nearby strokes gives 159. If two areas of different color have similar brightness and the edge is missed, switch the edge mode to "색 차이" (color difference).
+
+### Black-and-white comic
+
+<img src="assets/pipeline/manga.jpg" alt="Black-and-white comic process: original, median preprocessing that removes screentone, edge detection, skeleton strokes, smoothing and simplification, paper layout">
+
+In a printed comic, every dot of screentone or print noise would become a short stroke. So a median blur (11 px at 800 px) removes small patterns before lines are found (②). The rest is the same as for an illustration. Panel borders and lettering are lines too and get drawn; to leave them out, ask the agent to remove them in the edit stage. This sample is a 1902 print with a lot of noise, so it has the most strokes of the three (344).
+
 ## Real drawings: fewer vertical marks at stroke ends
 
 Every time the pen touched down or lifted, it left a 2–3 mm vertical mark at the stroke end. At first these marks made the whole drawing look like a comb. Below are phone photos of paper the robot drew on. All four had uneven lighting flattened and contrast raised by the same rule.
@@ -347,7 +396,7 @@ Every time the pen touched down or lifted, it left a 2–3 mm vertical mark at t
 
 - **What did not help:** lifting at a slant and touching down from above left the start-point marks unchanged (② → ③). Test sheets also showed that touch-down speed (50–400 mm/min) has no effect on mark length.
 - **What helped:** pressing the whole line 1 mm less (`down_extra_mm` −0.4 → −1.4). The likely cause is that the pen tip is pushed up as pressure builds and drops back as it lifts, leaving the mark (inference).
-- **Cost:** lighter pressure means fainter lines. Strokes the camera counted as missing rose from 23 to 44, so missing lines are still being watched.
+- **Cost:** lighter pressure means fainter lines. That suits an underdrawing, but strokes the camera counted as missing rose from 23 to 44, so missing lines are still being watched.
 
 Measurement details are in [LOG/2026-11-16](LOG/2026-11-16-end-ticks-edge-rise.md), [11-18](LOG/2026-11-18-land-from-above.md) and [11-19](LOG/2026-11-19-depth-ladder.md) (Korean).
 

@@ -59,4 +59,18 @@ SOFTWARE.
 - **파일:** `assets/sample/sample-portrait.jpg` (원본을 긴 변 1400px로 줄임)
 - **출처:** Wikimedia Commons, "Sally Ride, First U.S. Woman in Space - GPN-2004-00019.jpg" (NASA), https://commons.wikimedia.org/wiki/File:Sally_Ride,_First_U.S._Woman_in_Space_-_GPN-2004-00019.jpg
 - **라이선스:** 퍼블릭 도메인 (NASA 제작물, Wikimedia Commons 표기 "Public domain")
-- **용도:** `assets/screenshots/`의 앱 화면 캡처에 쓴 예시 입력입니다. 앱이나 패키지에는 포함되지 않습니다.
+- **용도:** `assets/screenshots/`의 앱 화면 캡처와 `assets/pipeline/photo.jpg`에 쓴 예시 입력입니다. 앱이나 패키지에는 포함되지 않습니다.
+
+## 예시 일러스트 (README 이미지 종류별 과정)
+
+- **파일:** `assets/sample/sample-illustration.jpg` (투명 배경을 흰색으로 채우고 긴 변 1400px로 줄임)
+- **출처:** Wikimedia Commons, "Neko Wikipe-tan.png", 그린 사람 Kasuga (https://en.wikipedia.org/wiki/User:Kasuga~enwiki), https://commons.wikimedia.org/wiki/File:Neko_Wikipe-tan.png
+- **라이선스:** CC BY-SA 3.0 (https://creativecommons.org/licenses/by-sa/3.0/). 이 그림을 처리한 `assets/pipeline/illustration.jpg`도 같은 CC BY-SA 3.0으로 배포합니다.
+- **용도:** README의 컬러 일러스트 처리 과정 그림과 데모 영상의 예시 입력입니다. 앱이나 패키지에는 포함되지 않습니다.
+
+## 예시 만화 (README 이미지 종류별 과정)
+
+- **파일:** `assets/sample/sample-manga.jpg` (6칸 중 아래 줄 왼쪽 칸을 잘라 냄)
+- **출처:** Wikimedia Commons, "Tagosaku to Mokube no Tokyo Kenbutsu.jpg", 기타자와 라쿠텐(北澤楽天, 1876–1955) 『田吾作と杢兵衛の東京見物』(1902), https://commons.wikimedia.org/wiki/File:Tagosaku_to_Mokube_no_Tokyo_Kenbutsu.jpg
+- **라이선스:** 퍼블릭 도메인 (Wikimedia Commons 표기 "Public domain", 일본에서 2005년 저작권 만료)
+- **용도:** README의 흑백 만화 처리 과정 그림과 데모 영상의 예시 입력입니다. 앱이나 패키지에는 포함되지 않습니다.
