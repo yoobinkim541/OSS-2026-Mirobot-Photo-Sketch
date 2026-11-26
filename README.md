@@ -280,7 +280,7 @@ RViz 3D 환경이 있으면 GUI의 `고급` → [RViz 3D로 보기]로 로봇팔
 
 <table>
 <tr>
-<td align="center"><img src="assets/real-drawings/sources/professor-original.jpg" alt="교수님 초상 원본" width="200"><br>원본(본인 동의)</td>
+<td align="center"><img src="assets/real-drawings/sources/professor-original.jpg" alt="교수님 초상 원본" width="200"><br>원본</td>
 <td align="center"><img src="assets/real-drawings/2026-11-19-professor.jpg" alt="교수님 초상 실물 그림: 안경, 입, 옷깃 윤곽을 옅은 샤프 선으로 그림" width="400"><br>11-19 16:38 · 109획 · 14.5분 (1 mm 덜 누른 설정)</td>
 </tr>
 </table>
@@ -304,7 +304,6 @@ RViz 3D 환경이 있으면 GUI의 `고급` → [RViz 3D로 보기]로 로봇팔
 
 - ①~③: 인터넷에 공개된 무대 사진(원 촬영자 미확인).
 - ④: 인터넷에 공개된 가수 아이유 사진(원 촬영자 미확인).
-- 교수님 초상: 본인 동의를 받아 실었습니다.
 - 애니메이션: 『SPY×FAMILY』 장면(© 遠藤達哉/集英社・SPY×FAMILY製作委員会).
 
 ## 한계와 다음 단계

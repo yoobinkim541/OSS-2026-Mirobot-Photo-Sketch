@@ -282,7 +282,7 @@ Measurement details are in [LOG/2026-11-16](LOG/2026-11-16-end-ticks-edge-rise.m
 
 <table>
 <tr>
-<td align="center"><img src="assets/real-drawings/sources/professor-original.jpg" alt="Source portrait of the professor" width="200"><br>Source (with consent)</td>
+<td align="center"><img src="assets/real-drawings/sources/professor-original.jpg" alt="Source portrait of the professor" width="200"><br>Source</td>
 <td align="center"><img src="assets/real-drawings/2026-11-19-professor.jpg" alt="Real drawing of the professor: glasses, mouth and collar drawn in light pencil lines" width="400"><br>11-19 16:38 · 109 strokes · 14.5 min (pressing 1 mm less)</td>
 </tr>
 </table>
@@ -306,7 +306,6 @@ The source thumbnails are quoted at a small size (200 px on the long side) only 
 
 - ①–③: a stage photo published online (photographer unknown).
 - ④: a photo of the singer IU published online (photographer unknown).
-- Portrait of the professor: included with the professor's consent.
 - Anime: a scene from *SPY×FAMILY* (© Tatsuya Endo/Shueisha, SPY×FAMILY Project).
 
 ## Limits and next steps
