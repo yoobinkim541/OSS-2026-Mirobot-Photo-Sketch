@@ -304,7 +304,8 @@ Likely the September 30 run (inferred, 205 strokes), based on the line shapes fr
 
 The source thumbnails are quoted at a small size (200 px on the long side) only to compare the robot drawings with their originals. Copyright stays with each rights holder, and any of them will be removed on request.
 
-- ①–③ and ④: photos of the singer IU, published online; the original photographer could not be identified.
+- ①–③: a stage photo published online (photographer unknown).
+- ④: a photo of the singer IU published online (photographer unknown).
 - Portrait of the professor: included with the professor's consent.
 - Anime: a scene from *SPY×FAMILY* (© Tatsuya Endo/Shueisha, SPY×FAMILY Project).
 
