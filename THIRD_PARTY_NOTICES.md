@@ -78,6 +78,6 @@ SOFTWARE.
 ## 실물 그림 원본 썸네일 (README 실물 그림 비교)
 
 - **파일:** `assets/real-drawings/sources/` (긴 변 200px로 줄인 썸네일 4장)
-- **출처:** `stage-original.jpg`는 인터넷에 공개된 무대 사진(원 촬영자 미확인), `portrait-original.jpg`는 인터넷에 공개된 가수 아이유 사진(원 촬영자 미확인), `anime-original.jpg`는 『SPY×FAMILY』 애니메이션 장면(© 遠藤達哉/集英社・SPY×FAMILY製作委員会), `professor-original.jpg`는 로봇신문 「'젊은 로봇 공학자' (27) ETRI 최성록 박사」(2019-08-18, http://www.irobotnews.com/news/articleView.html?idxno=17997) 기사 사진입니다.
+- **출처:** `stage-original.jpg`는 인터넷에 공개된 가수 아이유 무대 사진(원 촬영자 미확인), `portrait-original.jpg`는 인터넷에 공개된 가수 아이유 사진(원 촬영자 미확인), `anime-original.jpg`는 『SPY×FAMILY』 애니메이션 장면(© 遠藤達哉/集英社・SPY×FAMILY製作委員会), `professor-original.jpg`는 로봇신문 「'젊은 로봇 공학자' (27) ETRI 최성록 박사」(2019-08-18, http://www.irobotnews.com/news/articleView.html?idxno=17997) 기사 사진입니다.
 - **라이선스:** 저작권은 각 권리자에게 있습니다. 이 저장소의 MIT 라이선스는 이 파일들에 적용되지 않으며, 권리자가 요청하면 내립니다.
 - **용도:** README에서 로봇이 그린 실물 그림과 원본을 나란히 비교하는 데만 씁니다. 앱이나 패키지에는 포함되지 않습니다.
